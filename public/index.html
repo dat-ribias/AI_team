@@ -3,12 +3,20 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Team · Control Room</title><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script></head>
 <body>
 <aside class="sidebar">
+  <button id="nav-toggle" class="nav-toggle" data-i18n-aria="ui.nav.toggle">☰</button>
   <a class="brand" href="/"><span class="brand-icon">⌘</span><span>AI TEAM<small>CONTROL ROOM</small></span></a>
   <div class="workspace-label" data-i18n="ui.nav.workspace"></div>
   <button class="nav active" id="overview">◉ &nbsp; <span data-i18n="ui.nav.overview"></span></button>
   <button class="nav" id="quota-nav">◷ &nbsp; <span data-i18n="ui.nav.members"></span></button>
   <button class="nav" id="security-nav">⛨ &nbsp; <span data-i18n="ui.nav.security"></span></button>
-  <div class="sidebar-heading"><span data-i18n="ui.nav.jobs"></span><button id="new-task" data-i18n-aria="ui.nav.newJob">＋</button></div>
+  <div class="sidebar-heading">
+    <span data-i18n="ui.nav.jobs"></span>
+    <div class="sidebar-heading-tools">
+      <button type="button" id="open-jobs-btn" class="sidebar-tool-btn" data-i18n-title="ui.jobs.openAll" title="Mở danh sách công việc (popup)">⤢</button>
+      <button type="button" id="new-task" class="sidebar-tool-btn" data-i18n-aria="ui.nav.newJob" title="Giao việc mới">＋</button>
+    </div>
+  </div>
+  <div class="session-bar"><select id="session-project" data-i18n-aria="ui.task.project"></select><div class="row-input"><select id="session-select" data-i18n-aria="ui.session.label"></select><button id="session-new" data-i18n-aria="ui.session.new">＋</button><button id="session-rename" data-i18n-aria="ui.session.rename">✎</button></div></div>
   <div id="job-list" class="job-list"></div>
   <div class="settings">
     <label><span data-i18n="ui.settings.language"></span><select id="lang-select"><option value="vi">Tiếng Việt</option><option value="ja">日本語</option><option value="en">English</option></select></label>
@@ -22,7 +30,7 @@
   <div class="notice" id="notice" hidden role="status"></div>
   <section class="metrics" id="metrics"></section>
   <div id="work-view">
-    <section class="panel network"><div class="panel-heading"><div><span class="eyebrow">THE TEAM</span><h2 data-i18n="ui.team.title"></h2></div><span class="muted" id="running-label"></span></div>
+    <section class="panel network"><div class="panel-heading"><div><span class="eyebrow">THE TEAM</span><h2 data-i18n="ui.team.title"></h2></div><div class="chat-tools"><span class="muted" id="running-label"></span><button id="flow-toggle" class="icon-btn" data-i18n-aria="ui.flow.toggle">▾</button></div></div><p class="flow-summary muted" id="flow-summary" hidden></p>
       <div class="network-body" id="flow"></div><div class="bench" id="bench"></div>
       <div class="network-footer"><span><i class="dot green"></i> <span data-i18n="ui.team.legendWorking"></span></span><span><i class="line used"></i> <span data-i18n="ui.team.legendUsed"></span></span><span><i class="line rework"></i> <span data-i18n="ui.team.legendRework"></span></span><span data-i18n="ui.team.legendHint"></span><button id="clear-filter" data-i18n="ui.team.showAll"></button></div>
     </section>
@@ -62,11 +70,15 @@
 <label for="profile-mcp" data-i18n="ui.profile.mcp"></label><textarea id="profile-mcp" rows="5" spellcheck="false" placeholder='{"gitnexus": {"command": "npx", "args": ["-y", "gitnexus", "mcp"]}}'></textarea><div class="row-input"><button type="button" id="import-mcp" data-i18n="ui.profile.mcpImport"></button></div><p class="muted" data-i18n="ui.profile.mcpNote"></p>
 <button class="primary" type="submit" id="save-profile" data-i18n="ui.profile.save"></button></form></dialog>
 <dialog id="slot-dialog"><form id="slot-form"><div class="dialog-heading"><h2 id="slot-title"></h2><button type="button" id="close-slot" data-i18n-aria="ui.common.close">×</button></div>
-<label for="slot-member" data-i18n="ui.slot.member"></label><select id="slot-member"></select><p class="muted" id="slot-info"></p>
+<div id="slot-live" class="slot-live"></div><label for="slot-member" data-i18n="ui.slot.member"></label><select id="slot-member"></select><p class="muted" id="slot-info"></p>
 <label for="slot-prompt" data-i18n="ui.profile.prompt"></label><textarea id="slot-prompt" rows="10" maxlength="8000" data-i18n-placeholder="ui.profile.promptPlaceholder"></textarea><p class="muted" data-i18n="ui.slot.promptNote"></p>
 <div class="login-actions"><button type="button" id="slot-profile" data-i18n="ui.slot.fullProfile"></button><button type="button" id="slot-filter" data-i18n="ui.slot.filter"></button><button type="button" id="slot-remove" class="danger" data-i18n="ui.slot.remove"></button></div>
 <button class="primary" type="submit" data-i18n="ui.slot.save"></button></form></dialog>
 <dialog id="merge-dialog"><div class="dialog-heading"><h2 data-i18n="ui.merge.title"></h2><button id="close-merge" data-i18n-aria="ui.common.close">×</button></div><div id="merge-check"></div>
 <label for="merge-confirm" id="merge-confirm-label" hidden></label><input id="merge-confirm" autocomplete="off" hidden>
 <div class="login-actions"><button id="merge-view-diff" data-i18n="ui.common.viewDiff"></button><button class="primary" id="merge-go" data-i18n="ui.merge.go"></button></div></dialog>
+<dialog id="jobs-dialog"><div class="dialog-heading"><div><h2 data-i18n="ui.jobs.title"></h2><small id="jobs-dialog-sub" class="muted"></small></div><div class="dialog-tools"><button type="button" id="jobs-dialog-new" class="primary-ghost" data-i18n="ui.header.newJob"></button><button type="button" id="close-jobs" data-i18n-aria="ui.common.close">×</button></div></div>
+<div class="jobs-dialog-toolbar"><div class="jobs-search-wrap"><span class="search-icon">🔍</span><input type="search" id="jobs-search" data-i18n-placeholder="ui.jobs.searchPlaceholder"></div>
+<div class="jobs-filter-tabs" role="tablist"><button type="button" class="tab-btn active" data-job-filter="all"><span data-i18n="ui.jobs.filterAll"></span> <span class="tab-count" id="count-all"></span></button><button type="button" class="tab-btn" data-job-filter="running"><span data-i18n="ui.jobs.filterRunning"></span> <span class="tab-count" id="count-running"></span></button><button type="button" class="tab-btn" data-job-filter="ready"><span data-i18n="ui.jobs.filterReady"></span> <span class="tab-count" id="count-ready"></span></button><button type="button" class="tab-btn" data-job-filter="done"><span data-i18n="ui.jobs.filterDone"></span> <span class="tab-count" id="count-done"></span></button><button type="button" class="tab-btn" data-job-filter="cancelled"><span data-i18n="ui.jobs.filterCancelled"></span> <span class="tab-count" id="count-cancelled"></span></button></div></div>
+<div id="jobs-dialog-list" class="jobs-dialog-list"></div></dialog>
 </body></html>

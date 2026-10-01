@@ -319,3 +319,16 @@ test('fast path escalates to the Manager when tests fail; risk gate forces a rev
   const r2 = await settle(team2, j2.id, 'ready');
   assert.equal(r2.reviewed, r2.revision); assert(!r2.skipped.includes('review'));
 });
+
+test('chat sessions per project; fast path picks the strongest member', async t => {
+  const f = await fixture();
+  f.config.agents.find(a => a.id === 'codex-2').tier = 'weak'; f.config.agents.find(a => a.id === 'codex-4').tier = 'strong';
+  const team = new Team(f.config, f.data); t.after(() => team.close());
+  const s = team.createSession({ project: 'test', name: 'UI' });
+  const job = await team.create({ project: 'test', goal: 'Update hello text', mode: 'fast', sessionId: s.id });
+  const ready = await settle(team, job.id, 'ready');
+  assert.equal(ready.sessionId, s.id); assert.equal(ready.tasks[0].ranBy, 'codex-4');
+  const other = await team.create({ project: 'test', goal: 'x', mode: 'full' });
+  assert.notEqual(other.sessionId, undefined);
+  team.renameSession(s.id, 'UI work'); assert(team.state().sessions.some(x => x.name === 'UI work'));
+});

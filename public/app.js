@@ -230,8 +230,10 @@ function drawState() {
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
   ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
-  $('job-list').innerHTML = state.jobs.map(j => `<button class="job-button ${j.id === selected ? 'selected' : ''}" data-job="${esc(j.id)}"><strong>${esc(j.goal)}</strong><small>${esc(j.id)} · ${esc(statusLabel(j.status))}</small></button>`).join('') || `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`;
-  document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => attempt(async () => { selected = b.dataset.job; events = []; await refresh(); }));
+  drawSessions();
+  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${j.current ? ' · ' + (names[j.current.agent] || j.current.agent) + ' → ' + j.current.stage : ''}` : t('ui.flow.summaryIdle'); }
+  drawJobsList();
+  drawJobsDialog();
   drawFlow();
   document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => openSlot(b.dataset.slot, b.dataset.agent || null));
   document.querySelectorAll('[data-bench]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.bench)));
@@ -241,6 +243,134 @@ function drawState() {
   $('submit-task').disabled = !state.projects.length;
   drawInspector(); drawQuota(); drawLogin();
 }
+
+let jobsFilter = 'all', jobsSearchQuery = '';
+
+function drawJobsList() {
+  const sessionJobs = state.jobs.filter(j => !curProject || j.project === curProject && (!curSession || j.sessionId === curSession));
+  const maxSidebar = 3;
+  const showList = sessionJobs.slice(0, maxSidebar);
+  const hasMore = sessionJobs.length > maxSidebar;
+
+  $('job-list').innerHTML = (showList.length ? showList.map(j => `
+    <button class="job-button ${j.id === selected ? 'selected' : ''}" data-job="${esc(j.id)}" title="${esc(j.goal)}">
+      <span class="job-dot-status ${j.status}"></span>
+      <div class="job-button-content">
+        <strong>${esc(j.goal)}</strong>
+        <small><span class="job-id">#${esc(j.id.slice(0, 8))}</span> · <span class="job-status-tag ${j.status}">${esc(statusLabel(j.status))}</span></small>
+      </div>
+    </button>
+  `).join('') : `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`)
+  + (hasMore ? `<button type="button" class="sidebar-more-jobs" id="sidebar-more-jobs"><span>⤢</span> ${esc(t('ui.jobs.viewAll', { n: sessionJobs.length }))}</button>` : '');
+
+  document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => attempt(async () => {
+    selected = b.dataset.job;
+    events = [];
+    if ($('jobs-dialog')?.open) $('jobs-dialog').close();
+    await refresh();
+  }));
+
+  const moreBtn = $('sidebar-more-jobs');
+  if (moreBtn) moreBtn.onclick = () => openJobsDialog();
+}
+
+function openJobsDialog() {
+  $('jobs-dialog').showModal();
+  drawJobsDialog();
+}
+
+function drawJobsDialog() {
+  if (!$('jobs-dialog')?.open) return;
+  const allJobs = state.jobs || [];
+  const q = (jobsSearchQuery || '').trim().toLowerCase();
+
+  const counts = {
+    all: allJobs.length,
+    running: allJobs.filter(j => ['running', 'queued'].includes(j.status)).length,
+    ready: allJobs.filter(j => j.status === 'ready').length,
+    done: allJobs.filter(j => ['done', 'merged'].includes(j.status)).length,
+    cancelled: allJobs.filter(j => ['cancelled', 'blocked', 'failed'].includes(j.status)).length,
+  };
+
+  if ($('count-all')) $('count-all').textContent = counts.all;
+  if ($('count-running')) $('count-running').textContent = counts.running;
+  if ($('count-ready')) $('count-ready').textContent = counts.ready;
+  if ($('count-done')) $('count-done').textContent = counts.done;
+  if ($('count-cancelled')) $('count-cancelled').textContent = counts.cancelled;
+  if ($('jobs-dialog-sub')) $('jobs-dialog-sub').textContent = t('ui.metric.jobsNote', { running: counts.running, ready: counts.ready });
+
+  const filtered = allJobs.filter(j => {
+    if (jobsFilter === 'running' && !['running', 'queued'].includes(j.status)) return false;
+    if (jobsFilter === 'ready' && j.status !== 'ready') return false;
+    if (jobsFilter === 'done' && !['done', 'merged'].includes(j.status)) return false;
+    if (jobsFilter === 'cancelled' && !['cancelled', 'blocked', 'failed'].includes(j.status)) return false;
+    if (q) {
+      const matchGoal = (j.goal || '').toLowerCase().includes(q);
+      const matchId = (j.id || '').toLowerCase().includes(q);
+      const matchBranch = (j.branch || '').toLowerCase().includes(q);
+      const matchProject = (j.project || '').toLowerCase().includes(q);
+      const matchAgent = (names[j.current?.agent] || j.current?.agent || '').toLowerCase().includes(q);
+      if (!matchGoal && !matchId && !matchBranch && !matchProject && !matchAgent) return false;
+    }
+    return true;
+  });
+
+  const listEl = $('jobs-dialog-list');
+  if (!listEl) return;
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.jobs.noMatch'))}</b></div>`;
+    return;
+  }
+
+  listEl.innerHTML = filtered.map(j => {
+    const isSelected = j.id === selected;
+    const curAgent = j.current ? (names[j.current.agent] || j.current.agent) : null;
+    const tasksDone = j.taskIndex ?? 0;
+    const tasksTotal = j.tasks?.length ?? 0;
+    return `
+      <div class="job-card ${isSelected ? 'selected' : ''}" data-job-select="${esc(j.id)}">
+        <div class="job-card-head">
+          <div class="job-card-tags">
+            <span class="tag">#${esc(j.id.slice(0, 8))}</span>
+            ${j.project ? `<span class="tag">📁 ${esc(j.project)}</span>` : ''}
+            <span class="status ${esc(j.status)}">${esc(statusLabel(j.status))}</span>
+            ${isSelected ? `<span class="tag" style="color:var(--mint);border-color:var(--mint);">✓ ${esc(t('ui.jobs.selected'))}</span>` : ''}
+          </div>
+          <time class="muted">${clock(j.createdAt)}</time>
+        </div>
+        <h3 class="job-card-goal">${esc(j.goal)}</h3>
+        <div class="job-card-meta">
+          <span>⎇ <b>${esc(j.branch || 'main')}</b></span>
+          ${j.stage ? `<span>⚙ ${esc(j.stage)}</span>` : ''}
+          ${curAgent ? `<span>👤 <b>${esc(curAgent)}</b></span>` : ''}
+          ${tasksTotal ? `<span>📋 ${tasksDone}/${tasksTotal} tasks</span>` : ''}
+          ${j.round ? `<span>↺ R${esc(j.round)}</span>` : ''}
+        </div>
+        <div class="job-card-actions">
+          <button type="button" class="${isSelected ? 'primary-ghost' : 'primary'}" data-job-open="${esc(j.id)}">
+            ${isSelected ? esc(t('ui.jobs.selected')) : esc(t('ui.jobs.select'))} →
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('[data-job-open], [data-job-select]').forEach(el => {
+    el.onclick = e => {
+      e.stopPropagation();
+      const id = el.dataset.jobOpen || el.dataset.jobSelect;
+      if (id) {
+        attempt(async () => {
+          selected = id;
+          events = [];
+          $('jobs-dialog').close();
+          view('work');
+          await refresh();
+        });
+      }
+    };
+  });
+}
 const ROLE_KEYS = ['manager', 'builder', 'reviewer', 'verifier'];
 const rolesOf = (id, r = state.roster) => ROLE_KEYS.filter(k => k === 'builder' ? r.builders.includes(id) : r[k] === id);
 const rolesText = id => rolesOf(id).map(roleLabel).join(' / ') || roleLabel('none');
@@ -248,8 +378,30 @@ const rolesText = id => rolesOf(id).map(roleLabel).join(' / ') || roleLabel('non
 const roleChecks = a => `<div class="role-checks">${ROLE_KEYS.map(k => `<label class="role-chip"><input type="checkbox" data-role-toggle="${esc(a.id)}" value="${k}" ${rolesOf(a.id).includes(k) ? 'checked' : ''} ${k === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}> ${esc(roleLabel(k))}</label>`).join('')}</div>`;
 // Bấm ô trên sơ đồ: đổi member cho vai trò đó + sửa system prompt của member ngay tại chỗ.
 let slot = null;
+// Phiên chat theo dự án (lưu lựa chọn theo trình duyệt).
+let curProject = store.get('project') || '', curSession = store.get('session') || '';
+function drawSessions() {
+  if (!state.projects.some(p => p.id === curProject)) curProject = state.projects[0]?.id || '';
+  const list = state.sessions.filter(x => x.project === curProject);
+  if (!list.some(x => x.id === curSession)) curSession = list.at(-1)?.id || '';
+  $('session-project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join('');
+  $('session-project').value = curProject;
+  $('session-select').innerHTML = list.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('') || `<option value="">${esc(t('ui.session.none'))}</option>`;
+  $('session-select').value = curSession;
+}
+// Bảng "node đang làm gì": dựng từ events đã có, không gọi thêm AI.
+function slotLive(id) {
+  const job = state.jobs.find(j => j.id === selected);
+  if (!id || !job) return '';
+  const mine = events.filter(e => e.from === id);
+  const acts = mine.filter(e => e.type === 'ACTIVITY').slice(-5), res = mine.filter(e => ['RESULT', 'REVIEW_RESULT', 'CONCLUSION', 'BLOCKER'].includes(e.type)).at(-1);
+  const cur = job.current?.agent === id ? job.current : null;
+  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${acts.length ? `<ul>${acts.map(e => `<li><code>${esc(cut(e.summary, 140))}</code></li>`).join('')}</ul>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
+}
 function openSlot(kind, current) {
   slot = { kind, current };
+  $('slot-live').innerHTML = slotLive(current);
+  $('slot-title').textContent = t(current || kind !== 'builder' ? 'ui.slot.title' : 'ui.slot.addBuilderTitle', { role: roleLabel(kind) });
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
     const h = agentHealth(a);
     const healthText = h ? ` · ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
@@ -456,6 +608,9 @@ function drawTimeline() {
     const mine = e.from === 'user', cls = [mine && 'mine', e.from === 'controller' && 'from-system', e.type === 'BLOCKER' && 'alert', e.type === 'QUESTION' && 'question', ['READY_FOR_MERGE', 'MERGED'].includes(e.type) && 'success'].filter(Boolean).join(' ');
     return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
   }).join('') : `<div class="empty"><span class="empty-icon">◎</span><b>${esc(t('ui.timeline.emptyTitle'))}</b><span>${esc(t('ui.timeline.emptyText'))}</span></div>`;
+  // Agent đang chạy: bong bóng "đang soạn" ba chấm.
+  const cur = job?.status === 'running' && job.current;
+  if (cur && (!filter || filter === cur.agent)) timeline.insertAdjacentHTML('beforeend', `<article class="chat-msg typing">${avatar(cur.agent)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[cur.agent] || cur.agent)}</strong><span class="chat-to">${esc(t('ui.chat.typing', { stage: cur.stage }))}</span></div><div class="chat-bubble"><span class="dots"><i></i><i></i><i></i></span></div></div></article>`);
   if (atBottom) timeline.scrollTop = timeline.scrollHeight;
 }
 let memberView = store.get('memberView') || 'compact';
@@ -637,7 +792,18 @@ async function refresh() {
 const openTask = () => $('task-dialog').showModal();
 ['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
 $('close-dialog').onclick = () => $('task-dialog').close(); $('close-diff').onclick = () => $('diff-dialog').close();
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value, files: pending.goal, mode: $('task-mode').value }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+if ($('open-jobs-btn')) $('open-jobs-btn').onclick = openJobsDialog;
+if ($('close-jobs')) $('close-jobs').onclick = () => $('jobs-dialog').close();
+if ($('jobs-dialog-new')) $('jobs-dialog-new').onclick = () => { $('jobs-dialog').close(); openTask(); };
+if ($('jobs-search')) $('jobs-search').oninput = e => { jobsSearchQuery = e.target.value; drawJobsDialog(); };
+document.querySelectorAll('[data-job-filter]').forEach(b => {
+  b.onclick = () => {
+    jobsFilter = b.dataset.jobFilter;
+    document.querySelectorAll('[data-job-filter]').forEach(x => x.classList.toggle('active', x === b));
+    drawJobsDialog();
+  };
+});
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value, files: pending.goal, mode: $('task-mode').value, sessionId: $('project').value === curProject ? curSession : undefined }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
 $('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value, files: pending.message }); $('message').value = ''; pending.message = []; drawAttach('message'); await refresh(); }); };
 $('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); };
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });
@@ -714,6 +880,14 @@ async function drawSkills(refresh) {
 }
 $('skills-box').ontoggle = () => { if ($('skills-box').open) attempt(() => drawSkills()); };
 $('skills-refresh').onclick = () => attempt(() => drawSkills(true));
+const applyNav = () => document.body.classList.toggle('nav-collapsed', store.get('nav') === 'min');
+$('nav-toggle').onclick = () => { store.set('nav', store.get('nav') === 'min' ? '' : 'min'); applyNav(); }; applyNav();
+const applyFlow = () => { const min = store.get('flow') === 'min'; document.querySelector('.network').classList.toggle('collapsed', min); $('flow-toggle').textContent = min ? '▸' : '▾'; $('flow-summary').hidden = !min; };
+$('flow-toggle').onclick = () => { store.set('flow', store.get('flow') === 'min' ? '' : 'min'); applyFlow(); }; applyFlow();
+$('session-project').onchange = () => { curProject = $('session-project').value; curSession = ''; store.set('project', curProject); drawState(); };
+$('session-select').onchange = () => { curSession = $('session-select').value; store.set('session', curSession); drawState(); };
+$('session-new').onclick = () => attempt(async () => { const name = prompt(t('ui.session.newPrompt')); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); await refresh(); });
+$('session-rename').onclick = () => attempt(async () => { if (!curSession) return; const name = prompt(t('ui.session.renamePrompt'), state.sessions.find(x => x.id === curSession)?.name || ''); if (name) { await api(`sessions/${curSession}/rename`, { name }); await refresh(); } });
 $('close-slot').onclick = () => $('slot-dialog').close();
 $('slot-member').onchange = slotMember;
 $('slot-form').onsubmit = e => { e.preventDefault(); attempt(saveSlot); };

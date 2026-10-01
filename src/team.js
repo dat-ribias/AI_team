@@ -120,6 +120,7 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS quotas (agent TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS quota_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project TEXT NOT NULL, name TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', createdAt TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
     this.active = null; this.closed = false; this.refreshing = false; this.waitingReason = null;
@@ -182,6 +183,23 @@ export class Team extends EventEmitter {
   }
   project(id) { const p = this.config.projects.find(p => p.id === id); if (!p) throw new Error(msg("srv.team.project_chua_dang_ky")); return p; }
   agent(id) { const a = this.config.agents.find(a => a.id === id); if (!a) throw new Error(msg("srv.team.agent_khong_ton_tai")); return a; }
+  // Phiên chat theo dự án: mỗi công việc thuộc một phiên; notes để dành cho quản lý memory sau này.
+  sessions() { return this.db.prepare('SELECT id, project, name, notes, createdAt FROM sessions ORDER BY createdAt').all(); }
+  createSession({ project, name }) {
+    this.project(project);
+    const n = String(name || '').trim().slice(0, 80) || msg("srv.team.session_default");
+    const s = { id: randomUUID().slice(0, 8), project, name: n, notes: '', createdAt: now() };
+    this.db.prepare('INSERT INTO sessions VALUES (?,?,?,?,?)').run(s.id, s.project, s.name, s.notes, s.createdAt); this.emit('change'); return s;
+  }
+  renameSession(id, name) {
+    const n = String(name || '').trim().slice(0, 80); if (!n) throw new Error(msg("srv.team.session_name"));
+    if (!this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(n, id).changes) throw new Error(msg("srv.team.session_missing")); this.emit('change'); return { id, name: n };
+  }
+  sessionFor(project, sessionId) {
+    const s = sessionId && this.db.prepare('SELECT id, project FROM sessions WHERE id=?').get(sessionId);
+    if (s) { if (s.project !== project) throw new Error(msg("srv.team.session_missing")); return s.id; }
+    return (this.sessions().find(x => x.project === project) || this.createSession({ project })).id;
+  }
   jobs() { return this.db.prepare('SELECT body FROM jobs ORDER BY rowid DESC').all().map(r => JSON.parse(r.body)); }
   get(id) { const r = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(id); if (!r) throw new Error(msg("srv.team.task_khong_ton_tai")); return JSON.parse(r.body); }
   save(job) { job.updatedAt = now(); this.db.prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, JSON.stringify(job)); this.emit('change'); return job; }
@@ -200,14 +218,14 @@ export class Team extends EventEmitter {
     return { cpuPercent: this.cpuPercent, ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
   state() {
-    return { demo: !!this.config.demo, roster: roster(this.config), jobs: this.jobs(), projects: this.config.projects.map(p => ({ id: p.id, path: p.path, tests: p.tests, network: p.network === true })),
+    return { demo: !!this.config.demo, roster: roster(this.config), sessions: this.sessions(), jobs: this.jobs(), projects: this.config.projects.map(p => ({ id: p.id, path: p.path, tests: p.tests, network: p.network === true })),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: this.active?.agent === a.id ? 'working' : 'idle', quota: this.quota(a.id) })),
       resources: { ...this.sampleResources(), maxAgents: 1, active: this.active ? 1 : 0, waitingReason: this.waitingReason },
     };
   }
-  async create({ project, goal, files, mode = 'full' }) {
+  async create({ project, goal, files, mode = 'full', sessionId }) {
     if (typeof goal !== 'string' || !goal.trim() || goal.length > 20000) throw new Error(msg("srv.team.muc_tieu_can_tu_1_20"));
     if (Array.isArray(files) && files.length > 10) throw new Error(msg("srv.team.attach_limit"));
     const p = this.project(project);
@@ -226,6 +244,7 @@ export class Team extends EventEmitter {
     await git(root, ['worktree', 'add', '-b', branch, worktree, base]);
     const job = { id, project, goal: goal.trim(), status: 'queued', stage: 'plan', branch, baseBranch, base, worktree,
       roster: members, createdAt: now(), round: 0, tasks: [], taskIndex: 0, reports: [], messages: [], revision: base, reviewed: null, verified: null, tested: null };
+    job.sessionId = this.sessionFor(project, sessionId);
     const names = await this.attach(job, files);
     // Bộ định tuyến không dùng AI: việc ngắn, không đụng phần nhạy cảm → 1 Builder làm luôn, không gọi Manager.
     const route = routeGoal(job.goal, mode, names.length);
@@ -309,7 +328,8 @@ export class Team extends EventEmitter {
     const checker = id => [members.reviewer, members.verifier].includes(id);
     if (fits(task.agent) && !checker(task.agent)) return task.agent;
     const remaining = id => this.remaining(id) ?? 50;
-    const pool = members.builders.filter(fits).sort((x, y) => checker(x) - checker(y) || level(x) - level(y) || remaining(y) - remaining(x));
+    // Đường nhanh chỉ có 1 lượt AI → chọn người mạnh nhất còn quota; còn lại để dành người mạnh cho việc khó.
+    const pool = members.builders.filter(fits).sort((x, y) => checker(x) - checker(y) || (job.fast ? level(y) - level(x) : level(x) - level(y)) || remaining(y) - remaining(x));
     if (fits(task.agent) && (!pool.length || checker(pool[0]))) return task.agent;
     if (pool.length) return pool[0];
     // Người mạnh hết quota/đang tắt: tăng mức suy luận cho người còn quota nếu nhờ đó đủ năng lực.

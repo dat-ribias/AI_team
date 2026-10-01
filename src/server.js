@@ -97,6 +97,9 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' }); res.write('data: {}\n\n'); clients.add(res);
       req.on('close', () => clients.delete(res)); return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/sessions') return send(res, 201, team.createSession(await body(req)));
+    const sessionRename = /^\/api\/sessions\/([a-z0-9-]+)\/rename$/.exec(url.pathname);
+    if (req.method === 'POST' && sessionRename) return send(res, 200, team.renameSession(sessionRename[1], (await body(req)).name));
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
