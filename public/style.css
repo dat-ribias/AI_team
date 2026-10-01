@@ -147,3 +147,4 @@ body.chat-open::after{content:"";position:fixed;inset:0;background:#080c12bb;z-i
 .health-dot-inline.unknown{background:var(--line)}
 
 @keyframes pulseHealth{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.85)}}
+.step.skipped{opacity:.55;text-decoration:none}

@@ -26,6 +26,26 @@ export const levelOf = (agent, effort) => Math.min(5, tiers[tierOf(agent)] + (ST
 const ROLE_KEYS = ['manager', 'builder', 'reviewer', 'verifier'];
 // Tổng token của một sự kiện usage (Codex/Claude/Antigravity đặt tên trường khác nhau).
 const usageTokens = u => !u || typeof u !== 'object' ? 0 : Number(u.total_tokens) || ['input_tokens', 'output_tokens', 'thinking_tokens', 'reasoning_output_tokens'].reduce((s, k) => s + (Number(u[k]) || 0), 0);
+// Định tuyến bằng luật (0 token): mode 'fast' | 'full' | 'auto'. Auto chỉ chọn đường nhanh khi mục tiêu ngắn và không có dấu hiệu rủi ro.
+const RISKY = /auth|login|password|passwd|token|secret|credential|permission|quyền|bảo mật|security|migrat|database|schema|\bdb\b|xóa|delete|drop|deploy|production|payment|thanh toán|refactor|kiến trúc|architecture|toàn bộ|whole project|nhiều file|many files|rewrite|viết lại/i;
+const RESEARCHY = /^(?!.*\b(fix|sửa|implement|thêm|add|tạo|create|update|cập nhật|đổi|change)\b).*(review|kiểm tra|nghiên cứu|so sánh|điều tra|tìm hiểu|giải thích|đánh giá|research|investigate|compare|explain|audit|analy[sz]e|phân tích|tại sao|why)/is;
+export function routeGoal(goal, mode = 'full', attachments = 0) {
+  const kind = RESEARCHY.test(goal) ? 'research' : 'code';
+  if (mode === 'fast') return { fast: true, kind, reason: 'mode=fast' };
+  if (mode !== 'auto') return { fast: false, kind, reason: `mode=${mode}` };
+  if (goal.length > 400) return { fast: false, kind, reason: 'goal > 400 chars' };
+  if (attachments > 3) return { fast: false, kind, reason: 'many attachments' };
+  const risky = RISKY.exec(goal);
+  if (risky) return { fast: false, kind, reason: `risky keyword: ${risky[0]}` };
+  return { fast: true, kind, reason: 'short, no risky keywords' };
+}
+// Nén output lệnh trước khi đưa lại cho AI: giữ dòng lỗi + phần cuối (kiểu context-compress, không cần thư viện).
+export function compressOutput(text, max = 4000) {
+  const lines = String(text).split(/\r?\n/).filter(l => l.trim());
+  const important = lines.filter(l => /fail|error|✗|✖|not ok|assert|expected|received|exception|traceback|panic|\bat .+:\d+/i.test(l)).slice(0, 60);
+  const out = [...new Set([...important, '…', ...lines.slice(-40)])].join('\n');
+  return out.length > max ? out.slice(0, max / 2) + '\n…\n' + out.slice(-max / 2) : out;
+}
 export const rolesOf = (r, id) => ROLE_KEYS.filter(k => k === 'builder' ? r.builders.includes(id) : r[k] === id);
 const defaultSensitive = String.raw`(^|/)(\.env|\.github/|migrations?/|dockerfile|docker-compose|package(-lock)?\.json$|pnpm-lock|yarn\.lock|[^/]*(secret|credential|auth|password|token|permission)[^/]*)`;
 const stageGuide = {
@@ -48,7 +68,7 @@ Avoid giving builder work to the members who review or verify when another build
 Write every instruction so the member can finish without asking: files/areas, expected behaviour, done criteria.
 Set risk for the whole change: high if it touches auth, permissions, payments, data deletion, migrations, secrets, CI/deploy or public APIs, or likely exceeds ~300 changed lines; medium for ordinary behaviour changes; low for docs, tests or cosmetics.
 Choose "kind": "code" when the goal needs repository changes; "research" when it asks to investigate, compare, audit, explain or decide (no file changes; each task returns findings with evidence and the team ends with a conclusion instead of a merge).
-Choose "rigor" for the process: "light" = trivial, low-risk work (all tasks difficulty <= 2, risk low): skips the separate verify step; "standard" = test + review + verify; "strict" = for risky or hard work: reviewers are told to be adversarial and the merge needs typed confirmation. The controller upgrades "light" to "standard" if the conditions do not hold, and tests always run for code.
+Choose "rigor" for the process. Every AI call costs quota, so pick the cheapest one that is safe: "light" = trivial, low-risk work (all tasks difficulty <= 2, risk low): tests only, no AI review unless the controller's risk gate (sensitive files, deletions, large diff) finds a reason; "standard" = tests + one AI review, and a second verify only if the risk gate asks for it; "strict" = risky or hard work: adversarial review + verify and the merge needs typed confirmation. Prefer one builder; split into several tasks only for genuinely separate workstreams. The controller upgrades "light" to "standard" if the conditions do not hold, and tests always run for code.
 In a rework round, address every review finding and failed test listed in reports.
 Ask before guessing: if the goal is ambiguous, contradictory, or missing a decision that changes scope, cost or risk (which system, which data, expected output, acceptance criteria), return status "needs_input" with 1-5 short, specific questions and no tasks. The human answers in "messages"; then plan. Do not ask about details you can find in the repository yourself.`,
   research: 'Investigate exactly what the task asks. Do not edit files. Back every finding with evidence: file paths with line numbers, commands you ran and their output, or URLs. Separate facts from inference, state your confidence, and list what you could not verify.',
@@ -187,7 +207,7 @@ export class Team extends EventEmitter {
       resources: { ...this.sampleResources(), maxAgents: 1, active: this.active ? 1 : 0, waitingReason: this.waitingReason },
     };
   }
-  async create({ project, goal, files }) {
+  async create({ project, goal, files, mode = 'full' }) {
     if (typeof goal !== 'string' || !goal.trim() || goal.length > 20000) throw new Error(msg("srv.team.muc_tieu_can_tu_1_20"));
     if (Array.isArray(files) && files.length > 10) throw new Error(msg("srv.team.attach_limit"));
     const p = this.project(project);
@@ -207,7 +227,13 @@ export class Team extends EventEmitter {
     const job = { id, project, goal: goal.trim(), status: 'queued', stage: 'plan', branch, baseBranch, base, worktree,
       roster: members, createdAt: now(), round: 0, tasks: [], taskIndex: 0, reports: [], messages: [], revision: base, reviewed: null, verified: null, tested: null };
     const names = await this.attach(job, files);
-    this.save(job); this.event(id, 'user', members.manager, 'GOAL', goal, names.length ? { attachments: names } : null); this.kick(); return job;
+    // Bộ định tuyến không dùng AI: việc ngắn, không đụng phần nhạy cảm → 1 Builder làm luôn, không gọi Manager.
+    const route = routeGoal(job.goal, mode, names.length);
+    if (route.fast) {
+      Object.assign(job, { fast: true, kind: route.kind, rigor: 'light', risk: 'low', stage: 'implement', skipped: ['plan'], tasks: [{ agent: null, difficulty: 2, instruction: job.goal }] });
+    }
+    this.save(job); this.event(id, 'user', members.manager, 'GOAL', goal, names.length ? { attachments: names } : null);
+    this.event(id, 'controller', 'team', 'ROUTE', msg(route.fast ? "srv.team.route_fast" : "srv.team.route_full", { 0: route.reason }), route); this.kick(); return job;
   }
   // .ai-team/ (file đính kèm, prompt) nằm trong worktree nhưng git luôn bỏ qua.
   async ensureExclude(worktree) {
@@ -303,8 +329,21 @@ export class Team extends EventEmitter {
     const members = job.roster || roster(this.config);
     this.active.agent = agentId; job.current = { agent: agentId, stage, startedAt: now() }; this.save(job);
     const started = Date.now(); let tokens = 0;
-    const context = JSON.stringify({ goal: job.goal, instructions: instruction, base: job.base, revision: job.revision,
-      reports: job.reports.slice(-12), messages: job.messages, attachments: job.attachments?.length ? { note: 'Files attached by the human, relative to the worktree. Open them (images too) when relevant.', files: job.attachments } : undefined, kind: job.kind || 'code', rigor: job.rigor || 'standard', ...(stage === 'plan' ? { round: job.round, builders: this.members(members.builders, members), skillLibrary: this.skills().slice(0, 120).map(s => ({ name: s.name, description: s.description })) } : {}) });
+    // Prompt gọn theo vai: mỗi bước chỉ nhận đúng thứ nó cần, không kéo theo cả lịch sử (Git là bộ nhớ chung).
+    const brief = r => ({ agent: r.agent, stage: r.stage, status: r.status, verdict: r.verdict, summary: String(r.summary || '').slice(0, 1500), findings: (r.findings || []).slice(0, 10), ...(r.output ? { output: r.output } : {}), ...(r.sources ? { sources: r.sources.slice(0, 15), conclusion: String(r.conclusion || '').slice(0, 1500) } : {}) });
+    const lastChecks = job.reports.filter(r => ['review', 'verify', 'test'].includes(r.stage)).slice(-3).map(brief);
+    const attachments = job.attachments?.length ? { note: 'Files attached by the human, relative to the worktree. Open them (images too) when relevant.', files: job.attachments } : undefined;
+    const common = { goal: job.goal, instructions: instruction, kind: job.kind || 'code', rigor: job.rigor || 'standard', messages: job.messages, attachments };
+    let scoped;
+    if (stage === 'plan') scoped = { round: job.round, ...(job.round ? { lastChecks } : {}), builders: this.members(members.builders, members), skillLibrary: this.skills().slice(0, 120).map(s => ({ name: s.name, description: s.description })) };
+    else if (['implement', 'research'].includes(stage)) scoped = { done: job.tasks.slice(0, job.taskIndex).map(t => ({ task: t.instruction.slice(0, 300), by: t.ranBy })), ...(job.round ? { lastChecks } : {}) };
+    else if (['review', 'verify'].includes(stage)) scoped = { acceptance: job.planSummary, diff: `${job.base}..${job.revision}`,
+      changedFiles: job.kind === 'research' ? undefined : (await git(job.worktree, ['diff', '--stat', job.base, job.revision])).split('\n').slice(-40).join('\n'),
+      tests: job.kind === 'research' ? undefined : job.tested === job.revision ? 'all configured test commands passed on this revision' : 'not run',
+      research: job.kind === 'research' ? job.reports.filter(r => r.stage === 'research').map(brief) : undefined,
+      review: stage === 'verify' ? job.reports.filter(r => r.stage === 'review').slice(-1).map(brief) : undefined };
+    else scoped = { reports: job.reports.slice(-12).map(brief) };
+    const context = JSON.stringify({ ...common, ...scoped });
     const shape = stage === 'plan'
       ? `{"summary":"plan and delegation rationale","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task"}],"reviewSkills":["optional skills for the reviewer/verifier"],"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
       : stage === 'research' || stage === 'final' && job.kind === 'research'
@@ -372,12 +411,36 @@ export class Team extends EventEmitter {
         onLine: (line, stream) => this.event(job.id, 'controller', manager, 'TEST_OUTPUT', line.slice(0, 8000), { stream }) });
       this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision: job.revision });
       if (result.code !== 0) {
-        job.reports.push({ stage: 'test', summary: `Test failed: ${command.join(' ')}`, output: redact((result.stderr + result.stdout).slice(-16000)) });
+        job.reports.push({ stage: 'test', summary: `Test failed: ${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
         return false;
       }
     }
     if (await git(job.worktree, ['status', '--porcelain']) || await git(job.worktree, ['rev-parse', 'HEAD']) !== job.revision) throw new Error(msg("srv.team.tests_lam_thay_doi_worktree_khong"));
     job.tested = job.revision; return true;
+  }
+  // Kết thúc theo đường rẻ nhất còn an toàn: chỉ gọi AI tổng kết khi việc có nhiều bước hoặc quy trình chuẩn/chặt.
+  async finish(job, members) {
+    if (job.kind === 'research') {
+      const single = job.fast || job.tasks.length === 1 && job.rigor !== 'strict';
+      const r = single ? job.reports.filter(x => x.stage === 'research').at(-1) : await this.call(job, members.manager, 'final', msg("srv.team.research_final"));
+      if (single) job.skipped = [...new Set([...(job.skipped || []), 'final'])];
+      job.conclusion = { summary: r.summary, conclusion: r.conclusion || r.summary, sources: r.sources || [], confidence: r.confidence || null, openQuestions: r.openQuestions || [] };
+      job.status = 'done'; this.event(job.id, single ? r.agent : members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion); return;
+    }
+    if (job.fast || job.rigor === 'light') job.skipped = [...new Set([...(job.skipped || []), 'final'])];
+    else await this.call(job, members.manager, 'final', msg("srv.team.bao_cao_thay_doi_tests_findings"));
+    await this.assertReady(job);
+    job.status = 'ready'; this.event(job.id, job.skipped?.includes('final') ? 'controller' : members.manager, 'user', 'READY_FOR_MERGE', msg("srv.team.ready_summary", { 0: (job.skipped || []).join(', ') || '—' }));
+  }
+  // Cổng rủi ro không dùng AI: lý do buộc phải review/verify (file nhạy cảm, xóa file, diff lớn, rủi ro cao).
+  async gate(job) {
+    if (job.kind === 'research') return job.risk === 'high' ? [msg("srv.team.manager_danh_gia_rui_ro_cao")] : [];
+    return (await this.mergeCheck(job)).reasons;
+  }
+  skip(job, ...steps) { job.skipped = [...new Set([...(job.skipped || []), ...steps])]; }
+  escalate(job, members, reason) {
+    job.fast = false; job.skipped = []; job.stage = 'plan';
+    this.event(job.id, 'controller', members.manager, 'ESCALATE', msg("srv.team.escalate", { 0: String(reason).slice(0, 500) }));
   }
   async step(job) {
     const members = job.roster || roster(this.config);
@@ -398,7 +461,7 @@ export class Team extends EventEmitter {
           t.skills = (Array.isArray(t.skills) ? t.skills : []).filter(n => known.has(n)).slice(0, 5);
           if (!members.builders.includes(t.agent)) t.agent = null; // controller sẽ chọn người phù hợp
         }
-        job.tasks = plan.tasks; job.taskIndex = 0; job.stage = 'implement';
+        job.tasks = plan.tasks; job.taskIndex = 0; job.stage = 'implement'; job.planSummary = String(plan.summary || '').slice(0, 3000);
         job.risk = ['low', 'medium', 'high'].includes(plan.risk) ? plan.risk : 'medium';
         job.riskReasons = Array.isArray(plan.riskReasons) ? plan.riskReasons.map(String).slice(0, 10) : [];
         job.reviewSkills = (Array.isArray(plan.reviewSkills) ? plan.reviewSkills : []).filter(n => known.has(n)).slice(0, 5);
@@ -412,47 +475,57 @@ export class Team extends EventEmitter {
       case 'implement': {
         const task = job.tasks[job.taskIndex], who = this.pickBuilder(job, task);
         if (task.boosted) this.event(job.id, 'controller', members.manager, 'REROUTE', msg("srv.team.effort_boost", { 0: job.taskIndex + 1, 1: task.difficulty, 2: who }), { chosen: who, effort: task.effort });
-        else if (who !== task.agent) this.event(job.id, 'controller', members.manager, 'REROUTE', msg("srv.team.task_do_kho", { 0: job.taskIndex + 1, 1: task.difficulty, 2: task.agent || msg("srv.team.chua_giao"), 3: who }),
+        else if (who !== task.agent && !job.fast) this.event(job.id, 'controller', members.manager, 'REROUTE', msg("srv.team.task_do_kho", { 0: job.taskIndex + 1, 1: task.difficulty, 2: task.agent || msg("srv.team.chua_giao"), 3: who }),
           { planned: task.agent, chosen: who, reason: job.assignee ? msg("srv.team.ban_chi_dinh") : msg("srv.team.nguoi_duoc_giao_khong_du_nang") });
         task.ranBy = who; job.implementers = [...new Set([...(job.implementers || []), who])];
-        if (job.kind === 'research') {
-          // Nghiên cứu: chỉ đọc, không checkpoint; xong các task thì review kết luận (trừ quy trình nhẹ) rồi tổng hợp.
-          await this.call(job, who, 'research', task.instruction, task.effort, task.skills); job.taskIndex++;
-          if (job.taskIndex >= job.tasks.length) job.stage = job.rigor === 'light' ? 'final' : 'review'; break;
+        try {
+          await this.call(job, who, job.kind === 'research' ? 'research' : 'implement', task.instruction, task.effort, task.skills);
+        } catch (error) {
+          // Đường nhanh bị vướng → nâng lên Manager lập kế hoạch thay vì dừng hẳn.
+          if (job.fast && !this.active.abort.signal.aborted) { this.escalate(job, members, error.message); break; }
+          throw error;
         }
-        await this.call(job, who, 'implement', task.instruction, task.effort, task.skills);
-        await this.checkpoint(job); job.taskIndex++;
-        if (job.taskIndex >= job.tasks.length) job.stage = 'test'; break;
+        if (job.kind !== 'research') await this.checkpoint(job);
+        job.taskIndex++;
+        if (job.taskIndex < job.tasks.length) break;
+        if (job.kind !== 'research') { job.stage = 'test'; break; }
+        // Nghiên cứu: đường nhanh/nhẹ không cần review trừ khi rủi ro cao.
+        if ((job.fast || job.rigor === 'light') && !(await this.gate(job)).length) { this.skip(job, 'review', 'verify'); await this.finish(job, members); }
+        else job.stage = 'review';
+        break;
       }
-      case 'test': job.stage = await this.testJob(job) ? 'review' : 'rework'; break;
+      case 'test': {
+        if (!await this.testJob(job)) { job.stage = 'rework'; break; }
+        // Test pass: chỉ gọi AI review khi quy trình chuẩn/chặt hoặc cổng rủi ro (không dùng AI) thấy lý do.
+        const reasons = await this.gate(job);
+        if ((job.fast || job.rigor === 'light') && !reasons.length) { this.skip(job, 'review', 'verify'); await this.finish(job, members); }
+        else job.stage = 'review';
+        break;
+      }
       case 'review': {
         this.assertIndependent(job, members.reviewer);
         const r = await this.call(job, members.reviewer, 'review', job.kind === 'research' ? msg("srv.team.research_review") : msg("srv.team.review_doc_lap_toan_bo_diff", { 0: job.base, 1: job.revision }) + (job.rigor === 'strict' ? ' ' + msg("srv.team.strict_review") : ''), undefined, job.reviewSkills);
         if (!['approved', 'changes_requested'].includes(r.verdict)) throw new Error(msg("srv.team.review_thieu_verdict_hop_le"));
-        if (r.verdict === 'approved') { job.reviewed = job.revision; job.stage = job.kind === 'research' ? (job.rigor === 'strict' ? 'verify' : 'final') : job.rigor === 'light' ? 'final' : 'verify'; }
-        else job.stage = 'rework'; break;
+        if (r.verdict !== 'approved') { job.stage = 'rework'; break; }
+        job.reviewed = job.revision;
+        // Verify thứ hai chỉ khi quy trình chặt hoặc cổng rủi ro có lý do; còn lại kết thúc luôn.
+        if (job.rigor === 'strict' || (await this.gate(job)).length) job.stage = 'verify';
+        else { this.skip(job, 'verify'); await this.finish(job, members); }
+        break;
       }
       case 'verify': {
         this.assertIndependent(job, members.verifier);
         const r = await this.call(job, members.verifier, 'verify', msg("srv.team.doi_chieu_muc_tieu_diff_review"), undefined, job.reviewSkills);
         if (!['approved', 'changes_requested'].includes(r.verdict)) throw new Error(msg("srv.team.verification_thieu_verdict_hop_le"));
-        if (r.verdict === 'approved') { job.verified = job.revision; job.stage = 'final'; }
+        if (r.verdict === 'approved') { job.verified = job.revision; await this.finish(job, members); }
         else job.stage = 'rework'; break;
       }
       case 'rework':
         if (++job.round > (this.config.maxReworkRounds ?? 3)) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua"));
+        if (job.fast) { this.escalate(job, members, msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round })); break; }
         this.event(job.id, 'controller', members.manager, 'REWORK_REQUEST', msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round }));
-        job.stage = 'plan'; break;
-      case 'final': {
-        if (job.kind === 'research') {
-          const r = await this.call(job, members.manager, 'final', msg("srv.team.research_final"));
-          job.conclusion = { summary: r.summary, conclusion: r.conclusion || r.summary, sources: r.sources || [], confidence: r.confidence || null, openQuestions: r.openQuestions || [] };
-          job.status = 'done'; this.event(job.id, members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion); break;
-        }
-        await this.call(job, members.manager, 'final', msg("srv.team.bao_cao_thay_doi_tests_findings"));
-        await this.assertReady(job);
-        job.status = 'ready'; this.event(job.id, members.manager, 'user', 'READY_FOR_MERGE', msg("srv.team.review_tests_va_verification_da_hoan")); break;
-      }
+        job.skipped = []; job.stage = 'plan'; break;
+      case 'final': await this.finish(job, members); break;
       default: throw new Error(msg("srv.team.stage_khong_hop_le"));
     }
   }
@@ -470,7 +543,8 @@ export class Team extends EventEmitter {
     for (const job of this.jobs()) if (['queued', 'paused', 'blocked'].includes(job.status) && this.active?.job !== job.id) { job.roster = roster(this.config); this.save(job); }
   }
   async assertReady(job) {
-    if ([job.tested, job.reviewed, job.rigor === 'light' ? job.revision : job.verified].some(rev => rev !== job.revision)) throw new Error(msg("srv.team.thieu_test_review_verify_tren_commit"));
+    const sk = job.skipped || [];
+    if ([job.tested, sk.includes('review') ? job.revision : job.reviewed, sk.includes('verify') ? job.revision : job.verified].some(rev => rev !== job.revision)) throw new Error(msg("srv.team.thieu_test_review_verify_tren_commit"));
     if (await git(job.worktree, ['rev-parse', 'HEAD']) !== job.revision || await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_da_doi_sau_kiem_tra"));
   }
   // ponytail: one global worker keeps builds serialized; per-repo locks are needed before increasing concurrency.
@@ -574,7 +648,7 @@ export class Team extends EventEmitter {
     if (added + removed > (this.config.largeDiffLines ?? 300)) reasons.push(msg("srv.team.diff_lon_dong", { 0: added, 1: removed }));
     const head = await git(this.project(job.project).path, ['rev-parse', job.baseBranch]);
     return { revision: job.revision, code: job.revision.slice(0, 8), files: rows.length, added, removed, risk: reasons.length ? 'high' : job.risk || 'medium', reasons, needsConfirm: reasons.length > 0,
-      checks: { tested: job.tested === job.revision, reviewed: job.reviewed === job.revision, verified: job.verified === job.revision || job.rigor === 'light', verifySkipped: job.rigor === 'light', baseUnchanged: head === job.base, ready: job.status === 'ready' } };
+      checks: { tested: job.tested === job.revision, reviewed: job.reviewed === job.revision || !!job.skipped?.includes('review'), reviewSkipped: !!job.skipped?.includes('review'), verified: job.verified === job.revision || !!job.skipped?.includes('verify'), verifySkipped: !!job.skipped?.includes('verify'), baseUnchanged: head === job.base, ready: job.status === 'ready' } };
   }
   async merge(id, { confirm } = {}) {
     const job = this.get(id);

@@ -151,6 +151,7 @@ function agentHealth(a) {
       state: 'disabled',
       cls: 'disabled',
       label: t('ui.health.disabled'),
+      shortLabel: t('ui.health.short.disabled'),
       rem: null,
       title: `${a.label} · ${t('ui.health.disabled')}`
     };
@@ -172,6 +173,7 @@ function agentHealth(a) {
       state: 'unknown',
       cls: 'unknown',
       label: t('ui.health.unknown'),
+      shortLabel: t('ui.health.short.unknown'),
       rem: null,
       title: `${a.label} · ${t('ui.health.unknown')}`
     };
@@ -180,6 +182,7 @@ function agentHealth(a) {
   const k = moodKey(rem);
   const cls = moodClass(rem);
   const label = t(`ui.health.mood.${k}`);
+  const shortLabel = t(`ui.health.short.${k}`);
   const resetPart = resetText || (resetsAt ? clock(resetsAt) + untilReset(resetsAt) : '');
   const resetSuffix = resetPart ? ` · ${t('ui.quota.reset')} ${resetPart}` : '';
 
@@ -187,8 +190,9 @@ function agentHealth(a) {
     state: k,
     cls,
     label,
+    shortLabel,
     rem,
-    title: `${a.label} · ${label} (${rem}% còn)${resetSuffix}`
+    title: `${a.label} · ${label} (${t('ui.quota.windowRemaining', { n: rem })})${resetSuffix}`
   };
 }
 const tierLabel = tier => t(`ui.tier.${['strong', 'normal', 'weak'].includes(tier) ? tier : 'normal'}`);
@@ -230,7 +234,7 @@ function openSlot(kind, current) {
   slot = { kind, current };
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
     const h = agentHealth(a);
-    const healthText = h ? ` · ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
+    const healthText = h ? ` · ${h.shortLabel || h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
     return `<option value="${esc(a.id)}" ${a.id === current ? 'selected' : ''} ${kind === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}>${esc(a.label)} · ${esc(a.provider)} · ${esc(tierLabel(a.tier))}${healthText}</option>`;
   }).join('');
   $('slot-remove').hidden = !current; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
@@ -272,7 +276,7 @@ function drawFlow() {
   const sub = id => {
     const a = byId[id]; if (!a) return t('ui.flow.notChosen');
     const h = agentHealth(a);
-    return `${tierLabel(a.tier)} · ${h ? `${h.icon} ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : cut((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''), 16)}`;
+    return `${tierLabel(a.tier)} · ${h ? `${h.shortLabel}${h.rem != null ? ' ' + h.rem + '%' : ''}` : cut((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''), 16)}`;
   };
   const box = (key, title, subtitle, agentId, slot) => {
     const n = nodes[key], a = agentId && byId[agentId];
@@ -286,9 +290,9 @@ function drawFlow() {
     ].filter(Boolean).join(' ');
     const healthDot = h ? `<circle cx="${n.w - 12}" cy="14" r="4.5" class="flow-dot ${h.cls}"><title>${esc(h.title)}</title></circle>` : '';
     const tip = a ? `${a.label} · ${rolesText(a.id)}\n${t('ui.health.title')}: ${h ? `${h.label} (${h.rem != null ? h.rem + '% quota' : '—'})` : '—'}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
-    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/>${healthDot}<text x="10" y="19" class="t">${esc(cut(title, (n.w - (h ? 24 : 10)) / 8))}</text><text x="10" y="36" class="s">${esc(subtitle)}</text></g>`;
+    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/>${healthDot}<text x="10" y="19" class="t">${esc(cut(title, (n.w - (h ? 24 : 10)) / 8))}</text><text x="10" y="36" class="s">${esc(cut(subtitle, Math.floor((n.w - 14) / 6.2)))}</text></g>`;
   };
-  const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', light = job?.rigor === 'light' || research && job?.rigor !== 'strict';
+  const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step);
   let edges = edge('user', 'manager', 'used');
   for (const id of builders) {
     const tasks = tasksOf(id), used = !job || tasks.length > 0;
@@ -298,16 +302,16 @@ function drawFlow() {
   edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
   edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active === 'rework' ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 23} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 23}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
-  const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), sub(r.manager), r.manager || null, 'manager')
+  const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
-    + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', r.reviewer), sub(r.reviewer), r.reviewer || null, 'reviewer')
-    + box('verifier', named('Verify', r.verifier), light ? t('ui.flow.skipped') : sub(r.verifier), r.verifier || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
+    + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', r.reviewer), skipped('review') ? t('ui.flow.skipped') : sub(r.reviewer), r.reviewer || null, 'reviewer')
+    + box('verifier', named('Verify', r.verifier), skipped('verify') ? t('ui.flow.skipped') : sub(r.verifier), r.verifier || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
   $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
   const inRoster = new Set([r.manager, r.reviewer, r.verifier, ...r.builders]);
   const bench = state.agents.filter(a => !inRoster.has(a.id));
   $('bench').innerHTML = `<button data-slot="builder" class="primary-ghost">${esc(t('ui.slot.addBuilder'))}</button>${bench.length ? `<span>${esc(t('ui.flow.bench'))}</span>${bench.map(a => {
     const h = agentHealth(a);
-    return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
+    return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.shortLabel || h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
   }).join('')}` : ''}`;
   document.querySelectorAll('g[data-slot]').forEach(g => g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } });
 }
@@ -334,10 +338,10 @@ function drawInspector() {
   const waiting = job.status === 'waiting' ? `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
   const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${i === job.taskIndex && job.stage === 'implement' ? 'current' : ''}"><b>T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}${x.skills?.length ? `<br><span class="skill-tags">${x.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</span>` : ''}</li>`).join('')}</ul>` : '';
   const risk = job.risk ? `<p class="muted">${esc(t('ui.inspector.risk'))} <b class="${job.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + job.risk))}</b>${job.riskReasons?.length ? ' · ' + esc(job.riskReasons.join('; ')) : ''}</p>` : '';
-  const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision], [t('ui.flow.conclusion'), job.status === 'done']]
-    : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision], ['Verify', job.verified === job.revision || job.rigor === 'light'], ['Merge', job.status === 'merged']];
+  const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
+    : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => `<span class="step ${done ? 'done' : ''}">${done ? '✓' : '○'} ${label}</span>`).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => { await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); }));
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
@@ -347,7 +351,7 @@ function drawInspector() {
 async function showDiff() { const result = await api(`jobs/${selected}/diff`); $('diff-content').textContent = result.diff || t('ui.diff.empty'); if (result.status) $('diff-content').textContent += '\n\nWorking tree:\n' + result.status; $('diff-dialog').showModal(); }
 async function openMerge() {
   const c = await api(`jobs/${selected}/merge-check`), job = state.jobs.find(j => j.id === selected);
-  const checks = [[t('ui.merge.tested'), c.checks.tested], [t('ui.merge.reviewed'), c.checks.reviewed], [t(c.checks.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks.verified], [t('ui.merge.baseUnchanged', { branch: job.baseBranch }), c.checks.baseUnchanged]];
+  const checks = [[t('ui.merge.tested'), c.checks.tested], [t(c.checks.reviewSkipped ? 'ui.merge.reviewSkipped' : 'ui.merge.reviewed'), c.checks.reviewed], [t(c.checks.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks.verified], [t('ui.merge.baseUnchanged', { branch: job.baseBranch }), c.checks.baseUnchanged]];
   $('merge-check').innerHTML = `<p>${esc(t('ui.merge.summary', { code: c.code, branch: job.baseBranch, files: c.files, added: c.added, removed: c.removed }))}</p><p>${esc(t('ui.merge.risk'))} <b class="${c.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + c.risk))}</b></p><ul class="check-list">${checks.map(([l, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(l)}</li>`).join('')}${c.reasons.map(x => `<li class="bad">⚠ ${esc(x)}</li>`).join('')}</ul>${c.checks.baseUnchanged ? '' : `<p class="error-box">${esc(t('ui.merge.baseChanged'))}</p>`}`;
   $('merge-confirm-label').textContent = t('ui.merge.confirm', { code: c.code });
   $('merge-confirm').value = ''; $('merge-confirm').hidden = $('merge-confirm-label').hidden = !c.needsConfirm;
@@ -607,7 +611,7 @@ async function refresh() {
 const openTask = () => $('task-dialog').showModal();
 ['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
 $('close-dialog').onclick = () => $('task-dialog').close(); $('close-diff').onclick = () => $('diff-dialog').close();
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value, files: pending.goal }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value, files: pending.goal, mode: $('task-mode').value }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
 $('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value, files: pending.message }); $('message').value = ''; pending.message = []; drawAttach('message'); await refresh(); }); };
 $('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); };
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });

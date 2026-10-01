@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Team, validateConfig, redact } from '../src/team.js';
+import { Team, validateConfig, redact, routeGoal, compressOutput } from '../src/team.js';
 import { run, childEnv } from '../src/process.js';
 import { parseReport, normalizeCodexQuota, normalizeGoogleQuota } from '../src/providers.js';
 
@@ -54,7 +54,7 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   const job = await team.create({ project: 'test', goal: 'Update hello' });
   const ready = await settle(team, job.id, 'ready');
   assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8'), 'Hello!\n');
-  assert.equal(ready.tested, ready.revision); assert.equal(ready.reviewed, ready.revision); assert.equal(ready.verified, ready.revision);
+  assert.equal(ready.tested, ready.revision); assert.equal(ready.reviewed, ready.revision); assert.equal(ready.verified, null); assert(ready.skipped.includes('verify'));
   const events = team.events(job.id);
   for (const type of ['GOAL', 'DECISION', 'TASK_ASSIGNMENT', 'TEST_RESULT', 'REVIEW_RESULT', 'READY_FOR_MERGE']) assert(events.some(e => e.type === type), type);
   writeFileSync(join(ready.worktree, 'hello.txt'), 'tamper');
@@ -287,4 +287,35 @@ test('per-member MCP config is validated and limited to Codex/Claude', async t =
   assert.deepEqual(team.agent('c').mcp.gitnexus.args, ['-y', 'gitnexus', 'mcp']);
   assert.deepEqual(team.members(['c'])[0].mcpServers, ['gitnexus']);
   assert.throws(() => accounts.profile('g', { mcp: { x: { command: 'y' } } }), /Codex|Claude/);
+});
+
+test('rule-based router: short low-risk goals take a 1-agent fast path; risky ones go to the Manager', async t => {
+  assert.equal(routeGoal('Đổi màu nút Lưu sang xanh', 'auto').fast, true);
+  assert.equal(routeGoal('Sửa lỗi đăng nhập login token', 'auto').fast, false);
+  assert.equal(routeGoal('x'.repeat(500), 'auto').fast, false);
+  assert.equal(routeGoal('Giải thích hàm A làm gì', 'auto').kind, 'research');
+  assert.equal(routeGoal('anything', 'full').fast, false);
+  const out = compressOutput(['ok 1', 'ok 2', ...Array(500).fill('noise'), 'not ok 3 - expected 2 received 3', ...Array(100).fill('tail')].join('\n'));
+  assert(out.includes('not ok 3') && out.length <= 4000);
+  const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello text', mode: 'auto' });
+  const ready = await settle(team, job.id, 'ready');
+  const stages = team.events(job.id).filter(e => e.type === 'TASK_ASSIGNMENT' || e.type === 'REVIEW_REQUEST').map(e => e.details.stage);
+  assert.deepEqual(stages, ['implement']); // 1 lượt AI duy nhất: không plan, review, verify, final
+  assert.deepEqual(ready.skipped.sort(), ['final', 'plan', 'review', 'verify']);
+  await team.merge(job.id);
+});
+
+test('fast path escalates to the Manager when tests fail; risk gate forces a review', async t => {
+  const f = await fixture(); f.config.projects[0].tests = [[process.execPath, '-e', "process.exit(require('fs').existsSync('ok.flag')?0:1)"]];
+  const team = new Team(f.config, f.data); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello text', mode: 'fast' });
+  await settle(team, job.id, 'blocked');
+  const ev = team.events(job.id);
+  assert(ev.some(e => e.type === 'ESCALATE')); assert(ev.some(e => e.details?.stage === 'plan'));
+  const f2 = await fixture(); f2.config.sensitivePaths = 'hello';
+  const team2 = new Team(f2.config, f2.data); t.after(() => team2.close());
+  const j2 = await team2.create({ project: 'test', goal: 'Update hello text', mode: 'fast' });
+  const r2 = await settle(team2, j2.id, 'ready');
+  assert.equal(r2.reviewed, r2.revision); assert(!r2.skipped.includes('review'));
 });
