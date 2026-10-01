@@ -161,7 +161,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong") });
     return report;
   }
-  let final = '', failed = '';
+  let final = '', failed = '', policyBlocked = false;
   // Tìm kiếm/đọc web: chỉ khi project bật network, hoặc việc nghiên cứu (tắt bằng "researchWeb": false).
   const web = task.network === true || task.kind === 'research' && task.researchWeb !== false;
   const args = [];
@@ -172,6 +172,9 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
     // Sandbox Codex: chỉ ghi trong worktree; mạng tắt trừ khi project bật "network": true.
     args.push('-c', `sandbox_workspace_write.network_access=${task.network === true}`, '-c', `features.web_search=${web}`);
+    // Windows: không bật sandbox thì Codex (approval=never) từ chối mọi lệnh, kể cả lệnh chỉ đọc. "unelevated" không cần quyền admin.
+    const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated';
+    if (process.platform === 'win32' && winSandbox !== 'off') args.push('-c', `windows.sandbox="${winSandbox}"`);
     args.push('-');
   } else if (agent.provider === 'claude') {
     args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
@@ -188,7 +191,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     cwd: task.worktree, env: childEnv(agent), input: ['codex', 'claude'].includes(agent.provider) ? prompt : '', signal,
     onLine(line, stream) {
       if (!line) return;
-      if (stream === 'stderr') { onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
+      if (stream === 'stderr') { if (/blocked by policy|CreateRestrictedToken|sandbox setup/i.test(line)) policyBlocked = true; onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
       let event; try { event = JSON.parse(line); } catch { onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
       // Deliberately expose actions and messages, not reasoning items.
       const item = event.item;
@@ -217,7 +220,10 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     },
   });
   await (agent.provider === 'codex' ? withHome(agent, exec) : exec());
-  if (failed) throw new Error(failed);
-  if (!final) throw new Error(msg("srv.providers.cli_khong_tra_ket_qua_cuoi"));
-  return parseReport(final);
+  const hint = policyBlocked ? '\n' + msg("srv.providers.codex_sandbox_hint") : '';
+  if (failed) throw new Error(failed + hint);
+  if (!final) throw new Error(msg("srv.providers.cli_khong_tra_ket_qua_cuoi") + hint);
+  const report = parseReport(final);
+  if (report.status === 'blocked' && hint) report.summary += hint;
+  return report;
 }

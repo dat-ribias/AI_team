@@ -503,5 +503,6 @@
   "ui.attach.hint": "hoặc dán ảnh (Ctrl+V), kéo thả file vào ô",
   "ui.attach.tooBig": "{name} lớn hơn 15 MB",
   "srv.team.attach_limit": "Tối đa 10 file đính kèm mỗi lần",
-  "srv.team.attach_size": "File {0} rỗng hoặc lớn hơn 15 MB"
+  "srv.team.attach_size": "File {0} rỗng hoặc lớn hơn 15 MB",
+  "srv.providers.codex_sandbox_hint": "Gợi ý: Codex trên Windows đã chặn lệnh vì sandbox chưa chạy được. Thử đặt \"codexWindowsSandbox\": \"elevated\" trong team.config.json (lần đầu Codex sẽ xin quyền admin để thiết lập sandbox), khởi động lại server rồi bấm Tiếp tục; hoặc giao việc đọc/review cho Claude. Chi tiết trong tab Hoạt động."
 }

@@ -267,7 +267,7 @@ export class Team extends EventEmitter {
       await git(this.project(job.project).path, ['worktree', 'add', '--detach', worktree, job.revision]);
       if (job.attachments?.length) cpSync(join(job.worktree, '.ai-team'), join(worktree, '.ai-team'), { recursive: true });
     }
-    const report = await this.agentRun(agent, { ...job, stage, worktree, network: this.project(job.project).network === true, researchWeb: this.config.researchWeb !== false }, prompt, { signal: this.active.abort.signal,
+    const report = await this.agentRun(agent, { ...job, stage, worktree, network: this.project(job.project).network === true, researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal: this.active.abort.signal,
       onEvent: (type, data) => { if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); this.event(job.id, agentId, 'controller', type, data.summary, data.details); } });
     if (this.active.abort.signal.aborted) throw new Error('Run interrupted');
     if (report.status === 'blocked') {

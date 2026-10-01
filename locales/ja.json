@@ -503,5 +503,6 @@
   "ui.attach.hint": "画像の貼り付け（Ctrl+V）やドラッグ&ドロップも可",
   "ui.attach.tooBig": "{name} は 15 MB を超えています",
   "srv.team.attach_limit": "添付は1回につき最大10ファイルです",
-  "srv.team.attach_size": "ファイル {0} が空か 15 MB を超えています"
+  "srv.team.attach_size": "ファイル {0} が空か 15 MB を超えています",
+  "srv.providers.codex_sandbox_hint": "ヒント: Windows の Codex はサンドボックスが動作しないためコマンドをブロックしました。team.config.json に \"codexWindowsSandbox\": \"elevated\" を設定（初回は管理者権限でサンドボックスを設定）してサーバーを再起動し「再開」を押すか、読み取り/レビュー作業を Claude に任せてください。詳細は「アクティビティ」タブにあります。"
 }
