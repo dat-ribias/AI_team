@@ -227,3 +227,32 @@ test('attachments land in the worktree for agents but never in commits', async t
   assert(team.events(job.id).some(e => e.details?.prompt?.includes('.ai-team/attachments/shot.png')));
   await assert.rejects(team.create({ project: 'test', goal: 'x', files: Array(11).fill({ name: 'a', data: 'YQ==' }) }), /10/);
 });
+
+test('Gemini/Antigravity get the prompt via a file (Windows command-line limit) and progress timing is recorded', async t => {
+  const f = await fixture(); f.config.demo = false;
+  f.config.agents = f.config.agents.map(a => a.id === 'gemini' ? { ...a, provider: 'antigravity' } : { ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) });
+  const seen = [];
+  const { runAgent } = await import('../src/providers.js');
+  const team = new Team(f.config, f.data, { runAgent: (agent, task, prompt, opts) => {
+    if (agent.provider === 'antigravity') { seen.push(task.promptFile); assert.equal(readFileSync(join(task.worktree, task.promptFile), 'utf8'), prompt); }
+    return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
+  }, readQuota: async () => ({ buckets: [] }) });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const ready = await settle(team, job.id, 'ready');
+  assert.deepEqual(seen, ['.ai-team/prompt.md']);
+  assert(ready.durations.length >= 4); assert.equal(ready.current, null);
+});
+
+test('per-member speed and token use are measured and shown to the lead', async t => {
+  const f = await fixture();
+  const { runAgent } = await import('../src/providers.js');
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => { opts.onEvent('USAGE', { summary: 'u', details: { input_tokens: 1000, output_tokens: 200 } }); return runAgent(agent, task, prompt, opts); } });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  await settle(team, job.id, 'ready');
+  const sp = team.members(['codex-2'])[0].speed;
+  assert(sp.samples >= 1); assert.equal(sp.avgTokensPerCall, 1200);
+  const plan = team.events(job.id).find(e => e.details?.stage === 'plan');
+  assert.match(plan.details.prompt, /avgTokensPerCall/);
+});

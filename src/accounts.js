@@ -164,9 +164,11 @@ export class Accounts {
     const result = await run(this.command(agent), ['-p', '--output-format', 'stream-json', '--verbose', '--tools', '', '--no-session-persistence'],
       { env: childEnv(agent), cwd: agent.home, input: '/usage', allowFailure: true, timeoutMs: 120_000 });
     let resultText = '', assistantText = '';
+    let limitsReport = null;
     for (const line of result.stdout.split(/\r?\n/)) {
       let event; try { event = JSON.parse(line); } catch { continue; }
       if (event.type === 'rate_limit_event') this.team.observeQuota(id, event.rate_limit_info);
+      if (event.usage_report?.rate_limits?.limits) limitsReport = event.usage_report.rate_limits.limits;
       const collectInto = (target, value) => {
         if (typeof value === 'string') return target + value + '\n';
         if (value && typeof value === 'object') {
@@ -179,37 +181,61 @@ export class Accounts {
     }
     let text = (resultText.trim() || assistantText.trim() || result.stdout).replace(/\x1b\[[0-9;]*m/g, '');
     const buckets = [];
-    const seen = new Set();
-    // Đọc theo dòng: dòng nhãn ("Current session") → dòng "N% used" → dòng "Resets …".
-    let label = null, last = null;
-    for (const raw of text.split(/\r?\n/)) {
-      const line = raw.replace(/[│|█▌▏▎▍▋▊▉░▒▓]/gu, ' ').trim();
-      const used = /(\d{1,3}(?:\.\d+)?)\s*%\s*used/i.exec(line), reset = /^Resets?\s+(.+)/i.exec(line);
-      if (used) {
-        const rawName = (line.slice(0, used.index).trim() || label || 'Claude').replace(/[:\s]+$/, '').trim();
-        const idKey = 'usage:' + rawName.toLowerCase();
-        if (!seen.has(idKey)) {
-          seen.add(idKey);
+    if (Array.isArray(limitsReport) && limitsReport.length) {
+      for (const lim of limitsReport) {
+        const isSession = lim.kind === 'session' || lim.group === 'session';
+        const usedVal = Math.max(0, Math.min(100, Math.round(Number(lim.percent ?? 0))));
+        const remVal = Math.max(0, 100 - usedVal);
+        const rAt = lim.resets_at ? new Date(lim.resets_at).toISOString() : null;
+        buckets.push({
+          id: isSession ? 'claude-session' : 'claude-weekly',
+          name: isSession ? 'Current session' : 'Current week (all models)',
+          windows: [{
+            name: isSession ? '5h' : 'week',
+            remaining: remVal,
+            used: usedVal,
+            minutes: isSession ? 300 : 10080,
+            resetsAt: rAt,
+            resetText: null
+          }]
+        });
+      }
+    }
+    if (!buckets.length) {
+      const seen = new Set();
+      let label = null, last = null;
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.replace(/[│|█▌▏▎▍▋▊▉░▒▓]/gu, ' ').trim();
+        const used = /(\d{1,3}(?:\.\d+)?)\s*%\s*used/i.exec(line), reset = /resets?\s+(.+)/i.exec(line);
+        if (used) {
+          const rawName = (line.slice(0, used.index).trim() || label || 'Claude').replace(/[:\s]+$/, '').trim();
           const isSession = /session/i.test(rawName);
-          const remainingVal = Math.max(0, Math.min(100, 100 - Number(used[1])));
-          last = {
-            id: idKey,
-            name: rawName,
-            windows: [{
-              name: isSession ? '5h' : 'week',
-              remaining: remainingVal,
-              minutes: isSession ? 300 : (/week/i.test(rawName) ? 10080 : null),
-              resetsAt: null,
-              resetText: null
-            }]
-          };
-          buckets.push(last);
-        } else {
-          last = buckets.find(b => b.id === idKey);
-        }
-        label = null;
-      } else if (reset && last) last.windows[0].resetText = reset[1].slice(0, 80);
-      else if (/[A-Za-z]/.test(line) && line.length < 80) label = line;
+          const idKey = isSession ? 'claude-session' : (/week/i.test(rawName) ? 'claude-weekly' : 'usage:' + rawName.toLowerCase());
+          if (!seen.has(idKey)) {
+            seen.add(idKey);
+            const usedVal = Math.max(0, Math.min(100, Math.round(Number(used[1]))));
+            const remainingVal = Math.max(0, 100 - usedVal);
+            last = {
+              id: idKey,
+              name: isSession ? 'Current session' : (/week/i.test(rawName) ? 'Current week (all models)' : rawName),
+              windows: [{
+                name: isSession ? '5h' : 'week',
+                remaining: remainingVal,
+                used: usedVal,
+                minutes: isSession ? 300 : (/week/i.test(rawName) ? 10080 : null),
+                resetsAt: null,
+                resetText: null
+              }]
+            };
+            buckets.push(last);
+          } else {
+            last = buckets.find(b => b.id === idKey);
+          }
+          if (reset && last) last.windows[0].resetText = reset[1].slice(0, 80);
+          label = null;
+        } else if (reset && last) last.windows[0].resetText = reset[1].slice(0, 80);
+        else if (/[A-Za-z]/.test(line) && line.length < 80) label = line;
+      }
     }
     if (buckets.length) this.team.saveObserved(id, buckets);
     const quota = this.team.quota(id);

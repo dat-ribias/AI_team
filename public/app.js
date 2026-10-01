@@ -154,7 +154,7 @@ function drawFlow() {
   const box = (key, title, subtitle, agentId, slot) => {
     const n = nodes[key], a = agentId && byId[agentId];
     const cls = [a?.state === 'working' && 'working', filter && filter === agentId && 'filtered', agentId === null && 'missing', a && !a.enabled && 'disabled'].filter(Boolean).join(' ');
-    const tip = a ? `${a.label} · ${rolesText(a.id)}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
+    const tip = a ? `${a.label} · ${rolesText(a.id)}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
     return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/><text x="10" y="19" class="t">${esc(cut(title, n.w / 8))}</text><text x="10" y="36" class="s">${esc(subtitle)}</text></g>`;
   };
   const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', light = job?.rigor === 'light' || research && job?.rigor !== 'strict';
@@ -184,6 +184,18 @@ function drawInspector() {
   const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
   const research = job.kind === 'research';
   const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), job.round], [t('ui.inspector.started'), clock(job.createdAt)]];
+  // Tiến độ: bước đang chạy + ước tính dựa trên thời gian trung bình các bước agent trước đó.
+  const progress = (() => {
+    if (!['running', 'queued'].includes(job.status)) return '';
+    const left = Math.max(0, job.tasks.length - job.taskIndex), research = job.kind === 'research', light = job.rigor === 'light';
+    const after = research ? (light ? 0 : 1) + (job.rigor === 'strict' ? 1 : 0) + 1 : 1 + (light ? 0 : 1) + 1;
+    const steps = job.stage === 'plan' ? null : ({ implement: left + after, test: after, review: after, verify: 2, final: 1 })[job.stage] ?? after;
+    const avg = job.durations?.length ? job.durations.reduce((a, b) => a + b, 0) / job.durations.length / 60000 : null;
+    const cur = job.current, elapsed = cur ? (Date.now() - Date.parse(cur.startedAt)) / 60000 : null;
+    const now = cur ? t('ui.progress.now', { stage: job.stage === 'implement' ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${job.taskIndex + 1}/${job.tasks.length}` : job.stage, who: names[cur.agent] || cur.agent, time: duration(elapsed) }) : t('ui.progress.queued');
+    const eta = steps == null ? t('ui.progress.planning') : avg ? t('ui.progress.eta', { time: duration(Math.max(1, avg * steps - (elapsed || 0))), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps });
+    return `<div class="progress-box"><span class="dot green"></span><div><b>${esc(now)}</b><br><span class="muted">${esc(eta)}</span></div></div>`;
+  })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
   const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${i === job.taskIndex && job.stage === 'implement' ? 'current' : ''}"><b>T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}</li>`).join('')}</ul>` : '';
@@ -191,7 +203,7 @@ function drawInspector() {
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision], ['Verify', job.verified === job.revision || job.rigor === 'light'], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => `<span class="step ${done ? 'done' : ''}">${done ? '✓' : '○'} ${label}</span>`).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => `<span class="step ${done ? 'done' : ''}">${done ? '✓' : '○'} ${label}</span>`).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => { await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); }));
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
@@ -286,9 +298,15 @@ function setMemberView(mode) {
 
 function dedupeBuckets(buckets) {
   if (!Array.isArray(buckets)) return [];
+  const canonicalKey = b => {
+    const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
+    if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 'claude-session';
+    if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 'claude-weekly';
+    return (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+  };
   const map = new Map();
   for (const b of buckets) {
-    const key = (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+    const key = canonicalKey(b);
     if (!map.has(key)) map.set(key, b);
   }
   return Array.from(map.values());
@@ -296,22 +314,26 @@ function dedupeBuckets(buckets) {
 
 function quota5hInfo(q) {
   if (!q || !Array.isArray(q.buckets)) return null;
-  for (const b of q.buckets) {
+  const buckets = dedupeBuckets(q.buckets);
+  for (const b of buckets) {
+    if (b.id === 'claude-session' && b.windows?.length) return { bucket: b, window: b.windows[0] };
+  }
+  for (const b of buckets) {
     for (const w of (b.windows || [])) {
       if (w.minutes === 300) return { bucket: b, window: w };
     }
   }
-  for (const b of q.buckets) {
+  for (const b of buckets) {
     for (const w of (b.windows || [])) {
       if (w.name === '5h' || w.name === 'primary') return { bucket: b, window: w };
     }
   }
-  for (const b of q.buckets) {
+  for (const b of buckets) {
     if (/session|5h|five[_\s-]*hour/i.test(b.id || '') || /session|5h|five[_\s-]*hour/i.test(b.name || '')) {
       if (b.windows && b.windows.length) return { bucket: b, window: b.windows[0] };
     }
   }
-  for (const b of q.buckets) {
+  for (const b of buckets) {
     for (const w of (b.windows || [])) {
       if (Number.isFinite(w.remaining)) return { bucket: b, window: w };
     }
@@ -330,17 +352,20 @@ function drawQuota() {
     const w = info5h?.window;
     let remText, cls = '', subText, progressVal = 0;
     if (w && Number.isFinite(w.remaining)) {
-      const rem = Math.round(w.remaining);
+      const rem = Math.max(0, Math.min(100, Math.round(w.remaining)));
+      const used = Math.max(0, Math.min(100, Math.round(w.used != null ? w.used : (100 - rem))));
       remText = t('ui.quota.windowRemaining', { n: rem });
       cls = rem <= 15 ? 'danger' : rem <= 40 ? 'warning' : '';
-      progressVal = Math.max(0, Math.min(100, rem));
-      subText = w.resetText || (w.resetsAt ? clock(w.resetsAt) + untilReset(w.resetsAt) : t('ui.quota.window', { time: duration(w.minutes || 300) }));
+      progressVal = rem;
+      const resetPart = w.resetText || (w.resetsAt ? clock(w.resetsAt) + untilReset(w.resetsAt) : t('ui.quota.window', { time: duration(w.minutes || 300) }));
+      const usedPart = t('ui.quota.used', { n: used });
+      subText = [usedPart, resetPart].filter(Boolean).join(' · ');
     } else if (a.quota.error) {
       remText = 'Error'; cls = 'danger'; subText = a.quota.error; progressVal = 0;
     } else {
       remText = '—'; cls = 'unknown'; subText = t('ui.members.quotaNotMeasured'); progressVal = 0;
     }
-    const factsShort = [a.model || t('ui.profile.modelDefault'), tierLabel(a.tier)].join(' · ');
+    const factsShort = [a.model || t('ui.profile.modelDefault'), tierLabel(a.tier), a.speed?.samples && `~${duration(a.speed.avgMinutesPerCall)}/${a.speed.avgTokensPerCall >= 1000 ? Math.round(a.speed.avgTokensPerCall / 1000) + 'K' : a.speed.avgTokensPerCall} tok`].filter(Boolean).join(' · ');
 
     return `<article class="compact-row" data-agent-row="${esc(a.id)}">
       <div class="compact-col-agent">
@@ -408,9 +433,13 @@ function drawQuota() {
     const windows = cleanBuckets.map(b => b.windows.map(w => {
       const bName = b.name.replace(/[:\s]+$/, '');
       const winLabel = w.minutes ? `${esc(bName)} · ${esc(t('ui.quota.window', { time: duration(w.minutes) }))}` : (w.name && w.name !== 'used' && w.name !== 'quota' ? `${esc(bName)} · ${esc(w.name)}` : esc(bName));
-      return `<div class="quota-window"><label><span>${winLabel}</span><strong>${esc(t('ui.quota.windowRemaining', { n: w.remaining == null ? '?' : Math.round(w.remaining) }))}</strong></label><progress max="100" value="${w.remaining ?? 0}"></progress><small>${esc(t('ui.quota.reset'))} ${w.resetText ? esc(w.resetText) : esc(clock(w.resetsAt) + untilReset(w.resetsAt))}</small></div>`;
+      const remVal = w.remaining == null ? null : Math.max(0, Math.min(100, Math.round(w.remaining)));
+      const usedVal = remVal == null ? null : Math.max(0, Math.min(100, Math.round(w.used != null ? w.used : (100 - remVal))));
+      const remLabel = remVal == null ? '?' : `${t('ui.quota.windowRemaining', { n: remVal })} (${t('ui.quota.used', { n: usedVal })})`;
+      return `<div class="quota-window"><label><span>${winLabel}</span><strong>${esc(remLabel)}</strong></label><progress max="100" value="${remVal ?? 0}"></progress><small>${esc(t('ui.quota.reset'))} ${w.resetText ? esc(w.resetText) : esc(clock(w.resetsAt) + untilReset(w.resetsAt))}</small></div>`;
     }).join('')).join('');
-    const facts = [t('ui.members.model', { model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ` · ${effortLabel(a.effort)}` : '') }), t('ui.members.tier', { tier: tierLabel(a.tier) }), !a.enabled && t('ui.members.disabled'), a.systemPrompt && t('ui.members.hasPrompt')].filter(Boolean).join(' · ');
+    const sp = a.speed?.samples ? t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall >= 1000 ? Math.round(a.speed.avgTokensPerCall / 1000) + 'K' : a.speed.avgTokensPerCall, n: a.speed.samples }) : t('ui.members.speedUnknown');
+    const facts = [sp, t('ui.members.model', { model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ` · ${effortLabel(a.effort)}` : '') }), t('ui.members.tier', { tier: tierLabel(a.tier) }), !a.enabled && t('ui.members.disabled'), a.systemPrompt && t('ui.members.hasPrompt')].filter(Boolean).join(' · ');
     return `<article class="quota-card" data-agent-card="${esc(a.id)}"><h3>${esc(a.label)} <span class="tag">${esc(tag)}</span></h3><span class="muted">${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}</span><div class="account-state ${connected ? 'connected' : ''}"><i class="dot ${connected ? 'green' : ''}"></i>${esc(auth.message || t('ui.members.notChecked'))}</div>${auth.sharedProfile ? `<span class="muted">${esc(t('ui.members.sharedProfile'))}</span>` : ''}${auth.cli ? `<span class="muted">CLI: ${esc(auth.cli)}</span>` : ''}<div class="member-actions"><button class="${connected ? '' : 'primary'}" data-login="${esc(a.id)}">${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>${actions}</div>${state.demo ? '' : roleChecks(a)}<span class="muted">${esc(facts)}</span><strong>${esc(quotaRemaining(a.quota))}</strong>${a.quota.error ? `<p class="error-box">${esc(a.quota.error)}</p>` : ''}${a.quota.note ? `<p class="muted">${esc(a.quota.note)}</p>` : ''}${a.quota.schemaUnknown ? `<p class="error-box">${esc(t('ui.quota.schemaUnknown'))}</p>` : ''}${windows}<span class="muted">${esc(t('ui.quota.updated', { time: clock(a.quota.checkedAt) }))}</span>${a.quota.raw ? `<details><summary>${esc(t('ui.quota.raw'))}</summary><pre>${esc(JSON.stringify(a.quota.raw, null, 2))}</pre></details>` : ''}</article>`;
   }).join('');
 

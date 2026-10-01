@@ -176,6 +176,7 @@
   "ui.quota.left": "{time} left",
   "ui.quota.window": "{time} window",
   "ui.quota.windowRemaining": "{n}% left",
+  "ui.quota.used": "{n}% used",
   "ui.quota.reset": "Resets:",
   "ui.quota.updated": "Updated: {time}",
   "ui.quota.raw": "Provider data",
@@ -504,5 +505,12 @@
   "ui.attach.tooBig": "{name} is larger than 15 MB",
   "srv.team.attach_limit": "At most 10 attachments at a time",
   "srv.team.attach_size": "File {0} is empty or larger than 15 MB",
-  "srv.providers.codex_sandbox_hint": "Hint: Codex on Windows blocked commands because its sandbox is not working. Set \"codexWindowsSandbox\": \"elevated\" in team.config.json (the first run asks for admin rights to set up the sandbox), restart the server and click Resume; or give read/review work to Claude. Details are in the Activity tab."
+  "srv.providers.codex_sandbox_hint": "Hint: Codex on Windows blocked commands because its sandbox is not working. Set \"codexWindowsSandbox\": \"elevated\" in team.config.json (the first run asks for admin rights to set up the sandbox), restart the server and click Resume; or give read/review work to Claude. Details are in the Activity tab.",
+  "ui.progress.now": "Running: {stage} · {who} · {time} so far",
+  "ui.progress.queued": "Waiting for its turn…",
+  "ui.progress.planning": "The lead is planning; an estimate appears once tasks are split.",
+  "ui.progress.eta": "About {time} left · {n} more steps (avg {avg}/step)",
+  "ui.progress.noEta": "{n} steps left; an estimate appears after the first step.",
+  "ui.members.speed": "Avg {time} · {tokens} tokens per call ({n} calls)",
+  "ui.members.speedUnknown": "Speed not measured yet"
 }

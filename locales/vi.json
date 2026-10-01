@@ -176,6 +176,7 @@
   "ui.quota.left": "còn {time}",
   "ui.quota.window": "cửa sổ {time}",
   "ui.quota.windowRemaining": "{n}% còn",
+  "ui.quota.used": "đã dùng {n}%",
   "ui.quota.reset": "Reset:",
   "ui.quota.updated": "Cập nhật: {time}",
   "ui.quota.raw": "Dữ liệu provider",
@@ -504,5 +505,12 @@
   "ui.attach.tooBig": "{name} lớn hơn 15 MB",
   "srv.team.attach_limit": "Tối đa 10 file đính kèm mỗi lần",
   "srv.team.attach_size": "File {0} rỗng hoặc lớn hơn 15 MB",
-  "srv.providers.codex_sandbox_hint": "Gợi ý: Codex trên Windows đã chặn lệnh vì sandbox chưa chạy được. Thử đặt \"codexWindowsSandbox\": \"elevated\" trong team.config.json (lần đầu Codex sẽ xin quyền admin để thiết lập sandbox), khởi động lại server rồi bấm Tiếp tục; hoặc giao việc đọc/review cho Claude. Chi tiết trong tab Hoạt động."
+  "srv.providers.codex_sandbox_hint": "Gợi ý: Codex trên Windows đã chặn lệnh vì sandbox chưa chạy được. Thử đặt \"codexWindowsSandbox\": \"elevated\" trong team.config.json (lần đầu Codex sẽ xin quyền admin để thiết lập sandbox), khởi động lại server rồi bấm Tiếp tục; hoặc giao việc đọc/review cho Claude. Chi tiết trong tab Hoạt động.",
+  "ui.progress.now": "Đang chạy: {stage} · {who} · đã {time}",
+  "ui.progress.queued": "Đang chờ tới lượt chạy…",
+  "ui.progress.planning": "Lead đang lập kế hoạch; ước tính sẽ có sau khi chia task.",
+  "ui.progress.eta": "Ước tính còn ~{time} · {n} bước nữa (trung bình {avg}/bước)",
+  "ui.progress.noEta": "Còn {n} bước; ước tính có sau bước đầu tiên.",
+  "ui.members.speed": "Trung bình {time} · {tokens} token / lượt ({n} lượt)",
+  "ui.members.speedUnknown": "Chưa đo tốc độ"
 }

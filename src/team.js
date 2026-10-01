@@ -23,6 +23,8 @@ const STRONG_EFFORT = ['high', 'xhigh', 'max'];
 export const effortsOf = agent => EFFORTS[agent?.provider] || [];
 export const levelOf = (agent, effort) => Math.min(5, tiers[tierOf(agent)] + (STRONG_EFFORT.includes(effort) && !STRONG_EFFORT.includes(agent.effort) ? 1 : 0));
 const ROLE_KEYS = ['manager', 'builder', 'reviewer', 'verifier'];
+// Tổng token của một sự kiện usage (Codex/Claude/Antigravity đặt tên trường khác nhau).
+const usageTokens = u => !u || typeof u !== 'object' ? 0 : Number(u.total_tokens) || ['input_tokens', 'output_tokens', 'thinking_tokens', 'reasoning_output_tokens'].reduce((s, k) => s + (Number(u[k]) || 0), 0);
 export const rolesOf = (r, id) => ROLE_KEYS.filter(k => k === 'builder' ? r.builders.includes(id) : r[k] === id);
 const defaultSensitive = String.raw`(^|/)(\.env|\.github/|migrations?/|dockerfile|docker-compose|package(-lock)?\.json$|pnpm-lock|yarn\.lock|[^/]*(secret|credential|auth|password|token|permission)[^/]*)`;
 const stageGuide = {
@@ -39,6 +41,7 @@ Optimise quota with "effort" per task (must be one of that member's allowedEffor
 - difficulty 1-2: a low effort ("low" or "minimal") on a weak/normal member.
 - difficulty 3: keep the default effort.
 - difficulty 4-5: a strong member at its configured effort. If no strong member is available (quota out or disabled), give it to the best available member whose maxDifficultyWithHighEffort >= difficulty and set effort "high".
+Balance speed against quota using each builder's measured "speed" (avgMinutesPerCall, avgTokensPerCall; samples=0 means unknown): while quota is plentiful (above ~50%), prefer the faster member even if it uses more tokens; as quota gets low, move work to members that use fewer tokens per call even if they are slower, and keep the fast ones for hard or urgent tasks. Tasks run one after another, so a very slow member delays everything after it; mention the expected time in "why".
 Avoid giving builder work to the members who review or verify when another builder fits. Split a hard task into easier ones only when the parts are truly independent and each is fully specified.
 Write every instruction so the member can finish without asking: files/areas, expected behaviour, done criteria.
 Set risk for the whole change: high if it touches auth, permissions, payments, data deletion, migrations, secrets, CI/deploy or public APIs, or likely exceeds ~300 changed lines; medium for ordinary behaviour changes; low for docs, tests or cosmetics.
@@ -94,7 +97,8 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT, body TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS quotas (agent TEXT PRIMARY KEY, body TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS quota_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, body TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS quota_history (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
     this.active = null; this.closed = false; this.refreshing = false; this.waitingReason = null;
     this.cpu = { total: 0, idle: 0 }; this.cpuPercent = 0; this.sampleResources();
@@ -108,20 +112,43 @@ export class Team extends EventEmitter {
         try {
           const q = JSON.parse(row.body);
           if (Array.isArray(q.buckets)) {
-            const seen = new Set();
-            const unique = [];
+            const canonicalKey = b => {
+              const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
+              if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 'claude-session';
+              if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 'claude-weekly';
+              return (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+            };
+            const map = new Map();
             for (const b of q.buckets) {
-              const k = (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
-              if (!seen.has(k)) {
-                seen.add(k);
-                if (b.name) b.name = b.name.replace(/[:\s]+$/, '');
-                if (/session/i.test(b.name || b.id) && b.windows?.[0]) {
-                  if (!b.windows[0].minutes) b.windows[0].minutes = 300;
-                  if (b.windows[0].name === 'used') b.windows[0].name = '5h';
+              const k = canonicalKey(b);
+              const existing = map.get(k);
+              if (!existing) {
+                if (k === 'claude-session') {
+                  b.id = 'claude-session';
+                  b.name = 'Current session';
+                  if (b.windows?.[0]) {
+                    b.windows[0].name = '5h';
+                    b.windows[0].minutes = 300;
+                  }
+                } else if (k === 'claude-weekly') {
+                  b.id = 'claude-weekly';
+                  b.name = 'Current week (all models)';
+                  if (b.windows?.[0]) {
+                    b.windows[0].name = 'week';
+                  }
                 }
-                unique.push(b);
+                map.set(k, b);
+              } else {
+                if (b.windows?.[0]?.resetsAt && !existing.windows?.[0]?.resetsAt) {
+                  existing.windows[0].resetsAt = b.windows[0].resetsAt;
+                }
+                if (b.windows?.[0]?.remaining != null) {
+                  existing.windows[0].remaining = b.windows[0].remaining;
+                  if (b.windows[0].used != null) existing.windows[0].used = b.windows[0].used;
+                }
               }
             }
+            const unique = Array.from(map.values());
             if (unique.length !== q.buckets.length || JSON.stringify(unique) !== JSON.stringify(q.buckets)) {
               q.buckets = unique;
               this.db.prepare('UPDATE quotas SET body=? WHERE agent=?').run(JSON.stringify(q), row.agent);
@@ -153,7 +180,7 @@ export class Team extends EventEmitter {
   state() {
     return { demo: !!this.config.demo, roster: roster(this.config), jobs: this.jobs(), projects: this.config.projects.map(p => ({ id: p.id, path: p.path, tests: p.tests, network: p.network === true })),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
-        model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
+        speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: this.active?.agent === a.id ? 'working' : 'idle', quota: this.quota(a.id) })),
       resources: { ...this.sampleResources(), maxAgents: 1, active: this.active ? 1 : 0, waitingReason: this.waitingReason },
     };
@@ -180,14 +207,18 @@ export class Team extends EventEmitter {
     const names = await this.attach(job, files);
     this.save(job); this.event(id, 'user', members.manager, 'GOAL', goal, names.length ? { attachments: names } : null); this.kick(); return job;
   }
+  // .ai-team/ (file đính kèm, prompt) nằm trong worktree nhưng git luôn bỏ qua.
+  async ensureExclude(worktree) {
+    const exclude = join(resolve(worktree, await git(worktree, ['rev-parse', '--git-common-dir'])), 'info', 'exclude');
+    mkdirSync(join(exclude, '..'), { recursive: true });
+    if (!existsSync(exclude) || !readFileSync(exclude, 'utf8').split(/\r?\n/).includes('.ai-team/')) appendFileSync(exclude, '\n.ai-team/\n');
+  }
   // File/ảnh người dùng đính kèm: lưu trong worktree ở .ai-team/attachments (bị git bỏ qua) để agent đọc được.
   async attach(job, files = []) {
     if (!Array.isArray(files) || !files.length) return [];
     if (files.length > 10) throw new Error(msg("srv.team.attach_limit"));
     const dir = join(job.worktree, '.ai-team', 'attachments'); mkdirSync(dir, { recursive: true });
-    const exclude = join(resolve(job.worktree, await git(job.worktree, ['rev-parse', '--git-common-dir'])), 'info', 'exclude');
-    mkdirSync(join(exclude, '..'), { recursive: true });
-    if (!existsSync(exclude) || !readFileSync(exclude, 'utf8').split(/\r?\n/).includes('.ai-team/')) appendFileSync(exclude, '\n.ai-team/\n');
+    await this.ensureExclude(job.worktree);
     const names = [];
     for (const f of files) {
       // Từ giao diện: {name, data(base64)}; từ MCP/IDE: {path} là file trên máy này.
@@ -219,7 +250,14 @@ export class Team extends EventEmitter {
       model: a.model || 'CLI default', effort: a.effort || 'default', allowedEfforts: effortsOf(a), tier: tierOf(a), maxDifficulty: levelOf(a),
       maxDifficultyWithHighEffort: effortsOf(a).includes('high') ? levelOf(a, 'high') : levelOf(a), quotaRemaining: this.remaining(a.id) ?? 'unknown',
       quotaWindows: (this.quota(a.id).buckets || []).flatMap(b => b.windows.map(w => ({ name: `${b.name}${w.minutes ? ` ${w.minutes}min` : ''}`, remaining: w.remaining, resetsAt: w.resetsAt || w.resetText || null }))).slice(0, 6),
-      available: a.enabled !== false && !this.lowQuota(a.id) }));
+      speed: this.speed(a), available: a.enabled !== false && !this.lowQuota(a.id) }));
+  }
+  // Trung bình 20 lượt gần nhất với đúng model + mức suy luận hiện tại.
+  speed(a) {
+    const rows = this.db.prepare('SELECT ms, tokens FROM member_stats WHERE agent=? AND model=? AND effort=? ORDER BY seq DESC LIMIT 20').all(a.id, a.model || '', a.effort || '');
+    if (!rows.length) return { samples: 0 };
+    const avg = k => rows.reduce((s, r) => s + r[k], 0) / rows.length;
+    return { samples: rows.length, avgMinutesPerCall: +(avg('ms') / 60000).toFixed(1), avgTokensPerCall: Math.round(avg('tokens')) };
   }
   // Controller kiểm lại quyết định của Manager: đủ năng lực, còn quota, đang bật. Không đạt thì tự đổi người.
   pickBuilder(job, task) {
@@ -249,7 +287,8 @@ export class Team extends EventEmitter {
     // Lead chọn mức suy luận theo từng task; chỉ áp dụng mức CLI của member đó hỗ trợ, không sửa cấu hình gốc.
     const agent = effort && effortsOf(base).includes(effort) ? { ...base, effort } : base;
     const members = job.roster || roster(this.config);
-    this.active.agent = agentId; this.save(job);
+    this.active.agent = agentId; job.current = { agent: agentId, stage, startedAt: now() }; this.save(job);
+    const started = Date.now(); let tokens = 0;
     const context = JSON.stringify({ goal: job.goal, instructions: instruction, base: job.base, revision: job.revision,
       reports: job.reports.slice(-12), messages: job.messages, attachments: job.attachments?.length ? { note: 'Files attached by the human, relative to the worktree. Open them (images too) when relevant.', files: job.attachments } : undefined, kind: job.kind || 'code', rigor: job.rigor || 'standard', ...(stage === 'plan' ? { round: job.round, builders: this.members(members.builders, members) } : {}) });
     const shape = stage === 'plan'
@@ -267,8 +306,14 @@ export class Team extends EventEmitter {
       await git(this.project(job.project).path, ['worktree', 'add', '--detach', worktree, job.revision]);
       if (job.attachments?.length) cpSync(join(job.worktree, '.ai-team'), join(worktree, '.ai-team'), { recursive: true });
     }
-    const report = await this.agentRun(agent, { ...job, stage, worktree, network: this.project(job.project).network === true, researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal: this.active.abort.signal,
-      onEvent: (type, data) => { if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); this.event(job.id, agentId, 'controller', type, data.summary, data.details); } });
+    // Gemini/Antigravity nhận prompt qua dòng lệnh; Windows giới hạn ~32K ký tự → ghi prompt ra file trong worktree.
+    let promptFile;
+    if (['antigravity', 'gemini'].includes(agent.provider)) {
+      await this.ensureExclude(worktree); mkdirSync(join(worktree, '.ai-team'), { recursive: true });
+      writeFileSync(join(worktree, '.ai-team', 'prompt.md'), prompt); promptFile = '.ai-team/prompt.md';
+    }
+    const report = await this.agentRun(agent, { ...job, stage, worktree, promptFile, network: this.project(job.project).network === true, researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal: this.active.abort.signal,
+      onEvent: (type, data) => { if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') tokens += usageTokens(data.details); this.event(job.id, agentId, 'controller', type, data.summary, data.details); } });
     if (this.active.abort.signal.aborted) throw new Error('Run interrupted');
     if (report.status === 'blocked') {
       this.event(job.id, agentId, members.manager, 'BLOCKER', report.summary, report);
@@ -276,6 +321,9 @@ export class Team extends EventEmitter {
     }
     if (stage !== 'implement' && (await git(worktree, ['status', '--porcelain']) || await git(worktree, ['rev-parse', 'HEAD']) !== job.revision)) throw new Error(msg("srv.team.agent_chi_doc_da_thay_doi"));
     if (stage !== 'plan' && report.status !== 'completed') throw new Error(msg("srv.team.agent_chua_xac_nhan_completed_trong"));
+    job.durations = [...(job.durations || []), Date.now() - started].slice(-20); job.current = null;
+    // Đo thật tốc độ và token mỗi lượt để Lead cân nhắc nhanh-nhưng-tốn hay rẻ-nhưng-chậm.
+    this.db.prepare('INSERT INTO member_stats (agent, model, effort, stage, ms, tokens, at) VALUES (?,?,?,?,?,?,?)').run(agentId, agent.model || '', agent.effort || '', stage, Date.now() - started, tokens, now());
     const entry = { ...scrub(report), agent: agentId, stage, revision: job.revision };
     job.reports.push(entry);
     this.event(job.id, agentId, stage === 'final' ? 'user' : agentId === members.manager ? 'controller' : members.manager, stage === 'review' ? 'REVIEW_RESULT' : 'RESULT', report.summary, report);
@@ -532,26 +580,91 @@ export class Team extends EventEmitter {
   // Claude CLI không có lệnh đọc quota miễn phí; lấy từ sự kiện rate_limit_event trong stream-json khi member chạy việc.
   observeQuota(agentId, info) {
     if (!info || typeof info !== 'object') return;
-    let used = Number(info.utilization ?? info.used_percentage);
-    if (!Number.isFinite(used)) used = info.status === 'exceeded' || info.status === 'rejected' ? 100 : null;
-    else if (used <= 1) used *= 100;
-    const reset = info.resetsAt ?? info.resets_at, resetsAt = reset == null ? null : new Date(typeof reset === 'number' && reset < 1e12 ? reset * 1000 : reset).toISOString();
-    const name = String(info.rateLimitType || info.type || 'claude');
-    this.saveObserved(agentId, [{ id: name, name, windows: [{ name: info.status || 'usage', remaining: used == null ? null : Math.max(0, Math.min(100, 100 - used)), minutes: null, resetsAt }] }]);
+    const buckets = [];
+    if (info.unifiedWindows && typeof info.unifiedWindows === 'object') {
+      const u5 = info.unifiedWindows.five_hour;
+      const u7 = info.unifiedWindows.seven_day || info.unifiedWindows.weekly_all;
+      if (u5 && Number.isFinite(u5.utilization)) {
+        const used5 = Math.max(0, Math.min(100, Math.round(u5.utilization * 100)));
+        const rem5 = Math.max(0, 100 - used5);
+        const rAt5 = u5.resetsAt ? new Date(typeof u5.resetsAt === 'number' && u5.resetsAt < 1e12 ? u5.resetsAt * 1000 : u5.resetsAt).toISOString() : null;
+        buckets.push({
+          id: 'claude-session',
+          name: 'Current session',
+          windows: [{
+            name: '5h',
+            remaining: rem5,
+            used: used5,
+            minutes: 300,
+            resetsAt: rAt5,
+            resetText: null
+          }]
+        });
+      }
+      if (u7 && Number.isFinite(u7.utilization)) {
+        const used7 = Math.max(0, Math.min(100, Math.round(u7.utilization * 100)));
+        const rem7 = Math.max(0, 100 - used7);
+        const rAt7 = u7.resetsAt ? new Date(typeof u7.resetsAt === 'number' && u7.resetsAt < 1e12 ? u7.resetsAt * 1000 : u7.resetsAt).toISOString() : null;
+        buckets.push({
+          id: 'claude-weekly',
+          name: 'Current week (all models)',
+          windows: [{
+            name: 'week',
+            remaining: rem7,
+            used: used7,
+            minutes: 10080,
+            resetsAt: rAt7,
+            resetText: null
+          }]
+        });
+      }
+    }
+    if (!buckets.length) {
+      let used = Number(info.utilization ?? info.used_percentage);
+      if (!Number.isFinite(used)) used = info.status === 'exceeded' || info.status === 'rejected' ? 100 : null;
+      else if (used <= 1) used *= 100;
+      if (used != null) used = Math.round(used);
+      const rem = used != null ? Math.max(0, Math.min(100, 100 - used)) : null;
+      const reset = info.resetsAt ?? info.resets_at;
+      const resetsAt = reset == null ? null : new Date(typeof reset === 'number' && reset < 1e12 ? reset * 1000 : reset).toISOString();
+      const type = String(info.rateLimitType || info.type || 'claude').toLowerCase();
+      const is5h = /five|session/i.test(type);
+      const idKey = is5h ? 'claude-session' : (/week|seven/i.test(type) ? 'claude-weekly' : 'usage:' + type);
+      const name = is5h ? 'Current session' : (/week|seven/i.test(type) ? 'Current week (all models)' : type);
+      buckets.push({
+        id: idKey,
+        name,
+        windows: [{
+          name: is5h ? '5h' : 'usage',
+          remaining: rem,
+          used,
+          minutes: is5h ? 300 : null,
+          resetsAt,
+          resetText: null
+        }]
+      });
+    }
+    this.saveObserved(agentId, buckets);
   }
   saveObserved(agentId, fresh) {
     const prev = this.quota(agentId);
+    const canonicalKey = b => {
+      const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
+      if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 'claude-session';
+      if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 'claude-weekly';
+      return (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+    };
     const freshMap = new Map();
     for (const b of fresh) {
-      const key = (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+      const key = canonicalKey(b);
       if (!freshMap.has(key)) freshMap.set(key, b);
     }
     const freshClean = Array.from(freshMap.values());
-    const freshKeys = new Set(freshClean.map(b => (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '')));
-    const prevBuckets = (prev.observed ? prev.buckets : []).filter(b => !freshKeys.has((b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '')));
+    const freshKeys = new Set(Array.from(freshMap.keys()));
+    const prevBuckets = (prev.observed ? prev.buckets : []).filter(b => !freshKeys.has(canonicalKey(b)));
     const combinedMap = new Map();
     for (const b of [...freshClean, ...prevBuckets]) {
-      const key = (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+      const key = canonicalKey(b);
       if (!combinedMap.has(key)) combinedMap.set(key, b);
     }
     const buckets = Array.from(combinedMap.values());

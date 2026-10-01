@@ -183,7 +183,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (agent.effort) args.push('--effort', agent.effort);
     if (!web) args.push('--disallowedTools', 'WebFetch,WebSearch');
   } else {
-    args.push('-p', prompt, '--output-format', 'stream-json');
+    args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);
     if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : 'plan');
   }
