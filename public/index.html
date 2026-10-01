@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="vi" data-theme="system">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Team · Control Room</title><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script></head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/"><span class="brand-icon">⌘</span><span>AI TEAM<small>CONTROL ROOM</small></span></a>
+  <div class="workspace-label" data-i18n="ui.nav.workspace"></div>
+  <button class="nav active" id="overview">◉ &nbsp; <span data-i18n="ui.nav.overview"></span></button>
+  <button class="nav" id="quota-nav">◷ &nbsp; <span data-i18n="ui.nav.members"></span></button>
+  <div class="sidebar-heading"><span data-i18n="ui.nav.jobs"></span><button id="new-task" data-i18n-aria="ui.nav.newJob">＋</button></div>
+  <div id="job-list" class="job-list"></div>
+  <div class="settings">
+    <label><span data-i18n="ui.settings.language"></span><select id="lang-select"><option value="vi">Tiếng Việt</option><option value="ja">日本語</option><option value="en">English</option></select></label>
+    <label><span data-i18n="ui.settings.theme"></span><select id="theme-select"><option value="system" data-i18n="ui.settings.themeSystem"></option><option value="dark" data-i18n="ui.settings.themeDark"></option><option value="light" data-i18n="ui.settings.themeLight"></option></select></label>
+  </div>
+  <div class="sidebar-bottom"><span class="dot green"></span> <span data-i18n="ui.nav.local"></span><br><small id="connection"></small></div>
+</aside>
+<main>
+  <div class="notice stale" id="stale" hidden role="alert" data-i18n="ui.stale"></div>
+  <header><div><span class="eyebrow">WORKSPACE / OVERVIEW</span><h1><span data-i18n="ui.header.title"></span> <span class="tag" id="mode">LOCAL</span></h1><p data-i18n="ui.header.subtitle"></p></div><button class="primary" id="create-top" data-i18n="ui.header.newJob"></button></header>
+  <div class="notice" id="notice" hidden role="status"></div>
+  <section class="metrics" id="metrics"></section>
+  <div id="work-view">
+    <section class="panel network"><div class="panel-heading"><div><span class="eyebrow">THE TEAM</span><h2 data-i18n="ui.team.title"></h2></div><span class="muted" id="running-label"></span></div>
+      <div class="network-body" id="flow"></div><div class="bench" id="bench"></div>
+      <div class="network-footer"><span><i class="dot green"></i> <span data-i18n="ui.team.legendWorking"></span></span><span><i class="line used"></i> <span data-i18n="ui.team.legendUsed"></span></span><span><i class="line rework"></i> <span data-i18n="ui.team.legendRework"></span></span><span data-i18n="ui.team.legendHint"></span><button id="clear-filter" data-i18n="ui.team.showAll"></button></div>
+    </section>
+    <div class="work-grid">
+      <section class="panel communication"><div class="panel-heading"><div><span class="eyebrow">COMMUNICATION</span><h2 id="conversation-title"></h2></div><div class="chat-tools"><span class="tag" id="event-count"></span><button id="chat-expand" class="icon-btn" data-i18n-aria="ui.chat.expand">⤢</button></div></div><div class="chat-members" id="chat-members"></div>
+        <div class="tabs" role="tablist"><button class="selected" data-tab="messages" data-i18n="ui.tabs.messages"></button><button data-tab="activity" data-i18n="ui.tabs.activity"></button><button data-tab="decisions" data-i18n="ui.tabs.decisions"></button><button data-tab="all" data-i18n="ui.tabs.all"></button></div>
+        <div id="timeline" class="timeline" aria-live="polite"></div>
+        <form id="message-form" class="message-form"><label class="sr-only" for="message" data-i18n="ui.message.label"></label><input id="message" data-i18n-placeholder="ui.message.placeholder" maxlength="20000" required><button type="submit" data-i18n-aria="ui.message.send">↑</button></form>
+      </section>
+      <aside class="panel inspector"><div class="panel-heading"><div><span class="eyebrow">TASK INSPECTOR</span><h2 data-i18n="ui.inspector.title"></h2></div></div><div id="inspector"></div></aside>
+    </div>
+  </div>
+  <section id="quota-view" hidden><div class="panel"><div class="panel-heading"><div><span class="eyebrow">MEMBERS & ACCOUNTS</span><h2 data-i18n="ui.members.title"></h2></div><div class="account-actions"><div class="view-switch" role="group" aria-label="View mode"><button type="button" id="view-mode-compact" class="selected"><span class="view-icon">☰</span> <span data-i18n="ui.members.viewCompact"></span></button><button type="button" id="view-mode-detailed"><span class="view-icon">⊞</span> <span data-i18n="ui.members.viewDetailed"></span></button></div><button id="refresh-quota" data-i18n="ui.members.refreshQuota"></button><button class="primary" id="add-member" data-i18n="ui.members.add"></button></div></div><p class="section-note" data-i18n="ui.members.note"></p><div class="demo-live-link" id="demo-live-link" hidden><span data-i18n="ui.members.demoNote"></span> <a class="primary button-link" href="http://127.0.0.1:3333/?members=1" data-i18n="ui.members.openLive"></a></div><div id="quota-compact" class="quota-compact"></div><div id="quota-cards" class="quota-cards" hidden></div><details class="history"><summary data-i18n="ui.members.history"></summary><pre id="quota-history"></pre></details></div></section>
+  <footer>AI Team / Local orchestrator <span data-i18n="ui.footer.flow"></span></footer>
+</main>
+<dialog id="task-dialog"><form id="task-form"><div class="dialog-heading"><h2 data-i18n="ui.task.title"></h2><button type="button" id="close-dialog" data-i18n-aria="ui.common.close">×</button></div><label for="project" data-i18n="ui.task.project"></label><select id="project" required></select><p class="muted" id="project-help"></p><label for="goal" data-i18n="ui.task.goal"></label><textarea id="goal" rows="6" maxlength="20000" data-i18n-placeholder="ui.task.goalPlaceholder" required></textarea><p class="muted" data-i18n="ui.task.note"></p><button class="primary" type="submit" id="submit-task" data-i18n="ui.task.submit"></button></form></dialog>
+<dialog id="diff-dialog"><div class="dialog-heading"><h2 data-i18n="ui.diff.title"></h2><button id="close-diff" data-i18n-aria="ui.common.close">×</button></div><pre id="diff-content"></pre></dialog>
+<dialog id="member-dialog"><form id="member-form"><div class="dialog-heading"><h2 data-i18n="ui.addMember.title"></h2><button type="button" id="close-member" data-i18n-aria="ui.common.close">×</button></div><label for="member-provider" data-i18n="ui.addMember.provider"></label><select id="member-provider" required><option value="codex">Codex</option><option value="antigravity">Gemini · Google AI Pro / Ultra</option><option value="gemini">Gemini · Code Assist</option><option value="claude">Claude Code</option></select><p class="muted" id="provider-hint"></p><label for="member-name" data-i18n="ui.addMember.name"></label><input id="member-name" maxlength="80" data-i18n-placeholder="ui.addMember.namePlaceholder" required><label for="member-role" data-i18n="ui.addMember.role"></label><select id="member-role"><option value="builder" data-i18n="ui.role.builderLong"></option><option value="manager" data-i18n="ui.role.managerLong"></option><option value="reviewer" data-i18n="ui.role.reviewerLong"></option><option value="verifier" data-i18n="ui.role.verifierLong"></option><option value="none" data-i18n="ui.role.noneLong"></option></select><label for="member-tier" data-i18n="ui.addMember.tier"></label><select id="member-tier"><option value="normal" data-i18n="ui.tier.normalLong"></option><option value="strong" data-i18n="ui.tier.strongLong"></option><option value="weak" data-i18n="ui.tier.weakLong"></option></select><p class="muted" data-i18n="ui.addMember.note"></p><button class="primary" type="submit" id="save-member" data-i18n="ui.addMember.submit"></button></form></dialog>
+<dialog id="login-dialog"><div class="dialog-heading"><h2 id="login-title"></h2><button id="close-login" data-i18n-aria="ui.common.close">×</button></div><p id="login-status" role="status"></p><p id="login-detail" class="muted"></p><div class="login-actions"><button class="primary" id="start-login" data-i18n="ui.login.start"></button><a id="auth-link" class="primary button-link" target="_blank" rel="noopener noreferrer" hidden data-i18n="ui.login.openPage"></a><a id="install-link" class="button-link" target="_blank" rel="noopener noreferrer" hidden data-i18n="ui.login.install"></a><button id="check-login" data-i18n="ui.login.check"></button><button id="cancel-login" hidden data-i18n="ui.login.cancel"></button></div><p class="muted" data-i18n="ui.login.note"></p></dialog>
+<dialog id="profile-dialog"><form id="profile-form"><div class="dialog-heading"><h2 id="profile-title"></h2><button type="button" id="close-profile" data-i18n-aria="ui.common.close">×</button></div>
+<label for="profile-name" data-i18n="ui.profile.name"></label><input id="profile-name" maxlength="80" required>
+<label for="profile-model" data-i18n="ui.profile.model"></label><select id="profile-model"></select><input id="profile-model-custom" maxlength="100" data-i18n-placeholder="ui.profile.modelCustom" hidden><p class="muted" id="profile-model-note"></p><div id="profile-effort-box"><label for="profile-effort" data-i18n="ui.profile.effort"></label><select id="profile-effort"></select><p class="muted" data-i18n="ui.profile.effortNote"></p></div>
+<label for="profile-cli" data-i18n="ui.profile.cli"></label><input id="profile-cli" maxlength="500" placeholder="C:\Users\you\AppData\Roaming\npm\claude.cmd · …\agy.exe"><p class="muted" id="profile-cli-note"></p>
+<label for="profile-tier" data-i18n="ui.profile.tier"></label><select id="profile-tier"><option value="strong" data-i18n="ui.tier.strongLong"></option><option value="normal" data-i18n="ui.tier.normalLong"></option><option value="weak" data-i18n="ui.tier.weakLong"></option></select>
+<label class="profile-check"><input type="checkbox" id="profile-enabled"> <span data-i18n="ui.profile.enabled"></span></label>
+<label for="profile-prompt" data-i18n="ui.profile.prompt"></label><textarea id="profile-prompt" rows="8" maxlength="8000" data-i18n-placeholder="ui.profile.promptPlaceholder"></textarea>
+<p class="muted" data-i18n="ui.profile.promptNote"></p>
+<button class="primary" type="submit" id="save-profile" data-i18n="ui.profile.save"></button></form></dialog>
+<dialog id="slot-dialog"><form id="slot-form"><div class="dialog-heading"><h2 id="slot-title"></h2><button type="button" id="close-slot" data-i18n-aria="ui.common.close">×</button></div>
+<label for="slot-member" data-i18n="ui.slot.member"></label><select id="slot-member"></select><p class="muted" id="slot-info"></p>
+<label for="slot-prompt" data-i18n="ui.profile.prompt"></label><textarea id="slot-prompt" rows="10" maxlength="8000" data-i18n-placeholder="ui.profile.promptPlaceholder"></textarea><p class="muted" data-i18n="ui.slot.promptNote"></p>
+<div class="login-actions"><button type="button" id="slot-profile" data-i18n="ui.slot.fullProfile"></button><button type="button" id="slot-filter" data-i18n="ui.slot.filter"></button><button type="button" id="slot-remove" class="danger" data-i18n="ui.slot.remove"></button></div>
+<button class="primary" type="submit" data-i18n="ui.slot.save"></button></form></dialog>
+<dialog id="merge-dialog"><div class="dialog-heading"><h2 data-i18n="ui.merge.title"></h2><button id="close-merge" data-i18n-aria="ui.common.close">×</button></div><div id="merge-check"></div>
+<label for="merge-confirm" id="merge-confirm-label" hidden></label><input id="merge-confirm" autocomplete="off" hidden>
+<div class="login-actions"><button id="merge-view-diff" data-i18n="ui.common.viewDiff"></button><button class="primary" id="merge-go" data-i18n="ui.merge.go"></button></div></dialog>
+</body></html>

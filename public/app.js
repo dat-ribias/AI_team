@@ -1,0 +1,512 @@
+const $ = id => document.getElementById(id);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---- i18n: chuỗi nằm ở /locales/<lang>.json, không viết cứng trong code ----
+const LANGS = ['vi', 'en', 'ja'], LOCALE_TAG = { vi: 'vi-VN', en: 'en-US', ja: 'ja-JP' };
+let lang = 'vi', dict = {}, fallback = {};
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+function t(key, vars = {}) {
+  const text = dict[key] ?? fallback[key] ?? key;
+  return text.replace(/\{(\w+)\}/g, (m, k) => k in vars ? String(vars[k]) : m);
+}
+async function loadLanguage(next) {
+  lang = LANGS.includes(next) ? next : 'vi';
+  const get = async l => (await fetch(`/locales/${l}.json`, { cache: 'no-store' })).json();
+  [dict, fallback] = await Promise.all([get(lang), lang === 'vi' ? Promise.resolve({}) : get('vi')]);
+  document.documentElement.lang = lang; $('lang-select').value = lang;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); });
+}
+// ---- giao diện sáng/tối: lưu theo trình duyệt ----
+function applyTheme(theme) { document.documentElement.dataset.theme = ['dark', 'light'].includes(theme) ? theme : 'system'; $('theme-select').value = document.documentElement.dataset.theme; }
+applyTheme(store.get('theme'));
+
+const clock = time => time ? new Date(time).toLocaleString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo' }) : t('ui.common.unknown');
+let names = {};
+let state, selected, events = [], filter, tab = 'messages', rendering = false, loginId;
+async function api(path, data) {
+  const r = await fetch('/api/' + path, { method: data ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Team-Request': '1' }, ...(data ? { body: JSON.stringify(data) } : {}) });
+  const result = await r.json().catch(() => ({}));
+  if (r.status === 404 && path.startsWith('members/') || r.status === 404 && path === 'settings') throw new Error(t('ui.error.oldServer'));
+  if (!r.ok) throw new Error(result.error || r.statusText); return result;
+}
+function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
+async function attempt(fn) { try { await fn(); } catch (e) { notice(e.message); } }
+const statusLabel = s => t(`ui.status.${s}`);
+function badge(job) { return `<span class="status ${esc(job.status)}">${esc(statusLabel(job.status))}</span>`; }
+function duration(minutes) {
+  const m = Math.max(0, Math.round(minutes)), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), r = m % 60;
+  return [d && t('ui.time.days', { n: d }), h && t('ui.time.hours', { n: h }), r && t('ui.time.minutes', { n: r })].filter(Boolean).join(' ') || t('ui.time.minutes', { n: 0 });
+}
+const untilReset = time => { const ms = Date.parse(time) - Date.now(); return Number.isFinite(ms) && ms > 0 ? ' · ' + t('ui.quota.left', { time: duration(ms / 60000) }) : ''; };
+function quotaPercent(q) {
+  if (q.observed) { const v = q.buckets.flatMap(b => b.windows).filter(w => !w.resetsAt || Date.parse(w.resetsAt) > Date.now()).map(w => w.remaining).filter(Number.isFinite); return v.length ? Math.round(Math.min(...v)) : null; }
+  if (!q.checkedAt || Date.now() - Date.parse(q.checkedAt) > 10 * 60000) return null;
+  const values = q.buckets.flatMap(b => b.windows.map(w => w.remaining)).filter(Number.isFinite);
+  return values.length ? Math.round(Math.min(...values)) : null;
+}
+function quotaRemaining(q) {
+  const p = quotaPercent(q); if (p == null) return t('ui.common.unknown');
+  return t(q.observed ? 'ui.quota.remainingObserved' : 'ui.quota.remaining', { n: p });
+}
+const tierLabel = tier => t(`ui.tier.${['strong', 'normal', 'weak'].includes(tier) ? tier : 'normal'}`);
+const roleLabel = kind => t(`ui.role.${kind}`);
+const cut = (s, n) => (s = String(s ?? '')).length > n ? s.slice(0, n - 1) + '…' : s;
+
+function drawState() {
+  names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
+  $('stale').hidden = !state.stale;
+  $('mode').textContent = state.demo ? t('ui.header.demo') : 'LIVE · LOCAL';
+  $('connection').textContent = t('ui.nav.connected');
+  if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
+  const ready = state.jobs.filter(j => j.status === 'ready').length;
+  $('metrics').innerHTML = [
+    [t('ui.metric.agents'), `${state.resources.active} <small>/ 1</small>`, state.resources.waitingReason || t('ui.metric.onDemand')],
+    [t('ui.metric.jobs'), state.jobs.length, t('ui.metric.jobsNote', { running: state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length, ready })],
+    [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
+    [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
+  ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
+  $('job-list').innerHTML = state.jobs.map(j => `<button class="job-button ${j.id === selected ? 'selected' : ''}" data-job="${esc(j.id)}"><strong>${esc(j.goal)}</strong><small>${esc(j.id)} · ${esc(statusLabel(j.status))}</small></button>`).join('') || `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`;
+  document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => attempt(async () => { selected = b.dataset.job; events = []; await refresh(); }));
+  drawFlow();
+  document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => openSlot(b.dataset.slot, b.dataset.agent || null));
+  document.querySelectorAll('[data-bench]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.bench)));
+  $('running-label').textContent = t('ui.team.running', { n: state.resources.active });
+  $('project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join('');
+  $('project-help').textContent = t(state.projects.length ? 'ui.task.projectHelp' : 'ui.task.noProject');
+  $('submit-task').disabled = !state.projects.length;
+  drawInspector(); drawQuota(); drawLogin();
+}
+const ROLE_KEYS = ['manager', 'builder', 'reviewer', 'verifier'];
+const rolesOf = (id, r = state.roster) => ROLE_KEYS.filter(k => k === 'builder' ? r.builders.includes(id) : r[k] === id);
+const rolesText = id => rolesOf(id).map(roleLabel).join(' / ') || roleLabel('none');
+// Một member có thể giữ nhiều vai trò: tick/bỏ tick từng vai trò.
+const roleChecks = a => `<div class="role-checks">${ROLE_KEYS.map(k => `<label class="role-chip"><input type="checkbox" data-role-toggle="${esc(a.id)}" value="${k}" ${rolesOf(a.id).includes(k) ? 'checked' : ''} ${k === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}> ${esc(roleLabel(k))}</label>`).join('')}</div>`;
+// Bấm ô trên sơ đồ: đổi member cho vai trò đó + sửa system prompt của member ngay tại chỗ.
+let slot = null;
+function openSlot(kind, current) {
+  slot = { kind, current };
+  $('slot-title').textContent = t(current ? 'ui.slot.title' : kind === 'builder' ? 'ui.slot.addBuilderTitle' : 'ui.slot.title', { role: roleLabel(kind) });
+  $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => `<option value="${esc(a.id)}" ${a.id === current ? 'selected' : ''} ${kind === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}>${esc(a.label)} · ${esc(a.provider)} · ${esc(tierLabel(a.tier))}</option>`).join('');
+  $('slot-remove').hidden = !current; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
+  slotMember(); $('slot-dialog').showModal();
+}
+function slotMember() {
+  const a = state.agents.find(x => x.id === $('slot-member').value);
+  $('slot-prompt').value = a?.systemPrompt || ''; $('slot-prompt').disabled = !a;
+  $('slot-info').textContent = a ? t('ui.slot.info', { roles: rolesText(a.id), model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ' · ' + effortLabel(a.effort) : '') }) : '';
+}
+async function saveSlot() {
+  const { kind, current } = slot, next = $('slot-member').value;
+  if (next && next !== current) {
+    if (kind === 'builder' && current) await api(`members/${current}/role`, { kind, on: false });
+    await api(`members/${next}/role`, { kind, on: true });
+  }
+  const a = state.agents.find(x => x.id === next);
+  if (a && $('slot-prompt').value !== (a.systemPrompt || '')) await api(`members/${next}/profile`, { systemPrompt: $('slot-prompt').value });
+  $('slot-dialog').close(); await refresh();
+}
+// Sơ đồ dựng lại từ roster + plan của task đang chọn: thêm member hay Manager đổi người là tự vẽ lại.
+function drawFlow() {
+  const job = state.jobs.find(j => j.id === selected), r = job?.roster || state.roster;
+  const byId = Object.fromEntries(state.agents.map(a => [a.id, a]));
+  const builders = r.builders.filter(id => byId[id]), rowH = 64, top = 34;
+  const H = Math.max(140, builders.length * rowH + 20), cy = top + H / 2, W = 1180, nodes = {};
+  const place = (key, x, y, w = 150) => nodes[key] = { x, y, w };
+  place('user', 10, cy, 96); place('manager', 150, cy);
+  builders.forEach((id, i) => place('b:' + id, 360, cy + (i - (builders.length - 1) / 2) * rowH));
+  place('tests', 560, cy, 104); place('reviewer', 710, cy); place('verifier', 900, cy); place('merge', 1090, cy, 86);
+  const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
+  const cur = job?.tasks?.[job.taskIndex], curB = cur && (cur.ranBy || job.assignee || cur.agent), running = job?.status === 'running';
+  const active = running ? { plan: job.round ? 'rework' : 'user>manager', implement: 'manager>b:' + curB, test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage] : null;
+  const edge = (a, b, cls, label = '') => {
+    const A = nodes[a], B = nodes[b]; if (!A || !B) return '';
+    const x1 = A.x + A.w, x2 = B.x, mx = (x1 + x2) / 2, on = active === `${a}>${b}` || active === 'b>tests' && b === 'tests' && cls.includes('used');
+    return `<path class="edge ${cls} ${on ? 'active' : ''}" d="M${x1} ${A.y} C${mx} ${A.y} ${mx} ${B.y} ${x2} ${B.y}"/>${label ? `<text class="edge-label task" x="${x2 - 6}" y="${B.y - 6}" text-anchor="end">${esc(label)}</text>` : ''}`;
+  };
+  const sub = id => { const a = byId[id]; if (!a) return t('ui.flow.notChosen'); const p = quotaPercent(a.quota); return `${tierLabel(a.tier)} · ${cut((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''), 16)} · ${p == null ? 'quota ?' : p + '%'}`; };
+  const box = (key, title, subtitle, agentId, slot) => {
+    const n = nodes[key], a = agentId && byId[agentId];
+    const cls = [a?.state === 'working' && 'working', filter && filter === agentId && 'filtered', agentId === null && 'missing', a && !a.enabled && 'disabled'].filter(Boolean).join(' ');
+    const tip = a ? `${a.label} · ${rolesText(a.id)}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
+    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/><text x="10" y="19" class="t">${esc(cut(title, n.w / 8))}</text><text x="10" y="36" class="s">${esc(subtitle)}</text></g>`;
+  };
+  const rv = nodes.reviewer, mg = nodes.manager;
+  let edges = edge('user', 'manager', 'used');
+  for (const id of builders) {
+    const tasks = tasksOf(id), used = !job || tasks.length > 0;
+    edges += edge('manager', 'b:' + id, used ? 'used' : 'idle', tasks.map(x => `T${x.n}·k${x.difficulty ?? '?'}`).join(' '));
+    edges += edge('b:' + id, 'tests', used ? 'used' : 'idle');
+  }
+  edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
+  edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active === 'rework' ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 23} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 23}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
+  const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
+  const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), sub(r.manager), r.manager || null, 'manager')
+    + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
+    + box('tests', 'Tests', t('ui.flow.testsBy')) + box('reviewer', named('Review', r.reviewer), sub(r.reviewer), r.reviewer || null, 'reviewer')
+    + box('verifier', named('Verify', r.verifier), sub(r.verifier), r.verifier || null, 'verifier') + box('merge', t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
+  $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
+  const inRoster = new Set([r.manager, r.reviewer, r.verifier, ...r.builders]);
+  const bench = state.agents.filter(a => !inRoster.has(a.id));
+  $('bench').innerHTML = `<button data-slot="builder" class="primary-ghost">${esc(t('ui.slot.addBuilder'))}</button>${bench.length ? `<span>${esc(t('ui.flow.bench'))}</span>${bench.map(a => `<button data-bench="${esc(a.id)}" class="${a.state}">${esc(a.label)} · ${esc(tierLabel(a.tier))}</button>`).join('')}` : ''}`;
+  document.querySelectorAll('g[data-slot]').forEach(g => g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } });
+}
+function drawInspector() {
+  const job = state.jobs.find(j => j.id === selected);
+  $('message').disabled = !job || ['merged', 'cancelled'].includes(job.status);
+  if (!job) { $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span></div>`; return; }
+  const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
+  const facts = [['Task', job.id], [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), job.round], [t('ui.inspector.started'), clock(job.createdAt)]];
+  const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${i === job.taskIndex && job.stage === 'implement' ? 'current' : ''}"><b>T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}</li>`).join('')}</ul>` : '';
+  const risk = job.risk ? `<p class="muted">${esc(t('ui.inspector.risk'))} <b class="${job.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + job.risk))}</b>${job.riskReasons?.length ? ' · ' + esc(job.riskReasons.join('; ')) : ''}</p>` : '';
+  const steps = [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision], ['Verify', job.verified === job.revision], ['Merge', job.status === 'merged']];
+  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => `<span class="step ${done ? 'done' : ''}">${done ? '✓' : '○'} ${label}</span>`).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button><button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button><select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div><button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button><p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => { await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); }));
+  $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
+  $('view-diff').onclick = () => attempt(showDiff);
+  $('merge').onclick = () => attempt(openMerge);
+}
+async function showDiff() { const result = await api(`jobs/${selected}/diff`); $('diff-content').textContent = result.diff || t('ui.diff.empty'); if (result.status) $('diff-content').textContent += '\n\nWorking tree:\n' + result.status; $('diff-dialog').showModal(); }
+async function openMerge() {
+  const c = await api(`jobs/${selected}/merge-check`), job = state.jobs.find(j => j.id === selected);
+  const checks = [[t('ui.merge.tested'), c.checks.tested], [t('ui.merge.reviewed'), c.checks.reviewed], [t('ui.merge.verified'), c.checks.verified], [t('ui.merge.baseUnchanged', { branch: job.baseBranch }), c.checks.baseUnchanged]];
+  $('merge-check').innerHTML = `<p>${esc(t('ui.merge.summary', { code: c.code, branch: job.baseBranch, files: c.files, added: c.added, removed: c.removed }))}</p><p>${esc(t('ui.merge.risk'))} <b class="${c.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + c.risk))}</b></p><ul class="check-list">${checks.map(([l, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(l)}</li>`).join('')}${c.reasons.map(x => `<li class="bad">⚠ ${esc(x)}</li>`).join('')}</ul>${c.checks.baseUnchanged ? '' : `<p class="error-box">${esc(t('ui.merge.baseChanged'))}</p>`}`;
+  $('merge-confirm-label').textContent = t('ui.merge.confirm', { code: c.code });
+  $('merge-confirm').value = ''; $('merge-confirm').hidden = $('merge-confirm-label').hidden = !c.needsConfirm;
+  $('merge-go').disabled = !checks.every(([, ok]) => ok) || !c.checks.ready; $('merge-dialog').showModal();
+}
+let profileId, profileModels = [], profileEfforts = [];
+const effortLabel = e => dict['ui.effort.' + e] || fallback['ui.effort.' + e] || e;
+// Mức suy luận theo model đang chọn (Codex) hoặc danh sách chung của CLI (Claude).
+function fillEfforts(current) {
+  const a = state.agents.find(x => x.id === profileId), id = $('profile-model').value === '__custom' ? $('profile-model-custom').value : $('profile-model').value;
+  const model = profileModels.find(m => m.id === id) || profileModels.find(m => m.isDefault);
+  let list = model?.efforts?.length ? model.efforts : profileEfforts;
+  if (current && !list.includes(current)) list = [...list, current];
+  $('profile-effort-box').hidden = !['codex', 'claude'].includes(a?.provider) || !list.length && !current;
+  const def = model?.defaultEffort ? ` (${effortLabel(model.defaultEffort)})` : '';
+  $('profile-effort').innerHTML = `<option value="">${esc(t('ui.profile.effortDefault'))}${esc(def)}</option>${list.map(e => `<option value="${esc(e)}">${esc(effortLabel(e))}</option>`).join('')}`;
+  $('profile-effort').value = current || '';
+}
+function fillModels(models, current) {
+  profileModels = models;
+  $('profile-model').innerHTML = `<option value="">${esc(t('ui.profile.modelDefault'))}</option>${models.map(m => `<option value="${esc(m.id)}">${esc(m.label || m.id)}${m.isDefault ? ' · ' + esc(t('ui.profile.default')) : ''}</option>`).join('')}<option value="__custom">${esc(t('ui.profile.modelOther'))}</option>`;
+  const known = !current || models.some(m => m.id === current);
+  $('profile-model').value = known ? current || '' : '__custom'; $('profile-model-custom').value = known ? '' : current; $('profile-model-custom').hidden = known;
+}
+async function openProfile(id) {
+  profileId = id; const a = state.agents.find(x => x.id === id);
+  $('profile-cli').value = $('profile-cli').dataset.initial = a.auth?.cli || ''; $('profile-cli-note').textContent = t(a.auth?.cli ? 'ui.profile.cliFound' : 'ui.profile.cliMissing');
+  $('profile-title').textContent = t('ui.profile.title', { name: a.label }); $('profile-name').value = a.label; $('profile-tier').value = a.tier; $('profile-enabled').checked = a.enabled; $('profile-prompt').value = a.systemPrompt;
+  profileEfforts = []; fillModels([], a.model); fillEfforts(a.effort); $('profile-model-note').textContent = t('ui.profile.loadingModels'); $('profile-dialog').showModal();
+  try { const r = await api(`members/${id}/models`, {}); if (profileId === id) { profileEfforts = r.efforts || []; const keep = $('profile-effort').value; fillModels(r.models, a.model); fillEfforts(keep); $('profile-model-note').textContent = r.note || t('ui.profile.modelsFromCli', { n: r.models.length }); } }
+  catch (e) { $('profile-model-note').textContent = t('ui.profile.modelsFailed', { error: e.message }); }
+}
+// Trạng thái đăng nhập nằm trong bộ nhớ server; mở màn thành viên thì hỏi lại CLI cho các member chưa kết nối.
+let checking = false;
+async function recheckMembers(ids) {
+  if (checking || !state || state.demo) return; checking = true;
+  try {
+    for (const a of state.agents.filter(a => (ids ? ids.includes(a.id) : true) && !['connected', 'starting', 'pending', 'terminal'].includes(a.auth?.status))) {
+      await api(`members/${a.id}/refresh`, {}).catch(() => {});
+    }
+    await refresh();
+  } finally { checking = false; }
+}
+// Khung trao đổi kiểu chat nhóm: mọi thành viên trong luồng, tin của Bạn bên phải, hoạt động kỹ thuật thu gọn ở giữa.
+const SYSTEM_TYPES = ['ACTIVITY', 'DIAGNOSTIC', 'TEST_OUTPUT', 'TEST_START', 'USAGE', 'RATE_LIMIT'];
+const DECISION_TYPES = ['DECISION', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'CONFLICT', 'WARNING'];
+const hueClass = id => 'hue-' + [...String(id)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 8, 3);
+const evLabel = type => dict['ui.ev.' + type] || fallback['ui.ev.' + type] || type;
+function avatar(id) {
+  const name = names[id] || id, letter = id === 'controller' ? '⚙' : ((String(name).match(/\p{L}|\d/u)?.[0] || '?') + (String(name).match(/\d+$/)?.[0] || '')).toUpperCase().slice(0, 3);
+  return `<span class="chat-avatar ${id === 'controller' ? 'sys' : hueClass(id)}" title="${esc(name)}">${esc(letter)}</span>`;
+}
+function drawTimeline() {
+  const filtered = events.filter(e => (!filter || e.from === filter || e.to === filter) && (tab === 'all' || tab === 'activity' && SYSTEM_TYPES.concat('TEST_RESULT', 'CHECKPOINT').includes(e.type) || tab === 'decisions' && DECISION_TYPES.includes(e.type) || tab === 'messages' && !SYSTEM_TYPES.includes(e.type)));
+  $('event-count').textContent = t('ui.timeline.count', { n: events.length });
+  $('conversation-title').textContent = filter ? t('ui.timeline.with', { name: names[filter] }) : t('ui.timeline.title');
+  const job = state?.jobs.find(j => j.id === selected), r = job?.roster || state?.roster;
+  const people = r ? [...new Set([r.manager, ...r.builders, r.reviewer, r.verifier].filter(Boolean))] : [];
+  $('chat-members').innerHTML = people.map(id => `<button class="chat-person ${filter === id ? 'on' : ''} ${state.agents.find(a => a.id === id)?.state === 'working' ? 'working' : ''}" data-person="${esc(id)}">${avatar(id)}<span>${esc(names[id] || id)}<small>${esc(rolesText(id))}</small></span></button>`).join('') + (filter ? `<button class="chat-person" data-person="">${esc(t('ui.team.showAll'))}</button>` : '');
+  document.querySelectorAll('[data-person]').forEach(b => b.onclick = () => { filter = b.dataset.person && filter !== b.dataset.person ? b.dataset.person : null; drawTimeline(); });
+  const timeline = $('timeline'), atBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
+  const opened = new Set([...timeline.querySelectorAll('details[open]')].map(e => e.dataset.seq));
+  const time = e => new Date(e.timestamp).toLocaleTimeString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const details = e => e.details ? `<details data-seq="${e.seq}" ${opened.has(String(e.seq)) ? 'open' : ''}><summary>${esc(t('ui.timeline.details'))}</summary><pre>${esc(JSON.stringify(e.details, null, 2))}</pre></details>` : '';
+  timeline.innerHTML = filtered.length ? filtered.map(e => {
+    if (SYSTEM_TYPES.includes(e.type)) return `<div class="chat-system"><span class="chat-type">${esc(evLabel(e.type))}</span><b>${esc(names[e.from] || e.from)}</b> ${esc(cut(e.summary, 300))}<time>${time(e)}</time>${details(e)}</div>`;
+    const mine = e.from === 'user', cls = [mine && 'mine', e.from === 'controller' && 'from-system', e.type === 'BLOCKER' && 'alert', ['READY_FOR_MERGE', 'MERGED'].includes(e.type) && 'success'].filter(Boolean).join(' ');
+    return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
+  }).join('') : `<div class="empty"><span class="empty-icon">◎</span><b>${esc(t('ui.timeline.emptyTitle'))}</b><span>${esc(t('ui.timeline.emptyText'))}</span></div>`;
+  if (atBottom) timeline.scrollTop = timeline.scrollHeight;
+}
+let memberView = store.get('memberView') || 'compact';
+function setMemberView(mode) {
+  memberView = mode === 'detailed' ? 'detailed' : 'compact';
+  store.set('memberView', memberView);
+  const compactEl = $('quota-compact'), cardsEl = $('quota-cards');
+  if (compactEl) compactEl.hidden = memberView !== 'compact';
+  if (cardsEl) cardsEl.hidden = memberView !== 'detailed';
+  $('view-mode-compact')?.classList.toggle('selected', memberView === 'compact');
+  $('view-mode-detailed')?.classList.toggle('selected', memberView === 'detailed');
+}
+
+function dedupeBuckets(buckets) {
+  if (!Array.isArray(buckets)) return [];
+  const map = new Map();
+  for (const b of buckets) {
+    const key = (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+    if (!map.has(key)) map.set(key, b);
+  }
+  return Array.from(map.values());
+}
+
+function quota5hInfo(q) {
+  if (!q || !Array.isArray(q.buckets)) return null;
+  for (const b of q.buckets) {
+    for (const w of (b.windows || [])) {
+      if (w.minutes === 300) return { bucket: b, window: w };
+    }
+  }
+  for (const b of q.buckets) {
+    for (const w of (b.windows || [])) {
+      if (w.name === '5h' || w.name === 'primary') return { bucket: b, window: w };
+    }
+  }
+  for (const b of q.buckets) {
+    if (/session|5h|five[_\s-]*hour/i.test(b.id || '') || /session|5h|five[_\s-]*hour/i.test(b.name || '')) {
+      if (b.windows && b.windows.length) return { bucket: b, window: b.windows[0] };
+    }
+  }
+  for (const b of q.buckets) {
+    for (const w of (b.windows || [])) {
+      if (Number.isFinite(w.remaining)) return { bucket: b, window: w };
+    }
+  }
+  return null;
+}
+
+function drawQuota() {
+  $('demo-live-link').hidden = !state.demo;
+
+  // 1. Draw Compact 1-line rows
+  $('quota-compact').innerHTML = state.agents.map(a => {
+    const auth = a.auth || { status: 'unknown' }, connected = ['connected', 'cached'].includes(auth.status);
+    const tag = a.provider === 'mock' ? t('ui.members.mock') : a.provider === 'antigravity' ? 'Gemini Pro' : a.provider;
+    const info5h = quota5hInfo(a.quota);
+    const w = info5h?.window;
+    let remText, cls = '', subText, progressVal = 0;
+    if (w && Number.isFinite(w.remaining)) {
+      const rem = Math.round(w.remaining);
+      remText = t('ui.quota.windowRemaining', { n: rem });
+      cls = rem <= 15 ? 'danger' : rem <= 40 ? 'warning' : '';
+      progressVal = Math.max(0, Math.min(100, rem));
+      subText = w.resetText || (w.resetsAt ? clock(w.resetsAt) + untilReset(w.resetsAt) : t('ui.quota.window', { time: duration(w.minutes || 300) }));
+    } else if (a.quota.error) {
+      remText = 'Error'; cls = 'danger'; subText = a.quota.error; progressVal = 0;
+    } else {
+      remText = '—'; cls = 'unknown'; subText = t('ui.members.quotaNotMeasured'); progressVal = 0;
+    }
+    const factsShort = [a.model || t('ui.profile.modelDefault'), tierLabel(a.tier)].join(' · ');
+
+    return `<article class="compact-row" data-agent-row="${esc(a.id)}">
+      <div class="compact-col-agent">
+        <div class="compact-title">
+          <i class="dot ${connected ? 'green' : ''}"></i>
+          <strong class="compact-name">${esc(a.label)}</strong>
+          <span class="tag">${esc(tag)}</span>
+          ${auth.sharedProfile ? `<span class="tag">shared</span>` : ''}
+        </div>
+        <div class="compact-sub" title="${esc(auth.account?.email || a.quota.account?.email || '')}">
+          ${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}
+        </div>
+      </div>
+      <div class="compact-col-role">
+        ${(rolesOf(a.id).length ? rolesOf(a.id) : ['none']).map(k => `<span class="badge-role ${k}">${esc(roleLabel(k))}</span>`).join(' ')}
+        <div class="compact-sub">${esc(factsShort)}</div>
+      </div>
+      <div class="compact-col-quota">
+        <div class="quota-5h-bar">
+          <div class="quota-5h-label">
+            <span class="quota-5h-title">${esc(t('ui.members.quota5h'))}</span>
+            <strong class="quota-5h-val ${cls}">${esc(remText)}</strong>
+          </div>
+          <progress max="100" value="${progressVal}" class="${cls}"></progress>
+          <span class="quota-5h-sub">${esc(subText)}</span>
+        </div>
+      </div>
+      <div class="compact-col-actions">
+        <details class="actions-dropdown">
+          <summary class="action-btn">
+            <span>${esc(t('ui.members.actionsMenu'))}</span>
+            <span class="caret">▾</span>
+          </summary>
+          <div class="actions-menu">
+            <div class="actions-menu-header">
+              <strong>${esc(a.label)}</strong>
+              <small class="tag">${esc(tag)}</small>
+            </div>
+            <div class="actions-menu-divider"></div>
+            <button class="menu-item" data-check="${esc(a.id)}">⚡ ${esc(t('ui.login.check'))}</button>
+            <button class="menu-item" data-profile="${esc(a.id)}">👤 ${esc(t('ui.members.profile'))}</button>
+            ${a.provider === 'claude' ? `
+            <button class="menu-item" data-usage="${esc(a.id)}">↻ ${esc(t('ui.members.checkQuota'))}</button>
+            <button class="menu-item" data-term="${esc(a.id)}">💻 ${esc(t('ui.members.openTerminal'))}</button>` : ''}
+            <button class="menu-item" data-login="${esc(a.id)}">🔑 ${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>
+            <div class="actions-menu-divider"></div>
+            <div class="menu-role-select">
+              <label>${esc(t('ui.members.roles'))}</label>
+              ${roleChecks(a)}
+            </div>
+            <div class="actions-menu-divider"></div>
+            <button class="menu-item" data-view-detail="${esc(a.id)}">🔍 ${esc(t('ui.members.viewDetailed'))}</button>
+          </div>
+        </details>
+      </div>
+    </article>`;
+  }).join('');
+
+  // 2. Draw Detailed cards
+  $('quota-cards').innerHTML = state.agents.map(a => {
+    const auth = a.auth || { status: 'unknown' }, connected = ['connected', 'cached'].includes(auth.status);
+    const tag = a.provider === 'mock' ? t('ui.members.mock') : a.provider === 'antigravity' ? 'Gemini Pro' : a.provider;
+    const actions = state.demo ? '' : `<button data-check="${esc(a.id)}">${esc(t('ui.login.check'))}</button><button data-profile="${esc(a.id)}">${esc(t('ui.members.profile'))}</button>${a.provider === 'claude' ? `<button data-usage="${esc(a.id)}">${esc(t('ui.members.checkQuota'))}</button><button data-term="${esc(a.id)}">${esc(t('ui.members.openTerminal'))}</button>` : ''}`;
+    const cleanBuckets = dedupeBuckets(a.quota.buckets);
+    const windows = cleanBuckets.map(b => b.windows.map(w => {
+      const bName = b.name.replace(/[:\s]+$/, '');
+      const winLabel = w.minutes ? `${esc(bName)} · ${esc(t('ui.quota.window', { time: duration(w.minutes) }))}` : (w.name && w.name !== 'used' && w.name !== 'quota' ? `${esc(bName)} · ${esc(w.name)}` : esc(bName));
+      return `<div class="quota-window"><label><span>${winLabel}</span><strong>${esc(t('ui.quota.windowRemaining', { n: w.remaining == null ? '?' : Math.round(w.remaining) }))}</strong></label><progress max="100" value="${w.remaining ?? 0}"></progress><small>${esc(t('ui.quota.reset'))} ${w.resetText ? esc(w.resetText) : esc(clock(w.resetsAt) + untilReset(w.resetsAt))}</small></div>`;
+    }).join('')).join('');
+    const facts = [t('ui.members.model', { model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ` · ${effortLabel(a.effort)}` : '') }), t('ui.members.tier', { tier: tierLabel(a.tier) }), !a.enabled && t('ui.members.disabled'), a.systemPrompt && t('ui.members.hasPrompt')].filter(Boolean).join(' · ');
+    return `<article class="quota-card" data-agent-card="${esc(a.id)}"><h3>${esc(a.label)} <span class="tag">${esc(tag)}</span></h3><span class="muted">${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}</span><div class="account-state ${connected ? 'connected' : ''}"><i class="dot ${connected ? 'green' : ''}"></i>${esc(auth.message || t('ui.members.notChecked'))}</div>${auth.sharedProfile ? `<span class="muted">${esc(t('ui.members.sharedProfile'))}</span>` : ''}${auth.cli ? `<span class="muted">CLI: ${esc(auth.cli)}</span>` : ''}<div class="member-actions"><button class="${connected ? '' : 'primary'}" data-login="${esc(a.id)}">${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>${actions}</div>${state.demo ? '' : roleChecks(a)}<span class="muted">${esc(facts)}</span><strong>${esc(quotaRemaining(a.quota))}</strong>${a.quota.error ? `<p class="error-box">${esc(a.quota.error)}</p>` : ''}${a.quota.note ? `<p class="muted">${esc(a.quota.note)}</p>` : ''}${a.quota.schemaUnknown ? `<p class="error-box">${esc(t('ui.quota.schemaUnknown'))}</p>` : ''}${windows}<span class="muted">${esc(t('ui.quota.updated', { time: clock(a.quota.checkedAt) }))}</span>${a.quota.raw ? `<details><summary>${esc(t('ui.quota.raw'))}</summary><pre>${esc(JSON.stringify(a.quota.raw, null, 2))}</pre></details>` : ''}</article>`;
+  }).join('');
+
+  setMemberView(memberView);
+
+  $('view-mode-compact').onclick = () => setMemberView('compact');
+  $('view-mode-detailed').onclick = () => setMemberView('detailed');
+  document.querySelectorAll('[data-view-detail]').forEach(b => b.onclick = () => {
+    setMemberView('detailed');
+    const card = document.querySelector(`[data-agent-card="${b.dataset.viewDetail}"]`);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.add('highlight-pulse');
+      setTimeout(() => card.classList.remove('highlight-pulse'), 1500);
+    }
+  });
+
+  document.querySelectorAll('.actions-dropdown .menu-item').forEach(b => {
+    b.addEventListener('click', () => {
+      const d = b.closest('.actions-dropdown');
+      if (d) d.removeAttribute('open');
+    });
+  });
+
+  document.querySelectorAll('[data-login]').forEach(b => b.onclick = () => {
+    if (state.demo) { location.href = 'http://127.0.0.1:3333/?members=1&member=' + encodeURIComponent(b.dataset.login); return; }
+    loginId = b.dataset.login; drawLogin(); $('login-dialog').showModal(); recheckMembers([loginId]);
+  });
+  document.querySelectorAll('[data-check]').forEach(b => b.onclick = () => attempt(async () => { b.disabled = true; await api(`members/${b.dataset.check}/refresh`, {}); await refresh(); }));
+  document.querySelectorAll('[data-usage]').forEach(b => b.onclick = () => attempt(async () => {
+    b.disabled = true; b.textContent = t('ui.members.checking');
+    try { const r = await api(`members/${b.dataset.usage}/usage`, {}); notice(r.parsed ? '' : t('ui.members.usageFailed', { text: r.text || '—' })); await refresh(); }
+    finally { b.disabled = false; b.textContent = t('ui.members.checkQuota'); }
+  }));
+  document.querySelectorAll('[data-term]').forEach(b => b.onclick = () => attempt(async () => { await api(`members/${b.dataset.term}/terminal`, {}); notice(t('ui.members.terminalOpened')); }));
+  document.querySelectorAll('[data-profile]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.profile)));
+  document.querySelectorAll('[data-role-toggle]').forEach(b => b.onchange = () => attempt(async () => { await api(`members/${b.dataset.roleToggle}/role`, { kind: b.value, on: b.checked }); await refresh(); }));
+}
+function drawLogin() {
+  const member = state?.agents.find(a => a.id === loginId); if (!member) return;
+  const auth = member.auth || { status: 'unknown' }, pending = ['starting', 'pending', 'terminal'].includes(auth.status);
+  $('login-title').textContent = t('ui.login.title', { name: member.label });
+  $('login-status').textContent = auth.message || t('ui.login.hint');
+  $('login-detail').textContent = auth.account?.email || t(auth.sharedProfile ? 'ui.login.shared' : 'ui.login.private');
+  $('start-login').disabled = pending || auth.installed === false; $('start-login').hidden = auth.status === 'pending';
+  $('auth-link').hidden = !auth.authUrl; if (auth.authUrl) $('auth-link').href = auth.authUrl;
+  $('install-link').hidden = auth.installed !== false; if (auth.installUrl) $('install-link').href = auth.installUrl;
+  $('cancel-login').hidden = !pending;
+}
+function providerHint() {
+  const provider = state?.providers?.find(p => p.id === $('member-provider').value);
+  $('provider-hint').textContent = t(provider?.installed ? 'ui.addMember.installed' : 'ui.addMember.notInstalled') + ' ' + t($('member-provider').value === 'antigravity' ? 'ui.addMember.shared' : 'ui.addMember.private');
+}
+async function refresh() {
+  if (rendering) return; rendering = true;
+  try {
+    state = await api('state'); if (!selected && state.jobs.length) selected = state.jobs[0].id;
+    if (state.language && state.language !== lang) await loadLanguage(state.language);
+    if (selected) {
+      let more;
+      do { more = await api(`jobs/${selected}/events?after=${events.at(-1)?.seq || 0}`); events.push(...more); } while (more.length === 2000);
+    }
+    drawState(); drawTimeline();
+  } finally { rendering = false; }
+}
+const openTask = () => $('task-dialog').showModal();
+['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
+$('close-dialog').onclick = () => $('task-dialog').close(); $('close-diff').onclick = () => $('diff-dialog').close();
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value }); $('message').value = ''; await refresh(); }); };
+$('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); };
+document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });
+function view(quota) { $('quota-view').hidden = !quota; $('work-view').hidden = quota; $('overview').classList.toggle('active', !quota); $('quota-nav').classList.toggle('active', quota); }
+$('overview').onclick = () => view(false);
+$('quota-nav').onclick = () => attempt(async () => { view(true); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
+$('refresh-quota').onclick = () => attempt(async () => { await api('quota', {}); notice(t('ui.members.refreshing')); });
+$('add-member').onclick = () => { if (state.demo) { location.href = 'http://127.0.0.1:3333/?members=1&add=1'; return; } providerHint(); $('member-dialog').showModal(); };
+$('member-provider').onchange = providerHint;
+$('close-member').onclick = () => $('member-dialog').close();
+$('member-form').onsubmit = e => { e.preventDefault(); attempt(async () => {
+  $('save-member').disabled = true;
+  try { const member = await api('members', { provider: $('member-provider').value, label: $('member-name').value, kind: $('member-role').value }); await api(`members/${member.id}/profile`, { tier: $('member-tier').value }); $('member-dialog').close(); $('member-name').value = ''; await refresh(); loginId = member.id; drawLogin(); $('login-dialog').showModal(); }
+  finally { $('save-member').disabled = false; }
+}); };
+$('close-profile').onclick = () => $('profile-dialog').close();
+$('profile-model').onchange = () => { $('profile-model-custom').hidden = $('profile-model').value !== '__custom'; fillEfforts($('profile-effort').value); };
+$('profile-form').onsubmit = e => { e.preventDefault(); attempt(async () => {
+  const model = $('profile-model').value === '__custom' ? $('profile-model-custom').value.trim() : $('profile-model').value;
+  const cli = $('profile-cli').value.trim(), changed = cli !== $('profile-cli').dataset.initial;
+  await api(`members/${profileId}/profile`, { label: $('profile-name').value, model, ...($('profile-effort-box').hidden ? {} : { effort: $('profile-effort').value }), tier: $('profile-tier').value, enabled: $('profile-enabled').checked, systemPrompt: $('profile-prompt').value, ...(changed ? { cliPath: cli } : {}) });
+  if (changed) await api(`members/${profileId}/refresh`, {});
+  $('profile-dialog').close(); await refresh();
+}); };
+const toggleChat = open => { const p = document.querySelector('.communication'); p.classList.toggle('expanded', open ?? !p.classList.contains('expanded')); document.body.classList.toggle('chat-open', p.classList.contains('expanded')); $('chat-expand').textContent = p.classList.contains('expanded') ? '✕' : '⤢'; $('timeline').scrollTop = $('timeline').scrollHeight; };
+$('chat-expand').onclick = () => toggleChat();
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('chat-open') && !document.querySelector('dialog[open]')) toggleChat(false); });
+$('close-slot').onclick = () => $('slot-dialog').close();
+$('slot-member').onchange = slotMember;
+$('slot-form').onsubmit = e => { e.preventDefault(); attempt(saveSlot); };
+$('slot-remove').onclick = () => attempt(async () => { await api(`members/${slot.current}/role`, { kind: slot.kind, on: false }); $('slot-dialog').close(); await refresh(); });
+$('slot-profile').onclick = () => { $('slot-dialog').close(); attempt(() => openProfile(slot.current)); };
+$('slot-filter').onclick = () => { filter = slot.current; $('slot-dialog').close(); drawState(); drawTimeline(); };
+$('close-merge').onclick = () => $('merge-dialog').close();
+$('merge-view-diff').onclick = () => attempt(showDiff);
+$('merge-go').onclick = () => attempt(async () => { $('merge-go').disabled = true; try { await api(`jobs/${selected}/merge`, { confirm: $('merge-confirm').value.trim() }); $('merge-dialog').close(); await refresh(); } finally { $('merge-go').disabled = false; } });
+$('close-login').onclick = () => $('login-dialog').close();
+$('start-login').onclick = () => attempt(async () => { $('start-login').disabled = true; try { await api(`members/${loginId}/login`, {}); await refresh(); } finally { drawLogin(); } });
+$('check-login').onclick = () => attempt(async () => { await api(`members/${loginId}/refresh`, {}); await refresh(); });
+$('cancel-login').onclick = () => attempt(async () => { await api(`members/${loginId}/cancel-login`, {}); await refresh(); });
+$('theme-select').onchange = () => { store.set('theme', $('theme-select').value); applyTheme($('theme-select').value); };
+// Ngôn ngữ lưu ở server (team.config.json) để thông báo do server tạo cũng đổi theo.
+$('lang-select').onchange = () => attempt(async () => {
+  const next = $('lang-select').value; store.set('lang', next);
+  await api('settings', { language: next }).catch(e => notice(e.message));
+  await loadLanguage(next); notice(''); if (state) { drawState(); drawTimeline(); }
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.actions-dropdown')) {
+    document.querySelectorAll('.actions-dropdown[open]').forEach(d => d.removeAttribute('open'));
+  }
+});
+
+await loadLanguage(store.get('lang') || 'vi');
+await attempt(refresh);
+const query = new URLSearchParams(location.search);
+if (query.has('members')) { view(true); recheckMembers(); }
+if (query.has('add') && state && !state.demo) { providerHint(); $('member-dialog').showModal(); }
+if (query.has('member') && state?.agents.some(a => a.id === query.get('member'))) { loginId = query.get('member'); drawLogin(); $('login-dialog').showModal(); }
+const stream = new EventSource('/api/stream'); stream.onmessage = () => attempt(refresh); stream.onerror = () => { $('connection').textContent = t('ui.nav.reconnecting'); };
+setInterval(() => attempt(refresh), 10000);

@@ -1,0 +1,217 @@
+import { existsSync } from 'node:fs';
+import { msg } from './i18n.js';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import { executable, childEnv, launch, killTree, run, resolveCommand } from './process.js';
+
+export function parseReport(text) {
+  const report = JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));
+  if (!report || typeof report !== 'object' || Array.isArray(report) || typeof report.summary !== 'string') throw new Error('Agent response must be JSON with a summary');
+  return report;
+}
+
+export function normalizeCodexQuota(result) {
+  const buckets = result.rateLimitsByLimitId && Object.keys(result.rateLimitsByLimitId).length
+    ? Object.entries(result.rateLimitsByLimitId) : [['codex', result.rateLimits]];
+  return buckets.filter(([, b]) => b).map(([id, b]) => ({
+    id, name: b.limitName || id, credits: b.credits || null,
+    windows: ['primary', 'secondary'].filter(k => b[k]).map(k => ({
+      name: k, remaining: Number.isFinite(b[k].usedPercent) ? Math.max(0, Math.min(100, 100 - b[k].usedPercent)) : null,
+      minutes: b[k].windowDurationMins ?? null, resetsAt: b[k].resetsAt == null ? null : new Date(b[k].resetsAt * 1000).toISOString(),
+    })),
+  }));
+}
+
+export function normalizeGoogleQuota(result) {
+  // Only named, numeric provider fields count. Unknown schemas remain UNKNOWN, never a guessed percentage.
+  const buckets = [];
+  function visit(value, name = 'Google') {
+    if (!value || typeof value !== 'object') return;
+    if (Number.isFinite(value.remaining_fraction)) buckets.push({ id: name, name, windows: [{
+      name: 'quota', remaining: Math.max(0, Math.min(100, value.remaining_fraction * 100)),
+      minutes: null, resetsAt: value.reset_time || null,
+    }] });
+    else for (const [key, item] of Object.entries(value)) if (item && typeof item === 'object') visit(item, item.modelId || item.model_id || item.id || key);
+  }
+  visit(result);
+  return buckets;
+}
+
+export async function codexClient(agent, onNotification = () => {}) {
+  const child = launch(resolveCommand(agent), ['app-server', '-c', 'cli_auth_credentials_store="file"'], { env: childEnv(agent) });
+  const lines = createInterface({ input: child.stdout });
+  let id = 0, diagnostic = '';
+  const pending = new Map();
+  const rejectAll = error => { for (const p of pending.values()) { clearTimeout(p.timer); p.reject(error); } pending.clear(); };
+  child.stderr.on('data', data => { diagnostic = (diagnostic + data).slice(-4000); });
+  child.stdin.on('error', rejectAll); child.on('error', rejectAll);
+  child.on('close', () => { rejectAll(new Error(diagnostic || 'Codex app-server exited')); onNotification({ method: 'transport/closed' }); });
+  lines.on('line', line => {
+    let message; try { message = JSON.parse(line); } catch { return; }
+    const p = pending.get(message.id);
+    if (p) { clearTimeout(p.timer); pending.delete(message.id); message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result); }
+    else if (message.method) onNotification(message);
+  });
+  const send = (method, params) => new Promise((resolve, reject) => {
+    const n = ++id;
+    const timer = setTimeout(() => { pending.delete(n); reject(new Error(`Codex request timed out: ${method}`)); }, 25_000);
+    pending.set(n, { resolve, reject, timer });
+    child.stdin.write(JSON.stringify({ id: n, method, params }) + '\n');
+  });
+  // Codex app-server luôn cần trường params: method có tham số nhận {}, method không tham số nhận null.
+  const request = async (method, params) => {
+    if (params !== undefined) return send(method, params);
+    try { return await send(method, {}); }
+    catch (error) { if (/invalid type|expected unit|unknown field/i.test(error.message)) return send(method, null); throw error; }
+  };
+  const close = async () => { rejectAll(new Error('Codex connection closed')); lines.close(); await killTree(child); };
+  try {
+    await request('initialize', { clientInfo: { name: 'ai_team_control_room', title: 'AI Team Control Room', version: '0.1.0' } });
+    child.stdin.write('{"method":"initialized"}\n');
+    return { request, close };
+  } catch (error) { await close(); throw error; }
+}
+
+// Mỗi CODEX_HOME chỉ chạy một tiến trình Codex tại một thời điểm: SQLite state trong hồ sơ không cho mở song song
+// ("failed to initialize sqlite state runtime"). Các lệnh cùng hồ sơ xếp hàng; lỗi khóa thì thử lại một lần.
+const homeLocks = new Map();
+export function withHome(agent, fn) {
+  if (!agent.home) return fn();
+  const key = agent.home.toLowerCase(), next = (homeLocks.get(key) || Promise.resolve()).then(fn, fn);
+  homeLocks.set(key, next.catch(() => {}));
+  return next;
+}
+async function retryState(fn) {
+  try { return await fn(); }
+  catch (error) { if (!/sqlite|state runtime|database is locked/i.test(error.message)) throw error; await new Promise(r => setTimeout(r, 2500)); return fn(); }
+}
+export async function codexRpc(agent, methods) {
+  if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap_bam_dang_nhap"));
+  return withHome(agent, () => retryState(async () => {
+    const client = await codexClient(agent);
+    try {
+      const results = [];
+      for (const method of methods) results.push(await client.request(method));
+      return results;
+    } finally { await client.close(); }
+  }));
+}
+
+const unsupportedUsage = new Set();
+export async function readQuota(agent) {
+  if (agent.provider === 'codex') {
+    const [account, quota] = await codexRpc(agent, ['account/read', 'account/rateLimits/read']);
+    return { buckets: normalizeCodexQuota(quota), account: account.account || null };
+  }
+  if (agent.provider !== 'antigravity') throw new Error(msg("srv.providers.cli_nay_chua_co_bo_doc"));
+  // agy mới hỗ trợ `-p /usage` không gọi model. Bản cũ coi đó là prompt (tốn quota) → gặp lỗi một lần thì ngừng thử tới khi restart.
+  if (unsupportedUsage.has(agent.id)) throw new Error(msg("srv.providers.agy_tren_may_chua_tra_usage"));
+  const output = await run(resolveCommand(agent), ['-p', '/usage', '--output-format', 'json'], { env: childEnv(agent), timeoutMs: 25_000, allowFailure: true });
+  let raw;
+  try { raw = JSON.parse(output.stdout); if (typeof raw?.response === 'string') try { raw.response = JSON.parse(raw.response); } catch {} }
+  catch { unsupportedUsage.add(agent.id); throw new Error(msg("srv.providers.agy_khong_tra_json_cho_usage") + (output.stderr || output.stdout).slice(0, 300)); }
+  if (output.code !== 0) { unsupportedUsage.add(agent.id); throw new Error(msg("srv.providers.agy_usage_loi") + (output.stderr || output.stdout).slice(0, 300)); }
+  const buckets = normalizeGoogleQuota(raw);
+  return { buckets, schemaUnknown: !buckets.length, raw };
+}
+
+// `claude --effort`: mức khả dụng tùy model.
+const claudeEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+const suggestedModels = { claude: ['opus', 'sonnet', 'haiku'], gemini: ['gemini-2.5-pro', 'gemini-2.5-flash'], antigravity: ['gemini-2.5-pro', 'gemini-2.5-flash'] };
+// Codex có RPC model/list nên lấy đúng danh sách tài khoản được dùng; CLI khác chưa có lệnh liệt kê nên chỉ gợi ý.
+export async function listModels(agent) {
+  if (agent.provider === 'mock') return { source: 'demo', models: [{ id: 'mock', label: 'Mock (demo)' }] };
+  if (agent.provider === 'codex') {
+    if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.dang_nhap_codex_truoc_de_lay"));
+    const models = await withHome(agent, () => retryState(async () => {
+      const client = await codexClient(agent), list = [];
+      try {
+        let cursor;
+        do { const r = await client.request('model/list', cursor ? { cursor } : {}); list.push(...(r.data || r.models || [])); cursor = r.nextCursor; } while (cursor && list.length < 200);
+      } finally { await client.close(); }
+      return list;
+    }));
+    // Codex trả các mức reasoning effort hỗ trợ theo từng model.
+    const efforts = m => (m.supportedReasoningEfforts || m.reasoningEfforts || []).map(e => typeof e === 'string' ? e : e.reasoningEffort || e.effort).filter(Boolean);
+    return { source: 'cli', models: models.map(m => ({ id: m.model || m.id, label: m.displayName || m.model || m.id, isDefault: !!m.isDefault, efforts: efforts(m), defaultEffort: m.defaultReasoningEffort || null })).filter(m => m.id), efforts: ['low', 'medium', 'high'] };
+  }
+  if (agent.provider === 'antigravity') {
+    const result = await run(resolveCommand(agent), ['models'], { env: childEnv(agent), allowFailure: true, timeoutMs: 30000 });
+    const ids = [...new Set(result.stdout.split(/\r?\n/).map(l => l.trim().split(/\s+/)[0]).filter(t => /^[a-z][\w.:\/-]*\d[\w.:\/-]*$/i.test(t || '')))];
+    if (result.code === 0 && ids.length) return { source: 'cli', models: ids.map(id => ({ id, label: id })) };
+  }
+  return { source: 'suggested', note: msg("srv.providers.cli_nay_chua_co_lenh_liet"),
+    models: (suggestedModels[agent.provider] || []).map(id => ({ id, label: id })), efforts: agent.provider === 'claude' ? claudeEfforts : [] };
+}
+
+export async function runAgent(agent, task, prompt, { signal, onEvent }) {
+  if (agent.provider === 'mock') {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, 450);
+      signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Run interrupted')); }, { once: true });
+    });
+    const report = task.stage === 'plan'
+      ? { summary: msg("srv.providers.demo_giao_builder_cap_nhat_hello"), risk: 'low', tasks: [{ agent: task.roster?.builders[0] || 'codex-2', difficulty: /hard|khó/i.test(task.goal) ? 4 : 2, instruction: msg("srv.providers.cap_nhat_hello_txt_va_kiem") }] }
+      : { summary: msg("srv.providers.demo_hoan_tat_bang_bo_mo", { 0: task.stage }), status: 'completed', verdict: 'approved', findings: [] };
+    if (task.stage === 'implement') {
+      const { writeFile } = await import('node:fs/promises');
+      await writeFile(join(task.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
+    }
+    onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong") });
+    return report;
+  }
+  let final = '', failed = '';
+  const args = [];
+  if (agent.provider === 'codex') {
+    if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap", { 0: agent.id }));
+    args.push('exec', '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', task.stage === 'implement' ? 'workspace-write' : 'read-only', '-C', task.worktree);
+    if (agent.model) args.push('--model', agent.model);
+    if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
+    args.push('-');
+  } else if (agent.provider === 'claude') {
+    args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
+    if (task.stage !== 'implement') args.push('--tools', 'Read,Glob,Grep,Bash', '--allowedTools', 'Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *)');
+    if (agent.model) args.push('--model', agent.model);
+    if (agent.effort) args.push('--effort', agent.effort);
+  } else {
+    args.push('-p', prompt, '--output-format', 'stream-json');
+    if (agent.model) args.push('--model', agent.model);
+    if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : 'plan');
+  }
+  const exec = () => run(resolveCommand(agent), args, {
+    cwd: task.worktree, env: childEnv(agent), input: ['codex', 'claude'].includes(agent.provider) ? prompt : '', signal,
+    onLine(line, stream) {
+      if (!line) return;
+      if (stream === 'stderr') { onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
+      let event; try { event = JSON.parse(line); } catch { onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
+      // Deliberately expose actions and messages, not reasoning items.
+      const item = event.item;
+      if (event.type === 'item.completed' && item?.type === 'agent_message') final = item.text;
+      if (item && ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'].includes(item.type)) onEvent('ACTIVITY', { summary: item.command || item.type, details: item });
+      if (event.type === 'turn.completed') onEvent('USAGE', { summary: 'Token usage', details: event.usage });
+      if (['error', 'turn.failed'].includes(event.type)) failed = event.message || event.error?.message || event.type;
+      if (event.type === 'message' && event.role === 'assistant') final += event.content || '';
+      if (event.type === 'tool_use' || event.type === 'tool_result') onEvent('ACTIVITY', { summary: event.tool_name || event.type, details: event });
+      if (event.event === 'step_update' && event.step_update?.step_type === 'tool') onEvent('ACTIVITY', { summary: event.step_update.tool_name || 'tool', details: event.step_update.tool_info });
+      if (event.event === 'result') {
+        final = event.result?.response || '';
+        if (event.result?.status !== 'SUCCESS') failed = event.result?.error || 'Antigravity did not succeed';
+        onEvent('USAGE', { summary: 'Token usage', details: event.result?.usage });
+      }
+      if (event.type === 'result' && event.status === 'error') failed = event.error?.message || 'Gemini did not succeed';
+      if (agent.provider === 'claude' && event.type === 'assistant') {
+        for (const block of event.message?.content || []) if (block.type === 'tool_use') onEvent('ACTIVITY', { summary: block.name, details: { name: block.name, input: block.input } });
+      }
+      if (agent.provider === 'claude' && event.type === 'rate_limit_event') onEvent('RATE_LIMIT', { summary: `Quota: ${event.rate_limit_info?.status || ''} ${event.rate_limit_info?.rateLimitType || ''}`.trim(), details: event.rate_limit_info });
+      if (agent.provider === 'claude' && event.type === 'result') {
+        final = event.result || '';
+        if (event.is_error || event.subtype !== 'success') failed = event.errors?.join('; ') || event.subtype;
+        onEvent('USAGE', { summary: 'Token usage', details: event.usage });
+      }
+    },
+  });
+  await (agent.provider === 'codex' ? withHome(agent, exec) : exec());
+  if (failed) throw new Error(failed);
+  if (!final) throw new Error(msg("srv.providers.cli_khong_tra_ket_qua_cuoi"));
+  return parseReport(final);
+}

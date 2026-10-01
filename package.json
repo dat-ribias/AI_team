@@ -1,0 +1,15 @@
+{
+  "name": "ai-team-control-room",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node src/server.js",
+    "setup": "node src/setup.js",
+    "demo": "node src/setup.js --demo",
+    "test": "node --test test/system.test.js",
+    "mcp": "node src/mcp.js"
+  },
+  "dependencies": { "@modelcontextprotocol/sdk": "1.31.0", "zod": "4.6.5" }
+}
