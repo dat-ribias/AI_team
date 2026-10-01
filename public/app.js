@@ -198,6 +198,24 @@ function agentHealth(a) {
 const tierLabel = tier => t(`ui.tier.${['strong', 'normal', 'weak'].includes(tier) ? tier : 'normal'}`);
 const roleLabel = kind => t(`ui.role.${kind}`);
 const cut = (s, n) => (s = String(s ?? '')).length > n ? s.slice(0, n - 1) + '…' : s;
+function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
+  const str = String(text ?? '');
+  if (!str) return '';
+  const estCharW = baseSize * 0.56;
+  const estTotalW = str.length * estCharW;
+  let size = baseSize;
+  let useTextLength = false;
+  if (estTotalW > maxW) {
+    const scaled = Math.floor((maxW / str.length / 0.54) * 10) / 10;
+    size = Math.max(minSize, Math.min(baseSize, scaled));
+    if (str.length * (size * 0.52) > maxW) {
+      useTextLength = true;
+    }
+  }
+  const style = size !== baseSize ? ` style="font-size:${size}px;"` : '';
+  const tl = useTextLength ? ` textLength="${maxW}" lengthAdjust="spacingAndGlyphs"` : '';
+  return `<text x="${x}" y="${y}" class="${cls}"${style}${tl}>${esc(str)}</text>`;
+}
 
 function drawState() {
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
@@ -234,7 +252,7 @@ function openSlot(kind, current) {
   slot = { kind, current };
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
     const h = agentHealth(a);
-    const healthText = h ? ` · ${h.shortLabel || h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
+    const healthText = h ? ` · ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
     return `<option value="${esc(a.id)}" ${a.id === current ? 'selected' : ''} ${kind === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}>${esc(a.label)} · ${esc(a.provider)} · ${esc(tierLabel(a.tier))}${healthText}</option>`;
   }).join('');
   $('slot-remove').hidden = !current; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
@@ -259,12 +277,16 @@ async function saveSlot() {
 function drawFlow() {
   const job = state.jobs.find(j => j.id === selected), r = job?.roster || state.roster;
   const byId = Object.fromEntries(state.agents.map(a => [a.id, a]));
-  const builders = r.builders.filter(id => byId[id]), rowH = 64, top = 34;
-  const H = Math.max(140, builders.length * rowH + 20), cy = top + H / 2, W = 1180, nodes = {};
-  const place = (key, x, y, w = 150) => nodes[key] = { x, y, w };
-  place('user', 10, cy, 96); place('manager', 150, cy);
-  builders.forEach((id, i) => place('b:' + id, 360, cy + (i - (builders.length - 1) / 2) * rowH));
-  place('tests', 560, cy, 104); place('reviewer', 710, cy); place('verifier', 900, cy); place('merge', 1090, cy, 86);
+  const builders = r.builders.filter(id => byId[id]), rowH = 68, top = 34;
+  const H = Math.max(140, builders.length * rowH + 20), cy = top + H / 2, W = 1260, nodes = {};
+  const place = (key, x, y, w = 172) => nodes[key] = { x, y, w };
+  place('user', 10, cy, 90);
+  place('manager', 140, cy, 172);
+  builders.forEach((id, i) => place('b:' + id, 365, cy + (i - (builders.length - 1) / 2) * rowH, 172));
+  place('tests', 585, cy, 96);
+  place('reviewer', 730, cy, 172);
+  place('verifier', 945, cy, 172);
+  place('merge', 1155, cy, 92);
   const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
   const cur = job?.tasks?.[job.taskIndex], curB = cur && (cur.ranBy || job.assignee || cur.agent), running = job?.status === 'running';
   const active = running ? { plan: job.round ? 'rework' : 'user>manager', implement: 'manager>b:' + curB, test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage] : null;
@@ -276,7 +298,7 @@ function drawFlow() {
   const sub = id => {
     const a = byId[id]; if (!a) return t('ui.flow.notChosen');
     const h = agentHealth(a);
-    return `${tierLabel(a.tier)} · ${h ? `${h.shortLabel}${h.rem != null ? ' ' + h.rem + '%' : ''}` : cut((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''), 16)}`;
+    return `${tierLabel(a.tier)} · ${h ? `${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : ((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''))}`;
   };
   const box = (key, title, subtitle, agentId, slot) => {
     const n = nodes[key], a = agentId && byId[agentId];
@@ -290,7 +312,11 @@ function drawFlow() {
     ].filter(Boolean).join(' ');
     const healthDot = h ? `<circle cx="${n.w - 12}" cy="14" r="4.5" class="flow-dot ${h.cls}"><title>${esc(h.title)}</title></circle>` : '';
     const tip = a ? `${a.label} · ${rolesText(a.id)}\n${t('ui.health.title')}: ${h ? `${h.label} (${h.rem != null ? h.rem + '% quota' : '—'})` : '—'}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
-    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/>${healthDot}<text x="10" y="19" class="t">${esc(cut(title, (n.w - (h ? 24 : 10)) / 8))}</text><text x="10" y="36" class="s">${esc(cut(subtitle, Math.floor((n.w - 14) / 6.2)))}</text></g>`;
+    const titleW = n.w - (h ? 24 : 16);
+    const subW = n.w - 16;
+    const titleEl = svgText({ text: title, x: 10, y: 19, cls: 't', maxW: titleW, baseSize: 12, minSize: 9.5 });
+    const subEl = svgText({ text: subtitle, x: 10, y: 37, cls: 's', maxW: subW, baseSize: 10.5, minSize: 7.8 });
+    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}</title><rect width="${n.w}" height="48" rx="8"/>${healthDot}${titleEl}${subEl}</g>`;
   };
   const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step);
   let edges = edge('user', 'manager', 'used');
@@ -300,7 +326,7 @@ function drawFlow() {
     edges += edge('b:' + id, 'tests', used ? 'used' : 'idle');
   }
   edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
-  edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active === 'rework' ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 23} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 23}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
+  edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active === 'rework' ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
@@ -311,7 +337,7 @@ function drawFlow() {
   const bench = state.agents.filter(a => !inRoster.has(a.id));
   $('bench').innerHTML = `<button data-slot="builder" class="primary-ghost">${esc(t('ui.slot.addBuilder'))}</button>${bench.length ? `<span>${esc(t('ui.flow.bench'))}</span>${bench.map(a => {
     const h = agentHealth(a);
-    return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.shortLabel || h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
+    return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
   }).join('')}` : ''}`;
   document.querySelectorAll('g[data-slot]').forEach(g => g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } });
 }
