@@ -121,6 +121,29 @@ function quota5hInfo(q) {
   return null;
 }
 
+function moodKey(rem) {
+  if (rem == null) return 'unknown';
+  if (rem <= 0) return '0';
+  if (rem <= 10) return '10';
+  if (rem <= 20) return '20';
+  if (rem <= 30) return '30';
+  if (rem <= 40) return '40';
+  if (rem <= 50) return '50';
+  if (rem <= 60) return '60';
+  if (rem <= 70) return '70';
+  if (rem <= 80) return '80';
+  if (rem <= 90) return '90';
+  return '100';
+}
+
+function moodClass(rem) {
+  if (rem == null) return 'unknown';
+  if (rem <= 0) return 'danger strike';
+  if (rem <= 15) return 'danger';
+  if (rem <= 40) return 'warning';
+  return 'healthy';
+}
+
 function agentHealth(a) {
   if (!a) return null;
   if (a.enabled === false) {
@@ -128,9 +151,8 @@ function agentHealth(a) {
       state: 'disabled',
       cls: 'disabled',
       label: t('ui.health.disabled'),
-      icon: '💤',
       rem: null,
-      title: `${a.label} · ${t('ui.health.disabledTitle')}`
+      title: `${a.label} · ${t('ui.health.disabled')}`
     };
   }
   const info5h = quota5hInfo(a.quota);
@@ -150,43 +172,23 @@ function agentHealth(a) {
       state: 'unknown',
       cls: 'unknown',
       label: t('ui.health.unknown'),
-      icon: '⚪',
       rem: null,
-      title: `${a.label} · ${t('ui.health.unknownTitle')}`
+      title: `${a.label} · ${t('ui.health.unknown')}`
     };
   }
 
+  const k = moodKey(rem);
+  const cls = moodClass(rem);
+  const label = t(`ui.health.mood.${k}`);
   const resetPart = resetText || (resetsAt ? clock(resetsAt) + untilReset(resetsAt) : '');
   const resetSuffix = resetPart ? ` · ${t('ui.quota.reset')} ${resetPart}` : '';
 
-  if (rem <= 15) {
-    const isZero = rem === 0;
-    return {
-      state: 'weak',
-      cls: 'danger',
-      label: isZero ? t('ui.health.exhausted') : t('ui.health.weak'),
-      icon: '',
-      rem,
-      title: `${a.label} · ${t(isZero ? 'ui.health.exhaustedTitle' : 'ui.health.weakTitle', { n: rem })}${resetSuffix}`
-    };
-  }
-  if (rem < 50) {
-    return {
-      state: 'moderate',
-      cls: 'warning',
-      label: t('ui.health.moderate'),
-      icon: '🔋',
-      rem,
-      title: `${a.label} · ${t('ui.health.moderateTitle', { n: rem })}${resetSuffix}`
-    };
-  }
   return {
-    state: 'healthy',
-    cls: 'healthy',
-    label: t('ui.health.healthy'),
-    icon: '',
+    state: k,
+    cls,
+    label,
     rem,
-    title: `${a.label} · ${t('ui.health.healthyTitle', { n: rem })}${resetSuffix}`
+    title: `${a.label} · ${label} (${rem}% còn)${resetSuffix}`
   };
 }
 const tierLabel = tier => t(`ui.tier.${['strong', 'normal', 'weak'].includes(tier) ? tier : 'normal'}`);
@@ -228,7 +230,7 @@ function openSlot(kind, current) {
   slot = { kind, current };
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
     const h = agentHealth(a);
-    const healthText = h ? ` · ${h.icon} ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
+    const healthText = h ? ` · ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
     return `<option value="${esc(a.id)}" ${a.id === current ? 'selected' : ''} ${kind === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}>${esc(a.label)} · ${esc(a.provider)} · ${esc(tierLabel(a.tier))}${healthText}</option>`;
   }).join('');
   $('slot-remove').hidden = !current; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
@@ -283,7 +285,7 @@ function drawFlow() {
       h && `health-${h.cls}`
     ].filter(Boolean).join(' ');
     const healthDot = h ? `<circle cx="${n.w - 12}" cy="14" r="4.5" class="flow-dot ${h.cls}"><title>${esc(h.title)}</title></circle>` : '';
-    const tip = a ? `${a.label} · ${rolesText(a.id)}\n${t('ui.health.title')}: ${h ? `${h.icon} ${h.label} (${h.rem != null ? h.rem + '% quota' : '—'})` : '—'}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
+    const tip = a ? `${a.label} · ${rolesText(a.id)}\n${t('ui.health.title')}: ${h ? `${h.label} (${h.rem != null ? h.rem + '% quota' : '—'})` : '—'}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
     return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/>${healthDot}<text x="10" y="19" class="t">${esc(cut(title, (n.w - (h ? 24 : 10)) / 8))}</text><text x="10" y="36" class="s">${esc(subtitle)}</text></g>`;
   };
   const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', light = job?.rigor === 'light' || research && job?.rigor !== 'strict';
@@ -305,7 +307,7 @@ function drawFlow() {
   const bench = state.agents.filter(a => !inRoster.has(a.id));
   $('bench').innerHTML = `<button data-slot="builder" class="primary-ghost">${esc(t('ui.slot.addBuilder'))}</button>${bench.length ? `<span>${esc(t('ui.flow.bench'))}</span>${bench.map(a => {
     const h = agentHealth(a);
-    return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.icon} ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
+    return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
   }).join('')}` : ''}`;
   document.querySelectorAll('g[data-slot]').forEach(g => g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } });
 }
@@ -411,7 +413,7 @@ function drawTimeline() {
     const a = state?.agents?.find(x => x.id === id);
     const h = a ? agentHealth(a) : null;
     const working = a?.state === 'working' ? 'working' : '';
-    const healthBadge = h ? `<span class="health-pill ${h.cls}" title="${esc(h.title)}">${h.icon} ${esc(h.label)}${h.rem != null ? ' ' + h.rem + '%' : ''}</span>` : '';
+    const healthBadge = h ? `<span class="health-pill ${h.cls}" title="${esc(h.title)}">${esc(h.label)}${h.rem != null ? ' ' + h.rem + '%' : ''}</span>` : '';
     return `<button class="chat-person ${filter === id ? 'on' : ''} ${working} ${h ? 'health-' + h.cls : ''}" data-person="${esc(id)}" title="${esc(h?.title || names[id] || id)}">${avatar(id)}<span class="chat-person-info"><span class="chat-person-name">${esc(names[id] || id)}</span><small class="chat-person-sub">${esc(rolesText(id))}${h ? ' · ' + healthBadge : ''}</small></span></button>`;
   }).join('') + (filter ? `<button class="chat-person" data-person="">${esc(t('ui.team.showAll'))}</button>` : '');
   document.querySelectorAll('[data-person]').forEach(b => b.onclick = () => { filter = b.dataset.person && filter !== b.dataset.person ? b.dataset.person : null; drawTimeline(); });
