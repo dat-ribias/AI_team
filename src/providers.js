@@ -150,8 +150,9 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
       const timer = setTimeout(resolve, 450);
       signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Run interrupted')); }, { once: true });
     });
+    if (task.stage === 'plan' && /hỏi lại|ask me/i.test(task.goal) && !task.messages?.length) return { summary: 'DEMO: cần làm rõ', status: 'needs_input', questions: ['DEMO: bạn muốn áp dụng cho trang nào?'] };
     const report = task.stage === 'plan'
-      ? { summary: msg("srv.providers.demo_giao_builder_cap_nhat_hello"), risk: 'low', tasks: [{ agent: task.roster?.builders[0] || 'codex-2', difficulty: /hard|khó/i.test(task.goal) ? 4 : 2, instruction: msg("srv.providers.cap_nhat_hello_txt_va_kiem") }] }
+      ? { summary: msg("srv.providers.demo_giao_builder_cap_nhat_hello"), kind: /research|nghiên cứu/i.test(task.goal) ? 'research' : 'code', rigor: /light|nhẹ/i.test(task.goal) ? 'light' : 'standard', risk: 'low', tasks: [{ agent: task.roster?.builders[0] || 'codex-2', difficulty: /hard|khó/i.test(task.goal) ? 4 : 2, instruction: msg("srv.providers.cap_nhat_hello_txt_va_kiem") }] }
       : { summary: msg("srv.providers.demo_hoan_tat_bang_bo_mo", { 0: task.stage }), status: 'completed', verdict: 'approved', findings: [] };
     if (task.stage === 'implement') {
       const { writeFile } = await import('node:fs/promises');
@@ -161,18 +162,23 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     return report;
   }
   let final = '', failed = '';
+  // Tìm kiếm/đọc web: chỉ khi project bật network, hoặc việc nghiên cứu (tắt bằng "researchWeb": false).
+  const web = task.network === true || task.kind === 'research' && task.researchWeb !== false;
   const args = [];
   if (agent.provider === 'codex') {
     if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap", { 0: agent.id }));
-    args.push('exec', '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', task.stage === 'implement' ? 'workspace-write' : 'read-only', '-C', task.worktree);
+    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', task.stage === 'implement' ? 'workspace-write' : 'read-only', '-C', task.worktree);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
+    // Sandbox Codex: chỉ ghi trong worktree; mạng tắt trừ khi project bật "network": true.
+    args.push('-c', `sandbox_workspace_write.network_access=${task.network === true}`, '-c', `features.web_search=${web}`);
     args.push('-');
   } else if (agent.provider === 'claude') {
     args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
-    if (task.stage !== 'implement') args.push('--tools', 'Read,Glob,Grep,Bash', '--allowedTools', 'Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *)');
+    if (task.stage !== 'implement') args.push('--tools', `Read,Glob,Grep,Bash${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${web ? ',WebSearch,WebFetch' : ''}`);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
+    if (!web) args.push('--disallowedTools', 'WebFetch,WebSearch');
   } else {
     args.push('-p', prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);

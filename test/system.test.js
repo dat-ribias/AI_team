@@ -159,3 +159,71 @@ test('one member can hold every role; self-review forces typed merge confirmatio
   await assert.rejects(team.merge(job.id), /commit/);
   await team.merge(job.id, { confirm: check.code });
 });
+
+test('lead plan sees the team sheet; controller boosts effort when strong members are out', async t => {
+  const f = await fixture();
+  Object.assign(f.config.agents.find(a => a.id === 'codex-2'), { provider: 'mock', tier: 'normal' });
+  Object.assign(f.config.agents.find(a => a.id === 'codex-4'), { provider: 'mock', tier: 'weak' });
+  const team = new Team(f.config, f.data); t.after(() => team.close());
+  const sheet = team.members(['codex-2', 'codex-4']);
+  assert.deepEqual(Object.keys(sheet[0]).filter(k => ['roles', 'allowedEfforts', 'maxDifficultyWithHighEffort', 'quotaWindows'].includes(k)).length, 4);
+  // mock has no efforts → hard task falls back to the strongest member with forced merge confirmation
+  const job = { roster: team.state().roster, tasks: [] };
+  assert.equal(team.pickBuilder(job, { agent: 'codex-4', difficulty: 4, instruction: 'x' }), 'codex-2');
+  assert.equal(job.risk, 'high');
+  // a codex member (supports effort) at normal tier is boosted to high effort for difficulty 4
+  team.config.agents.find(a => a.id === 'codex-2').provider = 'codex';
+  const task = { agent: 'codex-4', difficulty: 4, instruction: 'x' }, job2 = { roster: job.roster };
+  assert.equal(team.pickBuilder(job2, task), 'codex-2'); assert.equal(task.effort, 'high'); assert(task.boosted);
+});
+
+test('lead can pick research (no merge, ends with a conclusion) or a light code process (no verify)', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
+  const research = await team.create({ project: 'test', goal: 'nghiên cứu: so sánh hai cách làm' });
+  const done = await settle(team, research.id, 'done');
+  assert.equal(done.kind, 'research'); assert(done.conclusion?.conclusion);
+  assert.equal(done.revision, done.base); // không sửa code
+  assert(team.events(research.id).some(e => e.type === 'CONCLUSION'));
+  await assert.rejects(team.merge(research.id));
+  const light = await team.create({ project: 'test', goal: 'light: Update hello' });
+  const ready = await settle(team, light.id, 'ready');
+  assert.equal(ready.rigor, 'light'); assert.equal(ready.verified, null);
+  assert(!team.events(light.id).some(e => e.details?.stage === 'verify'));
+  await team.merge(light.id);
+});
+
+test('lead asks clarifying questions and waits; the answer resumes planning', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'hỏi lại: sửa trang' });
+  const waiting = await settle(team, job.id, 'waiting');
+  assert.equal(waiting.questions.length, 1); assert.equal(waiting.tasks.length, 0);
+  assert(team.events(job.id).some(e => e.type === 'QUESTION' && e.to === 'user'));
+  await team.control(job.id, 'message', { message: 'Trang hello.txt' });
+  await settle(team, job.id, 'ready');
+});
+
+test('projects can be registered from the UI, including git init and "npm test"-style commands', async t => {
+  const f = await fixture(), team = new Team({ ...f.config, demo: false, agents: [{ id: 'c', label: 'c', provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }], pipeline: {} }, f.data); t.after(() => team.close());
+  const { Accounts } = await import('../src/accounts.js');
+  const file = join(f.data, 'cfg.json'); writeFileSync(file, '{}');
+  const accounts = new Accounts(team, file, process.cwd(), { commandAvailable: () => true }); t.after(() => accounts.close());
+  const folder = mkdtempSync(join(tmpdir(), 'proj-'));
+  await assert.rejects(accounts.addProject({ path: folder }), /git/);
+  const { id } = await accounts.addProject({ path: folder, init: true, tests: 'node -e "process.exit(0)"' });
+  const p = team.project(id); assert.deepEqual(p.tests, [['node', '-e', 'process.exit(0)']]);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).projects.length, 2);
+  accounts.removeProject(id); assert.throws(() => team.project(id));
+});
+
+test('attachments land in the worktree for agents but never in commits', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
+  const shot = join(f.data, 'shot.png'); writeFileSync(shot, 'PNG');
+  const job = await team.create({ project: 'test', goal: 'Update hello', files: [{ name: 'log.txt', data: Buffer.from('err').toString('base64') }, { path: shot }] });
+  const ready = await settle(team, job.id, 'ready');
+  assert.deepEqual(ready.attachments, ['.ai-team/attachments/log.txt', '.ai-team/attachments/shot.png']);
+  assert.equal(readFileSync(join(ready.worktree, '.ai-team/attachments/log.txt'), 'utf8'), 'err');
+  const files = (await run(['git'], ['-C', ready.worktree, 'ls-tree', '-r', '--name-only', 'HEAD'])).stdout;
+  assert(!files.includes('.ai-team'));
+  assert(team.events(job.id).some(e => e.details?.prompt?.includes('.ai-team/attachments/shot.png')));
+  await assert.rejects(team.create({ project: 'test', goal: 'x', files: Array(11).fill({ name: 'a', data: 'YQ==' }) }), /10/);
+});

@@ -38,8 +38,8 @@ const cookieName = `team_session_${port}`;
 const clients = new Set();
 const send = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)); };
 const equal = value => typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
-async function body(req) {
-  let text = ''; for await (const chunk of req) { text += chunk; if (text.length > 100_000) throw new Error(msg("srv.server.body_qua_lon")); }
+async function body(req, limit = 100_000) {
+  let text = ''; for await (const chunk of req) { text += chunk; if (text.length > limit) throw new Error(msg("srv.server.body_qua_lon")); }
   return text ? JSON.parse(text) : {};
 }
 const server = createServer(async (req, res) => {
@@ -68,6 +68,10 @@ const server = createServer(async (req, res) => {
       Object.assign(state, { language: getLanguage(), languages, stale: stale() });
       return send(res, 200, state);
     }
+    if (req.method === 'POST' && url.pathname === '/api/projects') return send(res, 201, await accounts.addProject(await body(req)));
+    if (req.method === 'POST' && url.pathname === '/api/projects/pick') return send(res, 200, await accounts.pickFolder());
+    const projectRemove = /^\/api\/projects\/([a-z0-9-]+)\/remove$/.exec(url.pathname);
+    if (req.method === 'POST' && projectRemove) return send(res, 200, accounts.removeProject(projectRemove[1]));
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const input = await body(req);
       if (!languages.includes(input.language)) throw new Error('language: vi | en | ja');
@@ -91,7 +95,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive' }); res.write('data: {}\n\n'); clients.add(res);
       req.on('close', () => clients.delete(res)); return;
     }
-    if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req)));
+    if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
     const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check))?$/.exec(url.pathname);
@@ -100,7 +104,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'GET' && !action) return send(res, 200, team.get(id));
       if (req.method === 'GET' && action === 'events') return send(res, 200, team.events(id, Math.max(0, Number(url.searchParams.get('after')) || 0)));
       if (req.method === 'GET' && action === 'diff') return send(res, 200, await team.diff(id));
-      if (req.method === 'POST' && action === 'control') { const input = await body(req); return send(res, 200, await team.control(id, input.action, input)); }
+      if (req.method === 'POST' && action === 'control') { const input = await body(req, 160e6); return send(res, 200, await team.control(id, input.action, input)); }
       if (req.method === 'GET' && action === 'merge-check') return send(res, 200, await team.mergeCheck(id));
       if (req.method === 'POST' && action === 'merge') return send(res, 200, await team.merge(id, await body(req)));
     }

@@ -120,6 +120,41 @@ export class Accounts {
     this.persist(config);
     return member;
   }
+  // Đăng ký dự án từ giao diện. Thư mục chưa có git thì có thể khởi tạo kèm một commit rỗng.
+  async addProject(input = {}) {
+    if (this.team.config.demo) throw new Error(msg("srv.accounts.sua_ho_so_o_doi_live"));
+    const path = String(input.path ?? '').trim().replace(/^"|"$/g, '');
+    if (!path || !existsSync(path)) throw new Error(msg("srv.team.duong_dan_repo_khong_ton_tai"));
+    const id = String(input.id || path.split(/[\\/]/).filter(Boolean).pop() || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    if (!id) throw new Error(msg("srv.accounts.project_id"));
+    if (this.team.config.projects.some(p => p.id === id)) throw new Error(msg("srv.team.project_id_bi_trung"));
+    const top = await run(['git'], ['-C', path, 'rev-parse', '--show-toplevel'], { allowFailure: true });
+    if (top.code !== 0) {
+      if (!input.init) throw new Error(msg("srv.accounts.not_git"));
+      await run(['git'], ['init', '-b', 'main', path]);
+    }
+    if ((await run(['git'], ['-C', path, 'rev-parse', '--verify', 'HEAD'], { allowFailure: true })).code !== 0) {
+      if (!input.init) throw new Error(msg("srv.accounts.no_commit"));
+      await run(['git'], ['-C', path, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'commit', '--allow-empty', '-m', 'AI Team: initial commit']);
+    }
+    const tests = String(input.tests ?? '').split(/\r?\n/).map(l => (l.match(/"[^"]*"|\S+/g) || []).map(w => w.replace(/^"|"$/g, ''))).filter(a => a.length);
+    const config = structuredClone(this.team.config);
+    config.projects.push({ id, path, tests, ...(input.network ? { network: true } : {}) });
+    this.persist(config);
+    return { id };
+  }
+  removeProject(id) {
+    if (this.team.jobs().some(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status))) throw new Error(msg("srv.accounts.project_busy"));
+    const config = structuredClone(this.team.config); config.projects = config.projects.filter(p => p.id !== id); this.persist(config);
+    return { removed: id };
+  }
+  // Hộp chọn thư mục của Windows (server chạy trên chính máy này).
+  async pickFolder() {
+    if (process.platform !== 'win32') throw new Error(msg("srv.accounts.dang_nhap_cli_tuong_tac_hien"));
+    const script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.Form -Property @{TopMost=$true}; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.ShowNewFolderButton = $true; if ($d.ShowDialog($f) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }";
+    const r = await run(['powershell.exe'], ['-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { allowFailure: true, timeoutMs: 10 * 60_000 });
+    return { path: r.stdout.trim() || null };
+  }
   async models(id) { return listModels(this.team.agent(id)); }
   // Nút "Kiểm tra quota": gửi /usage như gõ tay rồi đọc phần trăm. Có thể tốn một lượt nhỏ nếu CLI coi đó là prompt.
   async usage(id) {

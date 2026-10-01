@@ -32,7 +32,32 @@ async function api(path, data) {
   if (!r.ok) throw new Error(result.error || r.statusText); return result;
 }
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
-async function attempt(fn) { try { await fn(); } catch (e) { notice(e.message); } }
+async function attempt(fn) {
+  try { await fn(); } catch (e) {
+    const d = document.querySelector('dialog[open]');
+    if (!d) return notice(e.message);
+    let box = d.querySelector('.dialog-error'); if (!box) { box = document.createElement('p'); box.className = 'error-box dialog-error'; box.setAttribute('role', 'alert'); (d.querySelector('form') || d).append(box); }
+    box.textContent = e.message; box.scrollIntoView({ block: 'nearest' });
+  }
+}
+document.addEventListener('close', e => e.target.querySelector?.('.dialog-error')?.remove(), true);
+// Đính kèm: chọn file, dán ảnh (Ctrl+V) hoặc kéo thả; gửi dạng base64 cùng mục tiêu/chỉ dẫn.
+const pending = { goal: [], message: [] };
+const readFile = file => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok({ name: file.name || `paste-${Date.now()}.png`, data: String(r.result).split(',')[1], size: file.size }); r.onerror = fail; r.readAsDataURL(file); });
+async function addFiles(kind, list) {
+  for (const f of list) { if (f.size > 15 * 2 ** 20) { notice(t('ui.attach.tooBig', { name: f.name })); continue; } pending[kind].push(await readFile(f)); }
+  drawAttach(kind);
+}
+function drawAttach(kind) {
+  $(`${kind}-attach`).innerHTML = pending[kind].map((f, i) => `<span class="attach-chip">${esc(f.name)} <small>${Math.ceil(f.size / 1024)} KB</small><button type="button" data-unattach="${kind}:${i}">×</button></span>`).join('');
+  document.querySelectorAll(`[data-unattach^="${kind}:"]`).forEach(b => b.onclick = () => { pending[kind].splice(+b.dataset.unattach.split(':')[1], 1); drawAttach(kind); });
+}
+function wireAttach(kind, input, target) {
+  input.onchange = () => attempt(async () => { await addFiles(kind, [...input.files]); input.value = ''; });
+  target.addEventListener('paste', e => { const files = [...e.clipboardData.files]; if (files.length) { e.preventDefault(); attempt(() => addFiles(kind, files)); } });
+  target.addEventListener('dragover', e => e.preventDefault());
+  target.addEventListener('drop', e => { if (e.dataTransfer.files.length) { e.preventDefault(); attempt(() => addFiles(kind, [...e.dataTransfer.files])); } });
+}
 const statusLabel = s => t(`ui.status.${s}`);
 function badge(job) { return `<span class="status ${esc(job.status)}">${esc(statusLabel(job.status))}</span>`; }
 function duration(minutes) {
@@ -132,7 +157,7 @@ function drawFlow() {
     const tip = a ? `${a.label} · ${rolesText(a.id)}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
     return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 23})"><title>${esc(tip)}</title><rect width="${n.w}" height="46" rx="8"/><text x="10" y="19" class="t">${esc(cut(title, n.w / 8))}</text><text x="10" y="36" class="s">${esc(subtitle)}</text></g>`;
   };
-  const rv = nodes.reviewer, mg = nodes.manager;
+  const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', light = job?.rigor === 'light' || research && job?.rigor !== 'strict';
   let edges = edge('user', 'manager', 'used');
   for (const id of builders) {
     const tasks = tasksOf(id), used = !job || tasks.length > 0;
@@ -144,8 +169,8 @@ function drawFlow() {
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
-    + box('tests', 'Tests', t('ui.flow.testsBy')) + box('reviewer', named('Review', r.reviewer), sub(r.reviewer), r.reviewer || null, 'reviewer')
-    + box('verifier', named('Verify', r.verifier), sub(r.verifier), r.verifier || null, 'verifier') + box('merge', t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
+    + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', r.reviewer), sub(r.reviewer), r.reviewer || null, 'reviewer')
+    + box('verifier', named('Verify', r.verifier), light ? t('ui.flow.skipped') : sub(r.verifier), r.verifier || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
   $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
   const inRoster = new Set([r.manager, r.reviewer, r.verifier, ...r.builders]);
   const bench = state.agents.filter(a => !inRoster.has(a.id));
@@ -157,20 +182,26 @@ function drawInspector() {
   $('message').disabled = !job || ['merged', 'cancelled'].includes(job.status);
   if (!job) { $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span></div>`; return; }
   const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
-  const facts = [['Task', job.id], [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), job.round], [t('ui.inspector.started'), clock(job.createdAt)]];
+  const research = job.kind === 'research';
+  const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), job.round], [t('ui.inspector.started'), clock(job.createdAt)]];
+  const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
+  const waiting = job.status === 'waiting' ? `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
   const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${i === job.taskIndex && job.stage === 'implement' ? 'current' : ''}"><b>T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}</li>`).join('')}</ul>` : '';
   const risk = job.risk ? `<p class="muted">${esc(t('ui.inspector.risk'))} <b class="${job.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + job.risk))}</b>${job.riskReasons?.length ? ' · ' + esc(job.riskReasons.join('; ')) : ''}</p>` : '';
-  const steps = [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision], ['Verify', job.verified === job.revision], ['Merge', job.status === 'merged']];
-  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => `<span class="step ${done ? 'done' : ''}">${done ? '✓' : '○'} ${label}</span>`).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button><button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button><select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div><button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button><p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision], [t('ui.flow.conclusion'), job.status === 'done']]
+    : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision], ['Verify', job.verified === job.revision || job.rigor === 'light'], ['Merge', job.status === 'merged']];
+  const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
+  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => `<span class="step ${done ? 'done' : ''}">${done ? '✓' : '○'} ${label}</span>`).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => { await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); }));
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
-  $('merge').onclick = () => attempt(openMerge);
+  if ($('merge')) $('merge').onclick = () => attempt(openMerge);
+  if ($('send-answer')) $('send-answer').onclick = () => attempt(async () => { const v = $('answer').value.trim(); if (!v) return; await api(`jobs/${selected}/control`, { action: 'message', message: v }); await refresh(); });
 }
 async function showDiff() { const result = await api(`jobs/${selected}/diff`); $('diff-content').textContent = result.diff || t('ui.diff.empty'); if (result.status) $('diff-content').textContent += '\n\nWorking tree:\n' + result.status; $('diff-dialog').showModal(); }
 async function openMerge() {
   const c = await api(`jobs/${selected}/merge-check`), job = state.jobs.find(j => j.id === selected);
-  const checks = [[t('ui.merge.tested'), c.checks.tested], [t('ui.merge.reviewed'), c.checks.reviewed], [t('ui.merge.verified'), c.checks.verified], [t('ui.merge.baseUnchanged', { branch: job.baseBranch }), c.checks.baseUnchanged]];
+  const checks = [[t('ui.merge.tested'), c.checks.tested], [t('ui.merge.reviewed'), c.checks.reviewed], [t(c.checks.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks.verified], [t('ui.merge.baseUnchanged', { branch: job.baseBranch }), c.checks.baseUnchanged]];
   $('merge-check').innerHTML = `<p>${esc(t('ui.merge.summary', { code: c.code, branch: job.baseBranch, files: c.files, added: c.added, removed: c.removed }))}</p><p>${esc(t('ui.merge.risk'))} <b class="${c.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + c.risk))}</b></p><ul class="check-list">${checks.map(([l, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(l)}</li>`).join('')}${c.reasons.map(x => `<li class="bad">⚠ ${esc(x)}</li>`).join('')}</ul>${c.checks.baseUnchanged ? '' : `<p class="error-box">${esc(t('ui.merge.baseChanged'))}</p>`}`;
   $('merge-confirm-label').textContent = t('ui.merge.confirm', { code: c.code });
   $('merge-confirm').value = ''; $('merge-confirm').hidden = $('merge-confirm-label').hidden = !c.needsConfirm;
@@ -216,7 +247,7 @@ async function recheckMembers(ids) {
 }
 // Khung trao đổi kiểu chat nhóm: mọi thành viên trong luồng, tin của Bạn bên phải, hoạt động kỹ thuật thu gọn ở giữa.
 const SYSTEM_TYPES = ['ACTIVITY', 'DIAGNOSTIC', 'TEST_OUTPUT', 'TEST_START', 'USAGE', 'RATE_LIMIT'];
-const DECISION_TYPES = ['DECISION', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'CONFLICT', 'WARNING'];
+const DECISION_TYPES = ['QUESTION', 'CONCLUSION', 'DECISION', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'CONFLICT', 'WARNING'];
 const hueClass = id => 'hue-' + [...String(id)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 8, 3);
 const evLabel = type => dict['ui.ev.' + type] || fallback['ui.ev.' + type] || type;
 function avatar(id) {
@@ -237,7 +268,7 @@ function drawTimeline() {
   const details = e => e.details ? `<details data-seq="${e.seq}" ${opened.has(String(e.seq)) ? 'open' : ''}><summary>${esc(t('ui.timeline.details'))}</summary><pre>${esc(JSON.stringify(e.details, null, 2))}</pre></details>` : '';
   timeline.innerHTML = filtered.length ? filtered.map(e => {
     if (SYSTEM_TYPES.includes(e.type)) return `<div class="chat-system"><span class="chat-type">${esc(evLabel(e.type))}</span><b>${esc(names[e.from] || e.from)}</b> ${esc(cut(e.summary, 300))}<time>${time(e)}</time>${details(e)}</div>`;
-    const mine = e.from === 'user', cls = [mine && 'mine', e.from === 'controller' && 'from-system', e.type === 'BLOCKER' && 'alert', ['READY_FOR_MERGE', 'MERGED'].includes(e.type) && 'success'].filter(Boolean).join(' ');
+    const mine = e.from === 'user', cls = [mine && 'mine', e.from === 'controller' && 'from-system', e.type === 'BLOCKER' && 'alert', e.type === 'QUESTION' && 'question', ['READY_FOR_MERGE', 'MERGED'].includes(e.type) && 'success'].filter(Boolean).join(' ');
     return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
   }).join('') : `<div class="empty"><span class="empty-icon">◎</span><b>${esc(t('ui.timeline.emptyTitle'))}</b><span>${esc(t('ui.timeline.emptyText'))}</span></div>`;
   if (atBottom) timeline.scrollTop = timeline.scrollHeight;
@@ -448,13 +479,32 @@ async function refresh() {
 const openTask = () => $('task-dialog').showModal();
 ['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
 $('close-dialog').onclick = () => $('task-dialog').close(); $('close-diff').onclick = () => $('diff-dialog').close();
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; await refresh(); } finally { $('submit-task').disabled = false; } }); };
-$('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value }); $('message').value = ''; await refresh(); }); };
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value, files: pending.goal }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value, files: pending.message }); $('message').value = ''; pending.message = []; drawAttach('message'); await refresh(); }); };
 $('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); };
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });
-function view(quota) { $('quota-view').hidden = !quota; $('work-view').hidden = quota; $('overview').classList.toggle('active', !quota); $('quota-nav').classList.toggle('active', quota); }
-$('overview').onclick = () => view(false);
-$('quota-nav').onclick = () => attempt(async () => { view(true); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
+function view(name) {
+  name = name === true ? 'members' : name || 'work';
+  $('work-view').hidden = name !== 'work'; $('quota-view').hidden = name !== 'members'; $('security-view').hidden = name !== 'security';
+  $('overview').classList.toggle('active', name === 'work'); $('quota-nav').classList.toggle('active', name === 'members'); $('security-nav').classList.toggle('active', name === 'security');
+  if (name === 'security') drawSecurity();
+}
+// Bảng quyền: mô tả đúng những gì code đang áp dụng (sandbox, công cụ, mạng, bí mật, merge).
+function drawSecurity() {
+  const cols = ['manager', 'builder', 'reviewer', 'verifier', 'controller', 'you'];
+  const rows = [
+    ['read', 'Y Y Y Y Y Y'], ['edit', 'N Y N N N Y'], ['outside', 'N N N N N Y'], ['shell', 'P P P P Y Y'],
+    ['network', state.projects.some(p => p.network) ? 'P P P P N Y' : 'N N N N N Y'], ['commit', 'N N N N Y Y'],
+    ['merge', 'N N N N N Y'], ['push', 'N N N N N Y'], ['secrets', 'N N N N N Y'], ['accounts', 'P P P P N Y'],
+  ];
+  const mark = { Y: ['ok', '✓'], N: ['no', '✗'], P: ['part', '~'] };
+  const head = cols.map(c => `<th>${esc(c === 'controller' ? 'Controller' : c === 'you' ? t('ui.who.user') : roleLabel(c))}</th>`).join('');
+  $('security-matrix').innerHTML = `<table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map(x => `<td class="${mark[x][0]}">${mark[x][1]}</td>`).join('')}<td class="how">${esc(t('ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table><p class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))}</p>`;
+  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOff'))}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
+}
+$('overview').onclick = () => view('work');
+$('security-nav').onclick = () => view('security');
+$('quota-nav').onclick = () => attempt(async () => { view('members'); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
 $('refresh-quota').onclick = () => attempt(async () => { await api('quota', {}); notice(t('ui.members.refreshing')); });
 $('add-member').onclick = () => { if (state.demo) { location.href = 'http://127.0.0.1:3333/?members=1&add=1'; return; } providerHint(); $('member-dialog').showModal(); };
 $('member-provider').onchange = providerHint;
@@ -476,6 +526,18 @@ $('profile-form').onsubmit = e => { e.preventDefault(); attempt(async () => {
 const toggleChat = open => { const p = document.querySelector('.communication'); p.classList.toggle('expanded', open ?? !p.classList.contains('expanded')); document.body.classList.toggle('chat-open', p.classList.contains('expanded')); $('chat-expand').textContent = p.classList.contains('expanded') ? '✕' : '⤢'; $('timeline').scrollTop = $('timeline').scrollHeight; };
 $('chat-expand').onclick = () => toggleChat();
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('chat-open') && !document.querySelector('dialog[open]')) toggleChat(false); });
+function projectList() {
+  $('project-list').innerHTML = state.projects.length ? `<b>${esc(t('ui.project.registered'))}</b>${state.projects.map(p => `<div class="project-row"><span><b>${esc(p.id)}</b> · ${esc(p.path)}${p.tests.length ? '' : ' · ' + esc(t('ui.project.noTests'))}</span><button type="button" data-remove-project="${esc(p.id)}">${esc(t('ui.project.remove'))}</button></div>`).join('')}` : '';
+  document.querySelectorAll('[data-remove-project]').forEach(b => b.onclick = () => attempt(async () => { if (!confirm(t('ui.project.confirmRemove', { id: b.dataset.removeProject }))) return; await api(`projects/${b.dataset.removeProject}/remove`, {}); await refresh(); projectList(); }));
+}
+$('open-project').onclick = () => { projectList(); $('project-dialog').showModal(); };
+$('close-project').onclick = () => $('project-dialog').close();
+$('pick-folder').onclick = () => attempt(async () => { $('pick-folder').disabled = true; try { const r = await api('projects/pick', {}); if (r.path) { $('project-path').value = r.path; if (!$('project-id').value) $('project-id').value = r.path.split(/[\\/]/).filter(Boolean).pop().toLowerCase().replace(/[^a-z0-9-]+/g, '-'); } } finally { $('pick-folder').disabled = false; } });
+$('project-form').onsubmit = e => { e.preventDefault(); attempt(async () => {
+  const r = await api('projects', { path: $('project-path').value, id: $('project-id').value, tests: $('project-tests').value, init: $('project-init').checked, network: $('project-network').checked });
+  $('project-dialog').close(); $('project-form').reset(); await refresh(); $('project').value = r.id;
+}); };
+wireAttach('goal', $('goal-files'), $('goal')); wireAttach('message', $('message-files'), $('message'));
 $('close-slot').onclick = () => $('slot-dialog').close();
 $('slot-member').onchange = slotMember;
 $('slot-form').onsubmit = e => { e.preventDefault(); attempt(saveSlot); };

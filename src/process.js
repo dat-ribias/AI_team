@@ -59,6 +59,8 @@ export function childEnv(agent) {
   const env = { ...process.env };
   // A worker must not inherit the controller's or desktop's account/API credentials.
   for (const key of Object.keys(env)) if (/^(CODEX_|OPENAI_|CLAUDE_|ANTHROPIC_|GEMINI_CLI_HOME$|GEMINI_API_KEY$|GOOGLE_API_KEY$|TEAM_)/i.test(key)) delete env[key];
+  // Bí mật khác trong môi trường (token, mật khẩu, khóa cloud) cũng không chuyển cho agent.
+  for (const key of Object.keys(env)) if (/(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|CREDENTIAL)|^(AWS_|AZURE_|GCP_|GOOGLE_APPLICATION_CREDENTIALS$|KINTONE_|SSH_AUTH_SOCK$|NPM_CONFIG__AUTH)/i.test(key)) delete env[key];
   if (agent?.home && (agent.provider === 'codex' || !agent.provider)) env.CODEX_HOME = agent.home;
   if (agent?.home && agent.provider === 'claude') env.CLAUDE_CONFIG_DIR = agent.home;
   if (agent?.home && agent.provider === 'gemini') env.GEMINI_CLI_HOME = agent.home;
