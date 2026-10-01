@@ -105,6 +105,17 @@ export class Accounts {
       if (!path) delete member.command;
       else { const command = commandFromPath(path); if (!command) throw new Error(msg("srv.accounts.duong_dan_cli_khong_ton_tai")); member.command = command; }
     }
+    if ('mcp' in input) {
+      // Cùng định dạng mcpServers của Claude: {"tên": {"command": "...", "args": [...], "env": {...}}}
+      let mcp = input.mcp;
+      if (typeof mcp === 'string') { if (!mcp.trim()) mcp = {}; else try { mcp = JSON.parse(mcp); } catch { throw new Error(msg("srv.accounts.mcp_invalid")); } }
+      if (!mcp || typeof mcp !== 'object' || Array.isArray(mcp)) throw new Error(msg("srv.accounts.mcp_invalid"));
+      for (const [name, s] of Object.entries(mcp)) {
+        if (!/^[\w-]{1,40}$/.test(name) || typeof s?.command !== 'string' || !s.command || (s.args && !Array.isArray(s.args)) || (s.env && typeof s.env !== 'object')) throw new Error(msg("srv.accounts.mcp_invalid"));
+      }
+      if (Object.keys(mcp).length && !['codex', 'claude'].includes(member.provider)) throw new Error(msg("srv.accounts.mcp_provider"));
+      if (Object.keys(mcp).length) member.mcp = mcp; else delete member.mcp;
+    }
     if ('effort' in input) {
       const effort = String(input.effort ?? '').trim();
       if (effort && !/^[a-z]{2,12}$/.test(effort)) throw new Error('effort');
@@ -154,6 +165,10 @@ export class Accounts {
     const script = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.Form -Property @{TopMost=$true}; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.ShowNewFolderButton = $true; if ($d.ShowDialog($f) -eq 'OK') { [Console]::Out.Write($d.SelectedPath) }";
     const r = await run(['powershell.exe'], ['-NoProfile', '-STA', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { allowFailure: true, timeoutMs: 10 * 60_000 });
     return { path: r.stdout.trim() || null };
+  }
+  // MCP đã cấu hình cho Claude của bạn (~/.claude.json) để nhập nhanh vào hồ sơ member.
+  claudeMcp() {
+    try { return JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf8')).mcpServers || {}; } catch { return {}; }
   }
   async models(id) { return listModels(this.team.agent(id)); }
   // Nút "Kiểm tra quota": gửi /usage như gõ tay rồi đọc phần trăm. Có thể tốn một lượt nhỏ nếu CLI coi đó là prompt.

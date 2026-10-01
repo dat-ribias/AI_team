@@ -97,3 +97,52 @@ body.chat-open::after{content:"";position:fixed;inset:0;background:#080c12bb;z-i
 .attach-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.attach-list.msg{margin:-10px 20px 14px}.attach-list:empty{display:none}.attach-chip{display:inline-flex;gap:6px;align-items:center;font-size:11px;border:1px solid var(--line);border-radius:12px;padding:3px 4px 3px 9px}.attach-chip button{border:0;background:none;padding:0 4px;font-size:13px}
 .dialog-error{white-space:pre-wrap;max-height:none}
 .progress-box{display:flex;gap:10px;align-items:flex-start;margin:12px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:12px}.progress-box .dot{margin-top:6px;animation:pulse 1.4s ease-in-out infinite}@keyframes pulse{50%{opacity:.3}}
+.skills-list{display:grid;gap:6px;margin-top:10px;max-height:420px;overflow:auto}.skill-row{display:grid;gap:2px;border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:12px;color:var(--text)}.skill-row small{overflow-wrap:anywhere}.skill-tags{display:inline-flex;flex-wrap:wrap;gap:4px;margin-top:4px}#profile-mcp{font:12px/1.5 Consolas,monospace}
+
+/* Health status indicators for members */
+.avatar-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center}
+.health-dot{position:absolute;right:-2px;bottom:-2px;width:10px;height:10px;border-radius:50%;border:2px solid var(--panel);z-index:2;box-sizing:content-box}
+.health-dot.healthy{background:#10b981;box-shadow:0 0 6px #10b981aa}
+.health-dot.warning{background:#f59e0b}
+.health-dot.danger{background:#ef4444;box-shadow:0 0 8px #ef4444dd;animation:pulseHealth 1.4s ease-in-out infinite}
+.health-dot.disabled{background:var(--muted)}
+.health-dot.unknown{background:var(--line)}
+
+.chat-person{transition:all .15s ease}
+.chat-person.health-danger{border-color:rgba(239,68,68,0.35);background:rgba(239,68,68,0.06)}
+.chat-person.health-warning{border-color:rgba(245,158,11,0.25)}
+.chat-person.health-healthy{border-color:rgba(16,185,129,0.25)}
+.chat-person-info{display:flex;flex-direction:column;gap:1px}
+.chat-person-name{font-weight:600}
+.chat-person-sub{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted)}
+
+.health-pill{display:inline-flex;align-items:center;gap:3px;font-weight:600;font-size:9.5px;padding:1px 6px;border-radius:10px;line-height:1.3}
+.health-pill.healthy{color:#10b981;background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.25)}
+.health-pill.warning{color:#f59e0b;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.25)}
+.health-pill.danger{color:#ef4444;background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.35);font-weight:700}
+.health-pill.disabled{color:var(--muted);background:var(--c202731);border:1px solid var(--line)}
+.health-pill.unknown{color:var(--muted)}
+
+.flow .flow-dot{transition:all .2s ease}
+.flow .flow-dot.healthy{fill:#10b981;filter:drop-shadow(0 0 3px #10b981aa)}
+.flow .flow-dot.warning{fill:#f59e0b}
+.flow .flow-dot.danger{fill:#ef4444;filter:drop-shadow(0 0 5px #ef4444dd);animation:pulseHealth 1.4s ease-in-out infinite}
+.flow .flow-dot.disabled{fill:var(--muted)}
+.flow .flow-dot.unknown{fill:var(--line)}
+.flow .node.health-danger rect{stroke:#ef4444aa;stroke-width:1.6}
+.flow .node.health-warning rect{stroke:#f59e0b66}
+.flow .node.health-healthy rect{stroke:#10b98155}
+
+.bench-chip{display:inline-flex;align-items:center;gap:6px}
+.bench-health{font-weight:600;font-size:10px;margin-left:2px}
+.bench-health.healthy{color:#10b981}
+.bench-health.warning{color:#f59e0b}
+.bench-health.danger{color:#ef4444}
+.health-dot-inline{display:inline-block;width:7px;height:7px;border-radius:50%}
+.health-dot-inline.healthy{background:#10b981}
+.health-dot-inline.warning{background:#f59e0b}
+.health-dot-inline.danger{background:#ef4444;box-shadow:0 0 5px #ef4444;animation:pulseHealth 1.4s ease-in-out infinite}
+.health-dot-inline.disabled{background:var(--muted)}
+.health-dot-inline.unknown{background:var(--line)}
+
+@keyframes pulseHealth{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.85)}}

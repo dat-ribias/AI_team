@@ -175,12 +175,17 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     // Windows: không bật sandbox thì Codex (approval=never) từ chối mọi lệnh, kể cả lệnh chỉ đọc. "unelevated" không cần quyền admin.
     const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated';
     if (process.platform === 'win32' && winSandbox !== 'off') args.push('-c', `windows.sandbox="${winSandbox}"`);
+    // MCP bật riêng cho member này (TOML inline qua -c).
+    const toml = v => typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(toml).join(',')}]` : `{${Object.entries(v).map(([k, x]) => `${JSON.stringify(k)}=${toml(x)}`).join(',')}}`;
+    for (const [name, s] of Object.entries(agent.mcp || {})) args.push('-c', `mcp_servers.${name}=${toml({ command: s.command, args: s.args || [], ...(s.env ? { env: s.env } : {}) })}`);
     args.push('-');
   } else if (agent.provider === 'claude') {
     args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
     if (task.stage !== 'implement') args.push('--tools', `Read,Glob,Grep,Bash${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${web ? ',WebSearch,WebFetch' : ''}`);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
+    // MCP bật riêng cho member này; tên công cụ dạng mcp__<server> được cho phép không cần hỏi.
+    if (agent.mcp && Object.keys(agent.mcp).length) args.push('--mcp-config', JSON.stringify({ mcpServers: agent.mcp }), '--strict-mcp-config', '--allowedTools', ...Object.keys(agent.mcp).map(n => `mcp__${n}`));
     if (!web) args.push('--disallowedTools', 'WebFetch,WebSearch');
   } else {
     args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');

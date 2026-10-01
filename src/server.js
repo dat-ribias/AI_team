@@ -68,6 +68,8 @@ const server = createServer(async (req, res) => {
       Object.assign(state, { language: getLanguage(), languages, stale: stale() });
       return send(res, 200, state);
     }
+    if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, team.skills(url.searchParams.has('refresh')).map(({ name, description, source }) => ({ name, description, source })));
+    if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
     if (req.method === 'POST' && url.pathname === '/api/projects') return send(res, 201, await accounts.addProject(await body(req)));
     if (req.method === 'POST' && url.pathname === '/api/projects/pick') return send(res, 200, await accounts.pickFolder());
     const projectRemove = /^\/api\/projects\/([a-z0-9-]+)\/remove$/.exec(url.pathname);

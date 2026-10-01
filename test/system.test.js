@@ -256,3 +256,35 @@ test('per-member speed and token use are measured and shown to the lead', async 
   const plan = team.events(job.id).find(e => e.details?.stage === 'plan');
   assert.match(plan.details.prompt, /avgTokensPerCall/);
 });
+
+test('skill library: lead attaches skills per task, controller copies them for the agent (never committed)', async t => {
+  const f = await fixture();
+  const lib = mkdtempSync(join(tmpdir(), 'skills-')); const { mkdirSync } = await import('node:fs');
+  mkdirSync(join(lib, 'demo-skill')); writeFileSync(join(lib, 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Keep it minimal\n---\nDo less.');
+  f.config.skillDirs = [lib];
+  const { runAgent } = await import('../src/providers.js');
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'plan') { assert.match(prompt, /demo-skill/); return { summary: 'p', kind: 'code', rigor: 'standard', risk: 'low', reviewSkills: ['demo-skill'], tasks: [{ agent: 'codex-2', difficulty: 2, skills: ['demo-skill', 'nope'], instruction: 'Update hello.txt' }] }; }
+    if (task.stage === 'implement') { assert.match(prompt, /\.ai-team\/skills\/demo-skill\/SKILL\.md/); assert.equal(readFileSync(join(task.worktree, '.ai-team/skills/demo-skill/SKILL.md'), 'utf8').includes('Do less'), true); }
+    return runAgent(agent, task, prompt, opts);
+  } });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const ready = await settle(team, job.id, 'ready');
+  assert.deepEqual(ready.tasks[0].skills, ['demo-skill']); assert.deepEqual(ready.reviewSkills, ['demo-skill']);
+  assert(!(await run(['git'], ['-C', ready.worktree, 'ls-tree', '-r', '--name-only', 'HEAD'])).stdout.includes('.ai-team'));
+  assert(team.events(job.id).some(e => e.details?.stage === 'review' && e.details.skills?.includes('demo-skill')));
+});
+
+test('per-member MCP config is validated and limited to Codex/Claude', async t => {
+  const f = await fixture();
+  const team = new Team({ ...f.config, demo: false, agents: [{ id: 'c', label: 'c', provider: 'claude', home: mkdtempSync(join(tmpdir(), 'h-')) }, { id: 'g', label: 'g', provider: 'antigravity' }], pipeline: {} }, f.data); t.after(() => team.close());
+  const { Accounts } = await import('../src/accounts.js');
+  const file = join(f.data, 'cfg.json'); writeFileSync(file, '{}');
+  const accounts = new Accounts(team, file, process.cwd(), { commandAvailable: () => true }); t.after(() => accounts.close());
+  assert.throws(() => accounts.profile('c', { mcp: '{bad' }), /MCP/);
+  accounts.profile('c', { mcp: '{"gitnexus": {"command": "npx", "args": ["-y", "gitnexus", "mcp"]}}' });
+  assert.deepEqual(team.agent('c').mcp.gitnexus.args, ['-y', 'gitnexus', 'mcp']);
+  assert.deepEqual(team.members(['c'])[0].mcpServers, ['gitnexus']);
+  assert.throws(() => accounts.profile('g', { mcp: { x: { command: 'y' } } }), /Codex|Claude/);
+});
