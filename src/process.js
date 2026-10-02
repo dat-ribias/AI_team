@@ -68,8 +68,9 @@ export function childEnv(agent) {
 }
 
 export async function killTree(child) {
-  if (!child?.pid || child.exitCode !== null) return;
+  if (!child?.pid) return;
   if (process.platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode) return;
     await new Promise((resolve, reject) => {
       const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
       killer.on('error', reject); killer.on('close', code => code === 0 ? resolve() : reject(new Error(`taskkill failed (${code})`)));
@@ -90,23 +91,24 @@ export function launch(command, args = [], options = {}) {
 
 export function run(command, args = [], options = {}) {
   return new Promise((resolve, reject) => {
-    if (options.signal?.aborted) return reject(new Error('Run interrupted'));
+    options.signal?.throwIfAborted();
     let child;
     try { child = launch(command, args, options); } catch (error) { return reject(error); }
-    let stdout = '', stderr = '', failure, stopping = false;
+    let stdout = '', stderr = '', failure, stopping = false, termination = Promise.resolve();
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
     const buffers = { stdout: '', stderr: '' };
     const stop = message => {
       if (stopping) return;
-      stopping = true; failure = new Error(message);
-      killTree(child).catch(error => {
+      stopping = true; failure = message instanceof Error ? message : new Error(message);
+      termination = killTree(child).catch(error => {
         // taskkill can be restricted by a Windows job/sandbox; the owned child handle may still be terminable.
         try { if (!child.kill('SIGKILL') && child.exitCode === null) failure = error; }
         catch (killError) { failure = killError; }
       });
     };
-    const aborted = () => stop('Run interrupted');
+    const aborted = () => stop(options.signal.reason);
     options.signal?.addEventListener('abort', aborted, { once: true });
+    if (options.signal?.aborted) aborted();
     const timer = setTimeout(() => stop('Process timed out'), options.timeoutMs || 30 * 60_000);
     function chunk(stream, value) {
       if (stream === 'stdout') stdout = (stdout + value).slice(-2_000_000);
@@ -124,8 +126,9 @@ export function run(command, args = [], options = {}) {
     child.stderr.on('data', b => chunk('stderr', decoders.stderr.write(b)));
     child.stdin.on('error', error => { if (error.code !== 'EPIPE') stop(error.message); });
     child.on('error', error => { failure = error; });
-    child.on('close', code => {
+    child.on('close', async code => {
       clearTimeout(timer); options.signal?.removeEventListener('abort', aborted);
+      await termination;
       for (const stream of ['stdout', 'stderr']) {
         chunk(stream, decoders[stream].end());
         if (buffers[stream]) { try { options.onLine?.(buffers[stream], stream); } catch (e) { failure = e; } }

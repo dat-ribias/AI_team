@@ -124,10 +124,14 @@ Nghiên cứu và nguồn: [RESEARCH.md](RESEARCH.md).
 - *Cho phép nhận việc*: tắt để tạm cho nghỉ mà không xóa.
 - Mỗi member giữ một vai trò; chọn "Dự bị" để rút khỏi luồng. Đổi vai trò áp dụng cho việc mới và cho việc đang dừng khi bấm Tiếp tục.
 
-**Manager chấm độ khó** theo thang 1–5 (1 sửa chữ/config · 2 nhỏ, cục bộ · 3 tính năng/bug nhiều file · 4 xuyên module, data/API, bảo mật, migration · 5 kiến trúc, mơ hồ, khó đảo ngược; phân vân thì làm tròn lên). Manager nhận bảng builder gồm model, năng lực, quota còn lại và được dặn chọn người *yếu nhất mà vẫn đủ* để giữ quota cho member mạnh. Controller kiểm lại từng task trước khi chạy:
+**Manager chấm độ khó** theo thang 1–5 (1 sửa chữ/config · 2 nhỏ, cục bộ · 3 tính năng/bug nhiều file · 4 xuyên module, data/API, bảo mật, migration · 5 kiến trúc, mơ hồ, khó đảo ngược; phân vân thì làm tròn lên). Manager nhận bảng builder gồm model, năng lực, quota còn lại; ưu tiên người mạnh khi rảnh. Mỗi task có `estMinutes`, `dependsOn` (chỉ trỏ task đứng trước), `files` và `context` (file:dòng, symbol, bẫy — Lead phân tích một lần, builder không đọc lại cả repo; builder báo `contextGaps` nếu phải tìm thêm). Controller kiểm lại từng task trước khi chạy:
 - người được giao không đủ năng lực / dưới ngưỡng quota / đang tắt / đang kiêm Reviewer-Verifier → tự đổi sang người phù hợp, ghi sự kiện `REROUTE`;
 - không ai đủ năng lực → giao cho người mạnh nhất còn quota và tự nâng rủi ro merge lên **cao**;
-- "Đổi builder" thủ công của bạn luôn được ưu tiên.
+- "Đổi builder" thủ công của bạn luôn được ưu tiên;
+- người tốt nhất đang bận → so thời điểm xong (ước lượng × hệ số tốc độ học từ các lượt trước): giao người rảnh làm ngay nếu xong sớm hơn, không thì chờ.
+
+**Chạy song song**: task không phụ thuộc nhau chạy cùng lúc; task code trùng `files` thì không. Nhiều task code song song chạy ở worktree/branch con rồi gộp vào nhánh việc trước khi test (xung đột → BLOCKED kèm danh sách file). Nhiều công việc cũng chạy song song. Số agent chạy cùng lúc tính theo RAM trống (GB), `team.config.json`:
+`"resources": { "reserveGB": 4, "ramPerAgentGB": 1.5, "maxAgents": 3, "hardStopRamPercent": 90 }` → thêm agent khi `(RAM trống − reserveGB) / ramPerAgentGB ≥ 1`; RAM ≥ 90% thì không mở agent mới (không dừng agent đang chạy). Một tài khoản CLI chỉ chạy một việc một lúc.
 
 **Merge** không bao giờ tự động. Nút Duyệt merge mở bảng kiểm:
 - test, review, verify đều phải pass trên *đúng commit* sẽ merge; ai đã viết code trong việc đó không được review/verify chính nó;

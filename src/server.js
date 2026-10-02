@@ -73,7 +73,9 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/projects') return send(res, 201, await accounts.addProject(await body(req)));
     if (req.method === 'POST' && url.pathname === '/api/projects/pick') return send(res, 200, await accounts.pickFolder());
     const projectRemove = /^\/api\/projects\/([a-z0-9-]+)\/remove$/.exec(url.pathname);
-    if (req.method === 'POST' && projectRemove) return send(res, 200, accounts.removeProject(projectRemove[1]));
+    if (req.method === 'POST' && projectRemove) return send(res, 200, await accounts.removeProject(projectRemove[1], await body(req)));
+    const projectUpdate = /^\/api\/projects\/([a-z0-9-]+)\/update$/.exec(url.pathname);
+    if (req.method === 'POST' && projectUpdate) return send(res, 200, accounts.updateProject(projectUpdate[1], await body(req)));
     const projectDirs = /^\/api\/projects\/([a-z0-9-]+)\/read-dirs$/.exec(url.pathname);
     if (req.method === 'POST' && projectDirs) return send(res, 200, accounts.setReadDirs(projectDirs[1], (await body(req)).readDirs));
     if (req.method === 'POST' && url.pathname === '/api/settings') {
@@ -116,7 +118,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST' && action === 'merge') return send(res, 200, await team.merge(id, await body(req)));
     }
     send(res, 404, { error: 'Not found' });
-  } catch (e) { send(res, 400, { error: e.message }); }
+  } catch (e) { send(res, e.code === 409 ? 409 : 400, { error: e.message, ...(e.jobs ? { jobs: e.jobs } : {}) }); }
 });
 let update;
 function broadcast() {

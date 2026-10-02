@@ -8,6 +8,12 @@ import { executable, commandAvailable, childEnv, run, killTree, resolveCommand, 
 import { codexClient, codexRpc, listModels } from './providers.js';
 import { roster, validateConfig, redact, tiers } from './team.js';
 
+// Lệnh test: chuỗi nhiều dòng ("node --test x.js") hoặc mảng [executable, ...args]; mỗi phần tử là chuỗi không rỗng.
+export function testList(input) {
+  const list = Array.isArray(input) ? input : String(input ?? '').split(/\r?\n/).map(l => (l.match(/"[^"]*"|\S+/g) || []).map(w => w.replace(/^"|"$/g, ''))).filter(a => a.length);
+  if (list.length > 20 || list.some(c => !Array.isArray(c) || !c.length || c.some(v => typeof v !== 'string' || !v))) throw new Error(msg("srv.team.test_phai_la_mang_executable_arguments"));
+  return list;
+}
 function readDirList(text) {
   const dirs = [...new Set(String(text ?? '').split(/\r?\n/).map(l => l.trim().replace(/^"|"$/g, '')).filter(Boolean).map(d => resolve(d)))];
   if (dirs.length > 20) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: dirs.length }));
@@ -159,12 +165,24 @@ export class Accounts {
       if (!input.init) throw new Error(msg("srv.accounts.no_commit"));
       await run(['git'], ['-C', path, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'commit', '--allow-empty', '-m', 'AI Team: initial commit']);
     }
-    const tests = String(input.tests ?? '').split(/\r?\n/).map(l => (l.match(/"[^"]*"|\S+/g) || []).map(w => w.replace(/^"|"$/g, ''))).filter(a => a.length);
+    const tests = testList(input.tests);
     const config = structuredClone(this.team.config);
     const readDirs = readDirList(input.readDirs);
     config.projects.push({ id, path, tests, ...(input.network ? { network: true } : {}), ...(readDirs.length ? { readDirs } : {}) });
     this.persist(config);
     return { id };
+  }
+  // Sửa project đã đăng ký: lệnh test (mỗi dòng một lệnh), mạng, thư mục tham khảo.
+  updateProject(id, input = {}) {
+    const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
+    if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
+    if ('tests' in input) p.tests = testList(input.tests);
+    if ('network' in input) { if (typeof input.network !== 'boolean') throw new Error('network: true | false'); if (input.network) p.network = true; else delete p.network; }
+    if ('readDirs' in input) { const dirs = readDirList(input.readDirs); if (dirs.length) p.readDirs = dirs; else delete p.readDirs; }
+    this.persist(config);
+    // Lệnh không tìm thấy trên PATH của máy chạy controller → cảnh báo ngay thay vì đợi lúc test mới lỗi ("npm" vẫn chạy được: tự đổi sang node + npm-cli.js).
+    const warnings = p.tests.filter(c => !/[\\/]/.test(c[0]) && executable(c[0]).join() === c[0]).map(c => msg("srv.accounts.test_cmd_warning", { 0: c[0] }));
+    return { id, tests: p.tests, network: p.network === true, readDirs: p.readDirs || [], warnings };
   }
   // Thư mục tham khảo chỉ đọc: chỉ bạn đặt từ dashboard; agent không tự xin thêm được.
   setReadDirs(id, text) {
@@ -174,8 +192,10 @@ export class Accounts {
     if (dirs.length) p.readDirs = dirs; else delete p.readDirs;
     this.persist(config); return { id, readDirs: dirs };
   }
-  removeProject(id) {
-    if (this.team.jobs().some(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status))) throw new Error(msg("srv.accounts.project_busy"));
+  async removeProject(id, { cancelJobs = false } = {}) {
+    const open = this.team.jobs().filter(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status));
+    if (open.length && !cancelJobs) throw Object.assign(new Error(msg("srv.accounts.project_busy_list", { 0: open.length, 1: open.map(j => j.id).join(', ') })), { code: 409, jobs: open.map(j => j.id) });
+    for (const j of open) await this.team.control(j.id, 'cancel');
     const config = structuredClone(this.team.config); config.projects = config.projects.filter(p => p.id !== id); this.persist(config);
     return { removed: id };
   }
@@ -195,7 +215,7 @@ export class Accounts {
   async usage(id) {
     const agent = this.team.agent(id);
     if (agent.provider !== 'claude') throw new Error(msg("srv.accounts.chi_dung_cho_thanh_vien_claude"));
-    if (this.team.active?.agent === id) throw new Error(msg("srv.accounts.thanh_vien_dang_chay_viec_thu"));
+    if (this.team.isBusy(id)) throw new Error(msg("srv.accounts.thanh_vien_dang_chay_viec_thu"));
     const result = await run(this.command(agent), ['-p', '--output-format', 'stream-json', '--verbose', '--tools', '', '--no-session-persistence'],
       { env: childEnv(agent), cwd: agent.home, input: '/usage', allowFailure: true, timeoutMs: 120_000 });
     let resultText = '', assistantText = '';
@@ -291,7 +311,7 @@ export class Accounts {
   assertLoginAllowed(agent) {
     if (agent.provider === 'mock') throw new Error(msg("srv.accounts.day_la_member_mo_phong_mo"));
     if (!this.available(this.command(agent))) throw new Error(msg("srv.accounts.khong_tim_thay_cli_neu_da", { 0: providerInfo[agent.provider].cli }));
-    if (this.team.active || this.team.refreshing) throw new Error(msg("srv.accounts.doi_dang_lam_viec_doc_quota"));
+    if (this.team.runs.size || this.team.refreshing) throw new Error(msg("srv.accounts.doi_dang_lam_viec_doc_quota"));
     if (this.loginBusy) throw new Error(msg("srv.accounts.co_mot_phien_dang_nhap_dang"));
   }
   async login(id) {
@@ -357,7 +377,7 @@ export class Accounts {
   }
   async refresh(id) {
     const agent = this.team.agent(id), active = this.sessions.get(id);
-    if (agent.provider === 'mock' || this.team.active?.agent === id) return this.snapshot(agent);
+    if (agent.provider === 'mock' || this.team.isBusy(id)) return this.snapshot(agent);
     if (!this.available(this.command(agent))) return this.set(id, { status: 'missing_cli', message: msg("srv.accounts.khong_tim_thay_cli_neu_da_2", { 0: providerInfo[agent.provider].cli }) });
     if (active && ['starting', 'pending', 'checking'].includes(active.status)) return this.snapshot(agent);
     let state;

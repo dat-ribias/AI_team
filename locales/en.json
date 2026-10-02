@@ -598,5 +598,20 @@
   "ui.project.readDirsNote": "One folder outside the repo per line. Agents may read/search only, never modify. Secret files (.env, *.pem, *credentials*…) are blocked for Claude; Codex/Gemini are only told via prompt, so don't add folders holding credentials.",
   "ui.project.saveReadDirs": "Save",
   "ui.sec.readDirs": "also reads",
-  "srv.accounts.read_dir_invalid": "Invalid reference folder (must exist, not a whole drive/home, max 20): {0}"
+  "srv.accounts.read_dir_invalid": "Invalid reference folder (must exist, not a whole drive/home, max 20): {0}",
+  "srv.team.slots_full": "All RAM slots in use: waiting for another agent to finish",
+  "srv.team.plan_depends_invalid": "Invalid plan: task {0} has an invalid dependsOn (it may only point to earlier tasks)",
+  "srv.team.task_merge_conflict": "Merging task T{0} into the job branch conflicted: {1}",
+  "srv.team.wait_builder": "The right member is busy with other work: waiting for them (faster than giving it to someone else)",
+  "srv.team.parallel_start": "Running in parallel: {0}",
+  "srv.accounts.test_cmd_warning": "Command \"{0}\" was not found on the controller machine: tests will fail. Check the name or use a full path.",
+  "srv.accounts.project_busy_list": "The project still has {0} unfinished job(s) ({1}).",
+  "ui.eta": "about {time} left",
+  "ui.inspector.after": "after {list}",
+  "ui.inspector.contextGaps": "Builder had to look up more ({n})",
+  "ui.inspector.confirmCancel": "Cancel this job? Running agents are stopped; the worktree is kept for you to inspect.",
+  "ui.project.edit": "Edit: test commands, network, reference folders",
+  "ui.project.cancelJobsAndRemove": "Cancel those jobs and remove the project?",
+  "ui.ev.PARALLEL": "Parallel",
+  "ui.project.saveChanges": "Save changes"
 }

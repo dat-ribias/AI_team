@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Team, validateConfig, redact, routeGoal, compressOutput } from '../src/team.js';
+import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots } from '../src/team.js';
+import { testList } from '../src/accounts.js';
 import { run, childEnv } from '../src/process.js';
-import { parseReport, normalizeCodexQuota, normalizeGoogleQuota } from '../src/providers.js';
+import { parseReport, normalizeCodexQuota, normalizeGoogleQuota, runAgent } from '../src/providers.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
@@ -82,6 +83,63 @@ test('pause cancels process; resume retains work; new guidance invalidates ready
   assert.equal(team.get(job.id).status, 'queued'); assert.equal(team.get(job.id).reviewed, null);
   await assert.rejects(team.merge(job.id), /chưa sẵn sàng/);
   await settle(team, job.id, 'ready');
+});
+
+test('cancel during a mock agent run is terminal and idempotent; stale saves cannot resurrect it', async t => {
+  let entered;
+  const started = new Promise(resolve => { entered = resolve; });
+  const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100,
+    agents: [{ id: 'solo', label: 'solo', provider: 'mock' }],
+    pipeline: { manager: 'solo', builders: ['solo'], reviewer: 'solo', verifier: 'solo' },
+    projects: [{ id: 'test', path: process.cwd(), tests: [] }],
+  };
+  const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-cancel-')), { runAgent: (agent, task, prompt, opts) => {
+    entered(opts.signal); return runAgent(agent, task, prompt, opts);
+  } });
+  t.after(() => team.close());
+  team.save({ id: 'cancel-test', project: 'test', goal: 'Update hello', status: 'queued', stage: 'plan',
+    worktree: process.cwd(), tasks: [], taskIndex: 0, reports: [], messages: [], round: 0 });
+  const running = team.tick(), signal = await started;
+  const stale = team.get('cancel-test');
+  assert.equal(stale.status, 'running'); assert.equal(stale.current.agent, 'solo');
+  const cancelled = await team.control(stale.id, 'cancel');
+  assert.equal(signal.aborted, true); assert.equal(signal.reason.name, 'AbortError');
+  assert.equal(cancelled.status, 'cancelled'); assert.equal(cancelled.error, null); assert.equal(cancelled.current, null);
+  const events = team.events(stale.id);
+  assert.deepEqual(await team.control(stale.id, 'cancel'), cancelled);
+  assert.deepEqual(team.events(stale.id), events);
+  await running;
+  for (const status of ['running', 'queued', 'ready', 'blocked', 'cancelled']) {
+    team.save({ ...stale, status, error: 'Run interrupted' });
+    assert.deepEqual(team.get(stale.id), cancelled);
+  }
+  assert.equal(team.active, null);
+  assert(!team.events(stale.id).some(e => e.type === 'BLOCKER' || /Run interrupted/.test(e.summary)));
+});
+
+test('pre-aborted process and mock provider preserve the cancellation reason', async () => {
+  const abort = new AbortController(), reason = new DOMException('Cancelled by test', 'AbortError');
+  abort.abort(reason);
+  await assert.rejects(run([process.execPath], [], { signal: abort.signal }), error => error === reason);
+  await assert.rejects(runAgent({ provider: 'mock' }, { stage: 'plan' }, '', { signal: abort.signal, onEvent() {} }), error => error === reason);
+});
+
+test('cancel wins concurrent sync and review saves', async t => {
+  for (const action of ['sync', 'review']) {
+    const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: 'Update hello' });
+    await settle(team, job.id, 'ready');
+    if (action === 'sync') {
+      writeFileSync(join(f.path, 'other.txt'), 'x\n');
+      await run(['git'], ['-C', f.path, 'add', '.']);
+      await run(['git'], ['-C', f.path, '-c', 'user.name=T', '-c', 'user.email=t@l', 'commit', '-m', 'other']);
+    }
+    const pending = team.control(job.id, action);
+    const cancelled = await team.control(job.id, 'cancel');
+    assert.deepEqual(await pending, cancelled);
+    assert.deepEqual(team.get(job.id), cancelled);
+    assert.deepEqual(await team.control(job.id, 'cancel'), cancelled);
+  }
 });
 
 test('test failure never reaches merge; bounded repair loop; no-tests cannot pass', async t => {
@@ -212,7 +270,15 @@ test('projects can be registered from the UI, including git init and "npm test"-
   const { id } = await accounts.addProject({ path: folder, init: true, tests: 'node -e "process.exit(0)"' });
   const p = team.project(id); assert.deepEqual(p.tests, [['node', '-e', 'process.exit(0)']]);
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).projects.length, 2);
-  accounts.removeProject(id); assert.throws(() => team.project(id));
+  const upd = accounts.updateProject(id, { tests: 'node --test x.js\nno-such-cmd-xyz run', network: true });
+  assert.deepEqual(team.project(id).tests, [['node', '--test', 'x.js'], ['no-such-cmd-xyz', 'run']]); assert.equal(team.project(id).network, true);
+  assert.equal(upd.warnings.length, 1); assert.match(upd.warnings[0], /no-such-cmd-xyz/);
+  assert.throws(() => accounts.updateProject(id, { tests: [['node', 1]] })); assert.throws(() => accounts.updateProject(id, { network: 'yes' }));
+  // Còn công việc chưa xong: 409 kèm danh sách; cancelJobs=true thì hủy rồi gỡ.
+  team.save({ id: 'open-job', project: id, goal: 'x', status: 'paused', stage: 'plan', tasks: [], reports: [], messages: [] });
+  await assert.rejects(accounts.removeProject(id), e => e.code === 409 && e.jobs[0] === 'open-job');
+  await accounts.removeProject(id, { cancelJobs: true }); assert.throws(() => team.project(id));
+  assert.equal(team.get('open-job').status, 'cancelled');
 });
 
 test('attachments land in the worktree for agents but never in commits', async t => {
@@ -337,4 +403,96 @@ test('read-only reference folders map to Claude permission paths', async () => {
   const { claudePath } = await import('../src/providers.js');
   assert.equal(claudePath('D:\\docs\\spec\\'), '//d/docs/spec');
   assert.equal(claudePath('/srv/docs'), '//srv/docs');
+});
+
+test('RAM slots use absolute GB; percent is only the hard stop', () => {
+  assert.deepEqual(computeSlots({ freeGB: 10, totalGB: 32, reserveGB: 4, ramPerAgentGB: 1.5, maxAgents: 3 }), { start: 3, hardStop: false });
+  assert.equal(computeSlots({ freeGB: 4.5, totalGB: 32, reserveGB: 4, ramPerAgentGB: 1.5 }).start, 1); // idle → at least one agent
+  assert.equal(computeSlots({ freeGB: 4.5, totalGB: 32, running: 1, reserveGB: 4, ramPerAgentGB: 1.5 }).start, 0);
+  assert.equal(computeSlots({ freeGB: 20, totalGB: 32, running: 2, maxAgents: 3 }).start, 1);
+  assert.deepEqual(computeSlots({ freeGB: 3, totalGB: 32, hardStopRamPercent: 90 }), { start: 0, hardStop: true });
+  assert.deepEqual(testList('node --test "a b.js"\n\n'), [['node', '--test', 'a b.js']]);
+  assert.throws(() => testList([['node', 1]])); assert.throws(() => testList([[]]));
+});
+
+// Lead trả plan song song; builder giả ghi file riêng và ghi lại thời gian chạy.
+async function parallelTeam(t, plan, kind = 'code') {
+  const f = await fixture();
+  f.config.projects[0].tests = [];
+  f.config.resources = { reserveGB: 0, ramPerAgentGB: 0.01, maxAgents: 4, hardStopRamPercent: 100 };
+  f.config.pipeline.builders = ['codex-2', 'codex-4'];
+  const spans = [], prompts = [];
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'plan') return { summary: 'plan', kind, rigor: 'standard', risk: 'low', status: 'planned', tasks: plan };
+    if (['implement', 'research'].includes(task.stage)) {
+      const n = Number(/T(\d)/.exec(prompt)?.[1]); prompts.push(prompt);
+      const span = { n, agent: agent.id, start: Date.now() }; spans.push(span);
+      await new Promise(r => setTimeout(r, 400));
+      if (task.stage === 'implement') writeFileSync(join(task.worktree, `t${n}.txt`), `task ${n}\n`);
+      span.end = Date.now();
+      return { summary: `done T${n}`, status: 'completed', verdict: 'approved', findings: [], contextGaps: n === 1 ? ['read utils.js'] : [] };
+    }
+    return runAgent(agent, task, prompt, opts);
+  } });
+  t.after(() => team.close());
+  return { team, spans, prompts, f };
+}
+const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+
+test('independent tasks run in parallel; dependsOn waits; code tasks merge from child worktrees', async t => {
+  const { team, spans, prompts, f } = await parallelTeam(t, [
+    { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [], estMinutes: 5, context: 'see utils.js:10' },
+    { agent: 'codex-4', difficulty: 2, instruction: 'T2 edit', files: ['t2.txt'], dependsOn: [], estMinutes: 5 },
+    { agent: 'codex-2', difficulty: 2, instruction: 'T3 edit', files: ['t3.txt'], dependsOn: [0, 1], estMinutes: 5 },
+  ]);
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Parallel work' });
+  const ready = await settle(team, job.id, 'ready');
+  const [s1, s2, s3] = [1, 2, 3].map(n => spans.find(s => s.n === n));
+  assert(overlaps(s1, s2), 'T1 and T2 should overlap');
+  assert(s3.start >= Math.max(s1.end, s2.end), 'T3 waits for its dependencies');
+  assert.notEqual(s1.agent, s2.agent);
+  const files = await run(['git'], ['-C', ready.worktree, 'ls-tree', '--name-only', ready.revision]);
+  for (const n of [1, 2, 3]) assert.match(files.stdout, new RegExp(`t${n}\\.txt`));
+  assert(ready.tasks.every(x => x.done)); assert.deepEqual(ready.tasks[0].contextGaps, ['read utils.js']);
+  assert.match(prompts.find(p => /T1 edit/.test(p)), /see utils\.js:10/);
+  const branches = await run(['git'], ['-C', f.path, 'branch', '--list', 'ai-team/*-t[0-9]*']);
+  assert.equal(branches.stdout.trim(), '', 'child branches are cleaned up');
+});
+
+test('code tasks touching the same file never run at the same time', async t => {
+  const { team, spans } = await parallelTeam(t, [
+    { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['src/'], dependsOn: [], estMinutes: 5 },
+    { agent: 'codex-4', difficulty: 2, instruction: 'T2 edit', files: ['src/a.js'], dependsOn: [], estMinutes: 5 },
+  ]);
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Same files' });
+  await settle(team, job.id, 'ready');
+  assert(!overlaps(spans[0], spans[1]));
+});
+
+test('plan with a forward/cyclic dependsOn is rejected', async t => {
+  const { team } = await parallelTeam(t, [
+    { agent: 'codex-2', difficulty: 2, instruction: 'T1', dependsOn: [1] },
+    { agent: 'codex-4', difficulty: 2, instruction: 'T2', dependsOn: [0] },
+  ]);
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Bad plan' });
+  const blocked = await settle(team, job.id, 'blocked');
+  assert.match(blocked.error, /dependsOn/);
+});
+
+test('busy strong builder: weak one takes the task only when it finishes sooner', async t => {
+  const f = await fixture();
+  f.config.agents.find(a => a.id === 'codex-2').tier = 'strong';
+  f.config.agents.find(a => a.id === 'codex-4').tier = 'normal';
+  const team = new Team(f.config, f.data); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'x' });
+  const task = { agent: 'codex-2', difficulty: 3, instruction: 'x', estMinutes: 10 };
+  assert.equal(team.pickBuilder(job, { ...task }), 'codex-2'); // strong and free
+  team.remainingMinutes = () => 30;
+  assert.equal(team.pickBuilder(job, { ...task }, new Set(['codex-2'])), 'codex-4'); // waiting 30+10 > 10
+  team.remainingMinutes = () => 1; team.factor = id => id === 'codex-4' ? 3 : 1;
+  assert.equal(team.pickBuilder(job, { ...task }, new Set(['codex-2'])), null); // waiting 1+10 < 30 → wait
+  assert.equal(team.pickBuilder(job, { ...task, difficulty: 5 }, new Set(['codex-2'])), null); // beyond weaker member
 });

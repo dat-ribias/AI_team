@@ -208,3 +208,4 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 .job-card-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:4px}
 .job-card-actions button{font-size:11.5px;padding:6px 12px}
 
+.tag.tag-on{color:var(--mint);border-color:var(--mint)}.task-list li.done{opacity:.72}.task-list li details{margin-top:4px}.read-dirs label{display:block;margin:8px 0 4px}

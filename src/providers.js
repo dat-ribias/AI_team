@@ -148,11 +148,14 @@ export async function listModels(agent) {
 }
 
 export async function runAgent(agent, task, prompt, { signal, onEvent }) {
+  signal?.throwIfAborted();
   if (agent.provider === 'mock') {
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(resolve, 450);
-      signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new Error('Run interrupted')); }, { once: true });
+      const aborted = () => { clearTimeout(timer); reject(signal.reason); };
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', aborted); resolve(); }, 450);
+      signal?.addEventListener('abort', aborted, { once: true });
     });
+    signal?.throwIfAborted();
     if (task.stage === 'plan' && /hỏi lại|ask me/i.test(task.goal) && !task.messages?.length) return { summary: 'DEMO: cần làm rõ', status: 'needs_input', questions: ['DEMO: bạn muốn áp dụng cho trang nào?'] };
     const report = task.stage === 'plan'
       ? { summary: msg("srv.providers.demo_giao_builder_cap_nhat_hello"), kind: /research|nghiên cứu/i.test(task.goal) ? 'research' : 'code', rigor: /light|nhẹ/i.test(task.goal) ? 'light' : 'standard', risk: 'low', tasks: [{ agent: task.roster?.builders[0] || 'codex-2', difficulty: /hard|khó/i.test(task.goal) ? 4 : 2, instruction: msg("srv.providers.cap_nhat_hello_txt_va_kiem") }] }

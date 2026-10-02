@@ -598,5 +598,20 @@
   "ui.project.readDirsNote": "Mỗi dòng một thư mục ngoài repo. Agent chỉ được đọc/tìm, không được sửa. File bí mật (.env, *.pem, *credentials*…) bị chặn với Claude; Codex/Gemini chỉ được dặn qua prompt nên đừng thêm thư mục chứa credential.",
   "ui.project.saveReadDirs": "Lưu",
   "ui.sec.readDirs": "đọc thêm",
-  "srv.accounts.read_dir_invalid": "Thư mục tham khảo không hợp lệ (phải tồn tại, không phải cả ổ đĩa/home, tối đa 20): {0}"
+  "srv.accounts.read_dir_invalid": "Thư mục tham khảo không hợp lệ (phải tồn tại, không phải cả ổ đĩa/home, tối đa 20): {0}",
+  "srv.team.slots_full": "Đã dùng hết slot RAM: chờ agent khác xong",
+  "srv.team.plan_depends_invalid": "Plan sai: task {0} có dependsOn không hợp lệ (chỉ được trỏ tới task đứng trước)",
+  "srv.team.task_merge_conflict": "Gộp task T{0} vào nhánh công việc bị xung đột: {1}",
+  "srv.team.wait_builder": "Người phù hợp đang bận việc khác: chờ họ rảnh (nhanh hơn giao người khác)",
+  "srv.team.parallel_start": "Chạy song song: {0}",
+  "srv.accounts.test_cmd_warning": "Không tìm thấy lệnh \"{0}\" trên máy chạy controller: test sẽ lỗi. Kiểm tra lại tên lệnh hoặc dùng đường dẫn đầy đủ.",
+  "srv.accounts.project_busy_list": "Dự án còn {0} công việc chưa kết thúc ({1}).",
+  "ui.eta": "còn khoảng {time}",
+  "ui.inspector.after": "sau {list}",
+  "ui.inspector.contextGaps": "Builder phải tự tìm thêm ({n})",
+  "ui.inspector.confirmCancel": "Hủy công việc này? Agent đang chạy sẽ bị dừng; worktree được giữ lại để bạn xem.",
+  "ui.project.edit": "Sửa: lệnh test, mạng, thư mục tham khảo",
+  "ui.project.cancelJobsAndRemove": "Hủy các công việc đó rồi gỡ dự án?",
+  "ui.ev.PARALLEL": "Song song",
+  "ui.project.saveChanges": "Lưu thay đổi"
 }

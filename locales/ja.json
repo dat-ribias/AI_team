@@ -598,5 +598,20 @@
   "ui.project.readDirsNote": "リポジトリ外のフォルダーを1行に1つ。エージェントは読み取り・検索のみで変更不可。秘密ファイル（.env, *.pem, *credentials* など）は Claude ではブロックされます。Codex/Gemini はプロンプトでの指示のみなので、認証情報を含むフォルダーは追加しないでください。",
   "ui.project.saveReadDirs": "保存",
   "ui.sec.readDirs": "参照",
-  "srv.accounts.read_dir_invalid": "参照フォルダーが無効です（存在すること、ドライブ全体やホーム不可、最大20件）: {0}"
+  "srv.accounts.read_dir_invalid": "参照フォルダーが無効です（存在すること、ドライブ全体やホーム不可、最大20件）: {0}",
+  "srv.team.slots_full": "RAMスロットが満杯です：他のエージェントの完了を待っています",
+  "srv.team.plan_depends_invalid": "計画が不正です：タスク{0}のdependsOnが無効です（前のタスクのみ指定可能）",
+  "srv.team.task_merge_conflict": "タスクT{0}をジョブブランチへ統合する際に競合しました：{1}",
+  "srv.team.wait_builder": "適任のメンバーが別の作業中です：空くのを待ちます（他の人に渡すより早い）",
+  "srv.team.parallel_start": "並列実行：{0}",
+  "srv.accounts.test_cmd_warning": "コマンド「{0}」がコントローラーのマシンで見つかりません：テストは失敗します。名前を確認するかフルパスを指定してください。",
+  "srv.accounts.project_busy_list": "このプロジェクトには未完了のジョブが{0}件あります（{1}）。",
+  "ui.eta": "残り約{time}",
+  "ui.inspector.after": "{list}の後",
+  "ui.inspector.contextGaps": "Builderが追加で調べた内容（{n}）",
+  "ui.inspector.confirmCancel": "このジョブをキャンセルしますか？実行中のエージェントは停止し、worktreeは確認用に残ります。",
+  "ui.project.edit": "編集：テストコマンド・ネットワーク・参照フォルダ",
+  "ui.project.cancelJobsAndRemove": "それらのジョブをキャンセルしてプロジェクトを削除しますか？",
+  "ui.ev.PARALLEL": "並列",
+  "ui.project.saveChanges": "変更を保存"
 }

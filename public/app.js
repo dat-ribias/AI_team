@@ -29,12 +29,13 @@ async function api(path, data) {
   const r = await fetch('/api/' + path, { method: data ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Team-Request': '1' }, ...(data ? { body: JSON.stringify(data) } : {}) });
   const result = await r.json().catch(() => ({}));
   if (r.status === 404 && path.startsWith('members/') || r.status === 404 && path === 'settings') throw new Error(t('ui.error.oldServer'));
-  if (!r.ok) throw new Error(result.error || r.statusText); return result;
+  if (!r.ok) throw Object.assign(new Error(result.error || r.statusText), { status: r.status }); return result;
 }
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 async function attempt(fn) {
   try { await fn(); } catch (e) {
-    const d = document.querySelector('dialog[open]');
+    // Hộp thoại mở chồng (Đăng ký dự án trên Giao việc): lỗi phải hiện ở hộp trên cùng.
+    const d = [...document.querySelectorAll('dialog[open]')].at(-1);
     if (!d) return notice(e.message);
     let box = d.querySelector('.dialog-error'); if (!box) { box = document.createElement('p'); box.className = 'error-box dialog-error'; box.setAttribute('role', 'alert'); (d.querySelector('form') || d).append(box); }
     box.textContent = e.message; box.scrollIntoView({ block: 'nearest' });
@@ -212,11 +213,14 @@ function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
       useTextLength = true;
     }
   }
-  const style = size !== baseSize ? ` style="font-size:${size}px;"` : '';
+  const style = size !== baseSize ? ` font-size="${size}"` : '';
   const tl = useTextLength ? ` textLength="${maxW}" lengthAdjust="spacingAndGlyphs"` : '';
   return `<text x="${x}" y="${y}" class="${cls}"${style}${tl}>${esc(str)}</text>`;
 }
 
+// Các lượt đang chạy của một công việc (song song); dữ liệu cũ chỉ có job.current.
+const runningOf = j => j?.status === 'running' ? (j.running?.length ? j.running : j.current ? [j.current] : []) : [];
+const nodeOfRun = r => ({ plan: 'manager', final: 'manager', implement: 'b:' + r.agent, research: 'b:' + r.agent, review: 'reviewer', verify: 'verifier' })[r.stage] || null;
 function drawState() {
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
@@ -225,13 +229,13 @@ function drawState() {
   if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
   const ready = state.jobs.filter(j => j.status === 'ready').length;
   $('metrics').innerHTML = [
-    [t('ui.metric.agents'), `${state.resources.active} <small>/ 1</small>`, state.resources.waitingReason || t('ui.metric.onDemand')],
+    [t('ui.metric.agents'), `${state.resources.active} <small>/ ${state.resources.slots ?? 1}</small>`, state.resources.waitingReason || t('ui.metric.onDemand')],
     [t('ui.metric.jobs'), state.jobs.length, t('ui.metric.jobsNote', { running: state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length, ready })],
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
   ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
   drawSessions();
-  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${j.current ? ' · ' + (names[j.current.agent] || j.current.agent) + ' → ' + j.current.stage : ''}` : t('ui.flow.summaryIdle'); }
+  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${j.eta != null ? ' · ' + t('ui.eta', { time: duration(j.eta) }) : ''}` : t('ui.flow.summaryIdle'); }
   drawJobsList();
   drawJobsDialog();
   drawFlow();
@@ -334,7 +338,7 @@ function drawJobsDialog() {
             <span class="tag">#${esc(j.id.slice(0, 8))}</span>
             ${j.project ? `<span class="tag">📁 ${esc(j.project)}</span>` : ''}
             <span class="status ${esc(j.status)}">${esc(statusLabel(j.status))}</span>
-            ${isSelected ? `<span class="tag" style="color:var(--mint);border-color:var(--mint);">✓ ${esc(t('ui.jobs.selected'))}</span>` : ''}
+            ${isSelected ? `<span class="tag tag-on">✓ ${esc(t('ui.jobs.selected'))}</span>` : ''}
           </div>
           <time class="muted">${clock(j.createdAt)}</time>
         </div>
@@ -440,11 +444,11 @@ function drawFlow() {
   place('verifier', 945, cy, 172);
   place('merge', 1155, cy, 92);
   const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
-  const cur = job?.tasks?.[job.taskIndex], curB = cur && (cur.ranBy || job.assignee || cur.agent), running = job?.status === 'running';
-  const active = running ? { plan: job.round ? 'rework' : 'user>manager', implement: 'manager>b:' + curB, test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage] : null;
+  const runs = runningOf(job), live = new Set(runs.map(nodeOfRun));
+  const active = new Set(job?.status === 'running' ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
   const edge = (a, b, cls, label = '') => {
     const A = nodes[a], B = nodes[b]; if (!A || !B) return '';
-    const x1 = A.x + A.w, x2 = B.x, mx = (x1 + x2) / 2, on = active === `${a}>${b}` || active === 'b>tests' && b === 'tests' && cls.includes('used');
+    const x1 = A.x + A.w, x2 = B.x, mx = (x1 + x2) / 2, on = active.has(`${a}>${b}`) || active.has('b>tests') && b === 'tests' && cls.includes('used');
     return `<path class="edge ${cls} ${on ? 'active' : ''}" d="M${x1} ${A.y} C${mx} ${A.y} ${mx} ${B.y} ${x2} ${B.y}"/>${label ? `<text class="edge-label task" x="${x2 - 6}" y="${B.y - 6}" text-anchor="end">${esc(label)}</text>` : ''}`;
   };
   const sub = id => {
@@ -456,7 +460,7 @@ function drawFlow() {
     const n = nodes[key], a = agentId && byId[agentId];
     const h = a ? agentHealth(a) : null;
     const cls = [
-      a?.state === 'working' && 'working',
+      live.has(key) && 'working',
       filter && filter === agentId && 'filtered',
       agentId === null && 'missing',
       a && !a.enabled && 'disabled',
@@ -474,11 +478,11 @@ function drawFlow() {
   let edges = edge('user', 'manager', 'used');
   for (const id of builders) {
     const tasks = tasksOf(id), used = !job || tasks.length > 0;
-    edges += edge('manager', 'b:' + id, used ? 'used' : 'idle', tasks.map(x => `T${x.n}·k${x.difficulty ?? '?'}`).join(' '));
+    edges += edge('manager', 'b:' + id, used ? 'used' : 'idle', tasks.map(x => `T${x.n}·k${x.difficulty ?? '?'}${x.done ? '✓' : ''}`).join(' '));
     edges += edge('b:' + id, 'tests', used ? 'used' : 'idle');
   }
   edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
-  edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active === 'rework' ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
+  edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active.has('rework') ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
@@ -503,24 +507,28 @@ function drawInspector() {
   // Tiến độ: bước đang chạy + ước tính dựa trên thời gian trung bình các bước agent trước đó.
   const progress = (() => {
     if (!['running', 'queued'].includes(job.status)) return '';
-    const left = Math.max(0, job.tasks.length - job.taskIndex), research = job.kind === 'research', light = job.rigor === 'light';
+    const left = job.tasks.filter(x => !x.done).length, research = job.kind === 'research', light = job.rigor === 'light';
     const after = research ? (light ? 0 : 1) + (job.rigor === 'strict' ? 1 : 0) + 1 : 1 + (light ? 0 : 1) + 1;
     const steps = job.stage === 'plan' ? null : ({ implement: left + after, test: after, review: after, verify: 2, final: 1 })[job.stage] ?? after;
     const avg = job.durations?.length ? job.durations.reduce((a, b) => a + b, 0) / job.durations.length / 60000 : null;
     const cur = job.current, elapsed = cur ? (Date.now() - Date.parse(cur.startedAt)) / 60000 : null;
-    const now = cur ? t('ui.progress.now', { stage: job.stage === 'implement' ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${job.taskIndex + 1}/${job.tasks.length}` : job.stage, who: names[cur.agent] || cur.agent, time: duration(elapsed) }) : t('ui.progress.queued');
-    const eta = steps == null ? t('ui.progress.planning') : avg ? t('ui.progress.eta', { time: duration(Math.max(1, avg * steps - (elapsed || 0))), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps });
-    return `<div class="progress-box"><span class="dot green"></span><div><b>${esc(now)}</b><br><span class="muted">${esc(eta)}</span></div></div>`;
+    const runs = runningOf(job);
+    const lines = runs.length ? runs.map(r => t('ui.progress.now', { stage: r.task != null ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${r.task + 1}/${job.tasks.length}` : r.stage, who: names[r.agent] || r.agent, time: duration((Date.now() - Date.parse(r.startedAt)) / 60000) })) : [t('ui.progress.queued')];
+    const eta = job.eta != null ? t('ui.eta', { time: duration(Math.max(1, job.eta)) }) : steps == null ? t('ui.progress.planning') : avg ? t('ui.progress.eta', { time: duration(Math.max(1, avg * steps - (elapsed || 0))), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps });
+    return `<div class="progress-box"><span class="dot green"></span><div>${lines.map(l => `<b>${esc(l)}</b>`).join('<br>')}<br><span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
-  const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${i === job.taskIndex && job.stage === 'implement' ? 'current' : ''}"><b>T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}${x.skills?.length ? `<br><span class="skill-tags">${x.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</span>` : ''}</li>`).join('')}</ul>` : '';
+  const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${runningOf(job).some(r => r.task === i) ? 'current' : ''} ${x.done ? 'done' : ''}"><b>${x.done ? '✓ ' : ''}T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}${x.estMinutes ? ' · ~' + esc(duration(x.estMinutes)) : ''}${x.dependsOn?.length ? ' · ' + esc(t('ui.inspector.after', { list: x.dependsOn.map(d => 'T' + (d + 1)).join(', ') })) : ''}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}${x.skills?.length ? `<br><span class="skill-tags">${x.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</span>` : ''}${x.contextGaps?.length ? `<details><summary class="muted">${esc(t('ui.inspector.contextGaps', { n: x.contextGaps.length }))}</summary><ul>${x.contextGaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></details>` : ''}</li>`).join('')}</ul>` : '';
   const risk = job.risk ? `<p class="muted">${esc(t('ui.inspector.risk'))} <b class="${job.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + job.risk))}</b>${job.riskReasons?.length ? ' · ' + esc(job.riskReasons.join('; ')) : ''}</p>` : '';
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
   $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button><button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
-  document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => { await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); }));
+  document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => {
+    if (b.dataset.action === 'cancel' && !confirm(t('ui.inspector.confirmCancel'))) return;
+    b.disabled = true; try { await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); } finally { b.disabled = false; }
+  }));
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
   if ($('merge')) $('merge').onclick = () => attempt(openMerge);
@@ -609,8 +617,7 @@ function drawTimeline() {
     return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
   }).join('') : `<div class="empty"><span class="empty-icon">◎</span><b>${esc(t('ui.timeline.emptyTitle'))}</b><span>${esc(t('ui.timeline.emptyText'))}</span></div>`;
   // Agent đang chạy: bong bóng "đang soạn" ba chấm.
-  const cur = job?.status === 'running' && job.current;
-  if (cur && (!filter || filter === cur.agent)) timeline.insertAdjacentHTML('beforeend', `<article class="chat-msg typing">${avatar(cur.agent)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[cur.agent] || cur.agent)}</strong><span class="chat-to">${esc(t('ui.chat.typing', { stage: cur.stage }))}</span></div><div class="chat-bubble"><span class="dots"><i></i><i></i><i></i></span></div></div></article>`);
+  for (const cur of runningOf(job)) if (!filter || filter === cur.agent) timeline.insertAdjacentHTML('beforeend', `<article class="chat-msg typing">${avatar(cur.agent)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[cur.agent] || cur.agent)}</strong><span class="chat-to">${esc(t('ui.chat.typing', { stage: cur.task != null ? `${cur.stage} T${cur.task + 1}` : cur.stage }))}</span></div><div class="chat-bubble"><span class="dots"><i></i><i></i><i></i></span></div></div></article>`);
   if (atBottom) timeline.scrollTop = timeline.scrollHeight;
 }
 let memberView = store.get('memberView') || 'compact';
@@ -780,7 +787,8 @@ function providerHint() {
 async function refresh() {
   if (rendering) return; rendering = true;
   try {
-    state = await api('state'); if (!selected && state.jobs.length) selected = state.jobs[0].id;
+    state = await api('state');
+    if (!selected) selected = state.jobs.find(j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession))?.id;
     if (state.language && state.language !== lang) await loadLanguage(state.language);
     if (selected) {
       let more;
@@ -855,9 +863,24 @@ const toggleChat = open => { const p = document.querySelector('.communication');
 $('chat-expand').onclick = () => toggleChat();
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('chat-open') && !document.querySelector('dialog[open]')) toggleChat(false); });
 function projectList() {
-  $('project-list').innerHTML = state.projects.length ? `<b>${esc(t('ui.project.registered'))}</b>${state.projects.map(p => `<div class="project-row"><span><b>${esc(p.id)}</b> · ${esc(p.path)}${p.tests.length ? '' : ' · ' + esc(t('ui.project.noTests'))}</span><button type="button" data-remove-project="${esc(p.id)}">${esc(t('ui.project.remove'))}</button><details class="read-dirs"><summary>${esc(t('ui.project.readDirs'))} (${p.readDirs.length})</summary><textarea rows="2" data-dirs="${esc(p.id)}">${esc(p.readDirs.join('\n'))}</textarea><button type="button" data-save-dirs="${esc(p.id)}">${esc(t('ui.project.saveReadDirs'))}</button></details></div>`).join('')}` : '';
-  document.querySelectorAll('[data-save-dirs]').forEach(b => b.onclick = () => attempt(async () => { await api(`projects/${b.dataset.saveDirs}/read-dirs`, { readDirs: document.querySelector(`[data-dirs="${b.dataset.saveDirs}"]`).value }); await refresh(); projectList(); }));
-  document.querySelectorAll('[data-remove-project]').forEach(b => b.onclick = () => attempt(async () => { if (!confirm(t('ui.project.confirmRemove', { id: b.dataset.removeProject }))) return; await api(`projects/${b.dataset.removeProject}/remove`, {}); await refresh(); projectList(); }));
+  const quote = w => /\s/.test(w) ? `"${w}"` : w;
+  $('project-list').innerHTML = state.projects.length ? `<b>${esc(t('ui.project.registered'))}</b>${state.projects.map(p => `<div class="project-row"><span><b>${esc(p.id)}</b> · ${esc(p.path)}${p.tests.length ? '' : ' · ' + esc(t('ui.project.noTests'))}</span><button type="button" data-remove-project="${esc(p.id)}">${esc(t('ui.project.remove'))}</button><details class="read-dirs"><summary>${esc(t('ui.project.edit'))}</summary>
+    <label>${esc(t('ui.project.tests'))}</label><textarea rows="2" data-tests="${esc(p.id)}">${esc(p.tests.map(c => c.map(quote).join(' ')).join('\n'))}</textarea>
+    <label class="profile-check"><input type="checkbox" data-net="${esc(p.id)}" ${p.network ? 'checked' : ''}> ${esc(t('ui.project.network'))}</label>
+    <label>${esc(t('ui.project.readDirs'))} (${p.readDirs.length})</label><textarea rows="2" data-dirs="${esc(p.id)}">${esc(p.readDirs.join('\n'))}</textarea>
+    <button type="button" data-save-project="${esc(p.id)}">${esc(t('ui.project.saveChanges'))}</button></details></div>`).join('')}` : '';
+  const q = (attr, id) => document.querySelector(`[${attr}="${id}"]`);
+  document.querySelectorAll('[data-save-project]').forEach(b => b.onclick = () => attempt(async () => {
+    const id = b.dataset.saveProject;
+    const r = await api(`projects/${id}/update`, { tests: q('data-tests', id).value, network: q('data-net', id).checked, readDirs: q('data-dirs', id).value });
+    await refresh(); projectList(); if (r.warnings?.length) throw new Error(r.warnings.join('\n'));
+  }));
+  document.querySelectorAll('[data-remove-project]').forEach(b => b.onclick = () => attempt(async () => {
+    const id = b.dataset.removeProject; if (!confirm(t('ui.project.confirmRemove', { id }))) return;
+    try { await api(`projects/${id}/remove`, {}); }
+    catch (e) { if (e.status !== 409 || !confirm(e.message + '\n\n' + t('ui.project.cancelJobsAndRemove'))) throw e; await api(`projects/${id}/remove`, { cancelJobs: true }); }
+    await refresh(); projectList();
+  }));
 }
 $('open-project').onclick = () => { projectList(); $('project-dialog').showModal(); };
 $('close-project').onclick = () => $('project-dialog').close();
@@ -885,9 +908,15 @@ const applyNav = () => document.body.classList.toggle('nav-collapsed', store.get
 $('nav-toggle').onclick = () => { store.set('nav', store.get('nav') === 'min' ? '' : 'min'); applyNav(); }; applyNav();
 const applyFlow = () => { const min = store.get('flow') === 'min'; document.querySelector('.network').classList.toggle('collapsed', min); $('flow-toggle').textContent = min ? '▸' : '▾'; $('flow-summary').hidden = !min; };
 $('flow-toggle').onclick = () => { store.set('flow', store.get('flow') === 'min' ? '' : 'min'); applyFlow(); }; applyFlow();
-$('session-project').onchange = () => { curProject = $('session-project').value; curSession = ''; store.set('project', curProject); drawState(); };
-$('session-select').onchange = () => { curSession = $('session-select').value; store.set('session', curSession); drawState(); };
-$('session-new').onclick = () => attempt(async () => { const name = prompt(t('ui.session.newPrompt')); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); await refresh(); });
+// Đổi phiên: khung chat chỉ hiện công việc của phiên đó (phiên mới thì trống).
+function selectSessionJob() {
+  const own = state.jobs.filter(j => j.project === curProject && (!curSession || j.sessionId === curSession));
+  if (!own.some(j => j.id === selected)) { selected = own[0]?.id; events = []; filter = null; }
+  refresh();
+}
+$('session-project').onchange = () => { curProject = $('session-project').value; curSession = ''; store.set('project', curProject); drawSessions(); selectSessionJob(); };
+$('session-select').onchange = () => { curSession = $('session-select').value; store.set('session', curSession); selectSessionJob(); };
+$('session-new').onclick = () => attempt(async () => { const name = prompt(t('ui.session.newPrompt')); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); selected = undefined; events = []; await refresh(); });
 $('session-rename').onclick = () => attempt(async () => { if (!curSession) return; const name = prompt(t('ui.session.renamePrompt'), state.sessions.find(x => x.id === curSession)?.name || ''); if (name) { await api(`sessions/${curSession}/rename`, { name }); await refresh(); } });
 $('close-slot').onclick = () => $('slot-dialog').close();
 $('slot-member').onchange = slotMember;
