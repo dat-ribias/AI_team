@@ -1,0 +1,108 @@
+{
+  "demo": false,
+  "port": 3333,
+  "dataDir": "D:\\work_team\\.team\\state",
+  "maxRamPercent": 85,
+  "maxCpuPercent": 90,
+  "minRemainingPercent": 15,
+  "maxReworkRounds": 3,
+  "agents": [
+    {
+      "id": "codex-1",
+      "label": "Nahin-C",
+      "role": "Builder",
+      "provider": "codex",
+      "home": "C:\\Users\\user\\.ai-team\\accounts\\codex-1",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+      ],
+      "enabled": true,
+      "model": "gpt-6.1-sol",
+      "tier": "normal",
+      "kind": "builder",
+      "effort": "medium"
+    },
+    {
+      "id": "codex-2",
+      "label": "Lobao-C",
+      "role": "Builder / Verifier",
+      "provider": "codex",
+      "home": "C:\\Users\\user\\.ai-team\\accounts\\codex-2",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+      ],
+      "enabled": true,
+      "model": "gpt-6.1-sol",
+      "tier": "normal",
+      "kind": "builder",
+      "effort": "medium"
+    },
+    {
+      "id": "codex-3",
+      "label": "Ymimi-C",
+      "role": "Builder",
+      "provider": "codex",
+      "home": "C:\\Users\\user\\.ai-team\\accounts\\codex-3",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+      ],
+      "enabled": true,
+      "model": "gpt-5.6-sol",
+      "effort": "low",
+      "tier": "weak",
+      "kind": "builder"
+    },
+    {
+      "id": "gemini",
+      "label": "Gehihi-G",
+      "role": "Reviewer",
+      "provider": "antigravity",
+      "command": [
+        "agy"
+      ],
+      "enabled": true,
+      "quotaPrintSupported": false,
+      "model": "gemini-3.8-flash-high",
+      "tier": "weak",
+      "kind": "reviewer"
+    },
+    {
+      "id": "claude-86a9ac9c",
+      "label": "Mailue-CL",
+      "kind": "manager",
+      "role": "Manager",
+      "provider": "claude",
+      "command": [
+        "claude"
+      ],
+      "enabled": true,
+      "home": "C:\\Users\\user\\.ai-team\\accounts\\claude-86a9ac9c",
+      "tier": "strong",
+      "model": "opus",
+      "effort": "medium",
+      "systemPrompt": "tôi hỏi tiếng nào thì khi báo cáo kết quả cuối cùng hoặc trả lười tôi bạn phải trả lười bằng thứ tiếng ấy. \n \nưu tiên những member có sức mạnh trung bình đổ lên, mem sức yếu chỉ ra lệnh khi đã hết quota mà thôi"
+    }
+  ],
+  "projects": [
+    {
+      "id": "work-team",
+      "path": "D:\\work_team",
+      "tests": [],
+      "network": true
+    }
+  ],
+  "pipeline": {
+    "manager": "claude-86a9ac9c",
+    "reviewer": "gemini",
+    "verifier": "codex-2",
+    "builders": [
+      "codex-2",
+      "codex-3",
+      "codex-1"
+    ]
+  },
+  "language": "vi"
+}

@@ -1,4 +1,4 @@
 node_modules/
 .team/
-team.config.json
+
 *.log
