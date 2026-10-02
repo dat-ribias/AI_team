@@ -1,7 +1,7 @@
 {
   "demo": false,
   "port": 3333,
-  "dataDir": "D:\\work_team\\.team\\state",
+  "dataDir": "D:\\ai_team\\.team\\state",
   "maxRamPercent": 85,
   "maxCpuPercent": 90,
   "minRemainingPercent": 15,
@@ -12,10 +12,10 @@
       "label": "Nahin-C",
       "role": "Builder",
       "provider": "codex",
-      "home": "C:\\Users\\user\\.ai-team\\accounts\\codex-1",
+      "home": "C:\\Users\\admin\\.ai-team\\accounts\\codex-1",
       "command": [
         "C:\\Program Files\\nodejs\\node.exe",
-        "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+        "C:\\Users\\admin\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
       ],
       "enabled": true,
       "model": "gpt-6.1-sol",
@@ -28,10 +28,10 @@
       "label": "Lobao-C",
       "role": "Builder / Verifier",
       "provider": "codex",
-      "home": "C:\\Users\\user\\.ai-team\\accounts\\codex-2",
+      "home": "C:\\Users\\admin\\.ai-team\\accounts\\codex-2",
       "command": [
         "C:\\Program Files\\nodejs\\node.exe",
-        "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+        "C:\\Users\\admin\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
       ],
       "enabled": true,
       "model": "gpt-6.1-sol",
@@ -44,10 +44,10 @@
       "label": "Ymimi-C",
       "role": "Builder",
       "provider": "codex",
-      "home": "C:\\Users\\user\\.ai-team\\accounts\\codex-3",
+      "home": "C:\\Users\\admin\\.ai-team\\accounts\\codex-3",
       "command": [
         "C:\\Program Files\\nodejs\\node.exe",
-        "C:\\Users\\user\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+        "C:\\Users\\admin\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
       ],
       "enabled": true,
       "model": "gpt-5.6-sol",
@@ -61,10 +61,10 @@
       "role": "Reviewer",
       "provider": "antigravity",
       "command": [
-        "agy"
+        "C:\\Users\\admin\\AppData\\Local\\agy\\bin\\agy.exe"
       ],
       "enabled": true,
-      "quotaPrintSupported": false,
+      "quotaPrintSupported": true,
       "model": "gemini-3.8-flash-high",
       "tier": "weak",
       "kind": "reviewer"
@@ -79,7 +79,7 @@
         "claude"
       ],
       "enabled": true,
-      "home": "C:\\Users\\user\\.ai-team\\accounts\\claude-86a9ac9c",
+      "home": "C:\\Users\\admin\\.ai-team\\accounts\\claude-86a9ac9c",
       "tier": "strong",
       "model": "opus",
       "effort": "medium",
@@ -89,7 +89,7 @@
   "projects": [
     {
       "id": "work-team",
-      "path": "D:\\work_team",
+      "path": "D:\\ai_team",
       "tests": [
         [
           "node",
@@ -99,12 +99,6 @@
       ],
       "network": true,
       "readDirs": []
-    },
-    {
-      "id": "fe-new",
-      "path": "D:\\w\\FE_NEW",
-      "tests": [],
-      "network": true
     }
   ],
   "pipeline": {
@@ -117,5 +111,5 @@
       "codex-1"
     ]
   },
-  "language": "ja"
+  "language": "vi"
 }

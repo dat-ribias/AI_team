@@ -1,4 +1,49 @@
+# Dependencies
 node_modules/
-.team/
 
+# Runtime state & local data
+.team/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Backup & temporary files
+*.bak
+*.backup
+*.orig
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+
+# Environment variables & local secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Editor & IDE settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# OS metadata
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local overrides
+*.local.json

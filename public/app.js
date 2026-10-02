@@ -24,7 +24,7 @@ applyTheme(store.get('theme'));
 
 const clock = time => time ? new Date(time).toLocaleString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo' }) : t('ui.common.unknown');
 let names = {};
-let state, selected, events = [], filter, tab = 'messages', rendering = false, loginId;
+let state, selected, events = [], filter, tab = 'messages', rendering = false, again = false, eventsOf, loginId;
 async function api(path, data) {
   const r = await fetch('/api/' + path, { method: data ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Team-Request': '1' }, ...(data ? { body: JSON.stringify(data) } : {}) });
   const result = await r.json().catch(() => ({}));
@@ -460,7 +460,7 @@ function drawFlow() {
     const n = nodes[key], a = agentId && byId[agentId];
     const h = a ? agentHealth(a) : null;
     const cls = [
-      live.has(key) && 'working',
+      (live.has(key) || a?.state === 'working') && 'working',
       filter && filter === agentId && 'filtered',
       agentId === null && 'missing',
       a && !a.enabled && 'disabled',
@@ -472,7 +472,7 @@ function drawFlow() {
     const subW = n.w - 16;
     const titleEl = svgText({ text: title, x: 10, y: 19, cls: 't', maxW: titleW, baseSize: 12, minSize: 9.5 });
     const subEl = svgText({ text: subtitle, x: 10, y: 37, cls: 's', maxW: subW, baseSize: 10.5, minSize: 7.8 });
-    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}</title><rect width="${n.w}" height="48" rx="8"/>${healthDot}${titleEl}${subEl}</g>`;
+    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}</title><rect width="${n.w}" height="48" rx="8"/><rect class="ring" width="${n.w}" height="48" rx="8" pathLength="100" style="animation-delay:-${(Date.now() % 2000) / 1000}s"/>${healthDot}${titleEl}${subEl}</g>`;
   };
   const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step);
   let edges = edge('user', 'manager', 'used');
@@ -499,7 +499,7 @@ function drawFlow() {
 }
 function drawInspector() {
   const job = state.jobs.find(j => j.id === selected);
-  $('message').disabled = !job || ['merged', 'cancelled'].includes(job.status);
+  $('message').disabled = !!job && ['merged', 'cancelled'].includes(job.status) || !job && !curProject;
   if (!job) { $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span></div>`; return; }
   const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
   const research = job.kind === 'research';
@@ -785,17 +785,18 @@ function providerHint() {
   $('provider-hint').textContent = t(provider?.installed ? 'ui.addMember.installed' : 'ui.addMember.notInstalled') + ' ' + t($('member-provider').value === 'antigravity' ? 'ui.addMember.shared' : 'ui.addMember.private');
 }
 async function refresh() {
-  if (rendering) return; rendering = true;
+  if (rendering) { again = true; return; } rendering = true;
   try {
     state = await api('state');
     if (!selected) selected = state.jobs.find(j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession))?.id;
     if (state.language && state.language !== lang) await loadLanguage(state.language);
+    if (eventsOf !== selected) { events = []; eventsOf = selected; }
     if (selected) {
-      let more;
-      do { more = await api(`jobs/${selected}/events?after=${events.at(-1)?.seq || 0}`); events.push(...more); } while (more.length === 2000);
+      const sel = selected; let more;
+      do { more = await api(`jobs/${sel}/events?after=${events.at(-1)?.seq || 0}`); if (selected !== sel) { again = true; return; } events.push(...more); } while (more.length === 2000);
     }
     drawState(); drawTimeline();
-  } finally { rendering = false; }
+  } finally { rendering = false; if (again) { again = false; refresh(); } }
 }
 const openTask = () => $('task-dialog').showModal();
 ['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
@@ -812,7 +813,7 @@ document.querySelectorAll('[data-job-filter]').forEach(b => {
   };
 });
 $('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const job = await api('jobs', { project: $('project').value, goal: $('goal').value, files: pending.goal, mode: $('task-mode').value, sessionId: $('project').value === curProject ? curSession : undefined }); selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
-$('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value, files: pending.message }); $('message').value = ''; pending.message = []; drawAttach('message'); await refresh(); }); };
+$('message-form').onsubmit = e => { e.preventDefault(); attempt(async () => { if (!selected) { const job = await api('jobs', { project: curProject, goal: $('message').value, files: pending.message, mode: $('task-mode').value, sessionId: curSession || undefined }); selected = job.id; $('message').value = ''; pending.message = []; drawAttach('message'); await refresh(); return; } await api(`jobs/${selected}/control`, { action: 'message', message: $('message').value, files: pending.message }); $('message').value = ''; pending.message = []; drawAttach('message'); await refresh(); }); };
 $('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); };
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });
 function view(name) {

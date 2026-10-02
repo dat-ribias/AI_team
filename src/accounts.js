@@ -292,6 +292,21 @@ export class Accounts {
         else if (/[A-Za-z]/.test(line) && line.length < 80) label = line;
       }
     }
+    // CLI mới: `/usage` ở chế độ -p chỉ in "You are currently using your subscription..." → hỏi thẳng endpoint usage bằng OAuth token của hồ sơ.
+    // ponytail: endpoint không công khai (api/oauth/usage), đổi schema thì sửa ở đây.
+    if (!buckets.length) {
+      try {
+        const token = JSON.parse(readFileSync(join(agent.home, '.credentials.json'), 'utf8')).claudeAiOauth?.accessToken;
+        const res = token && await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15000) });
+        if (res && !res.ok) text += `\n[oauth/usage HTTP ${res.status}]`;
+        const u = res?.ok ? await res.json() : {};
+        for (const [key, id2, name, minutes] of [['five_hour', 'claude-session', 'Current session', 300], ['seven_day', 'claude-weekly', 'Current week (all models)', 10080]]) {
+          const w = u[key]; if (!w || !Number.isFinite(w.utilization)) continue;
+          const usedVal = Math.max(0, Math.min(100, Math.round(w.utilization)));
+          buckets.push({ id: id2, name, windows: [{ name: minutes === 300 ? '5h' : 'week', remaining: 100 - usedVal, used: usedVal, minutes, resetsAt: w.resets_at ? new Date(w.resets_at).toISOString() : null, resetText: null }] });
+        }
+      } catch (e) { text += `\n[oauth/usage: ${e.message}]`; }
+    }
     if (buckets.length) this.team.saveObserved(id, buckets);
     const quota = this.team.quota(id);
     return { parsed: buckets.length > 0 || !!quota.observed, buckets, text: redact(text || result.stderr || result.stdout).trim().slice(0, 3000) };
