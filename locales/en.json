@@ -285,7 +285,7 @@
   "srv.team.agent_doi_branch_can_kiem_tra": "The agent switched branch; needs checking",
   "srv.team.con_conflict_marker_trong_code": "Conflict markers remain in the code:\n",
   "srv.team.branch_khong_con_chua_base_agent": "The branch no longer contains base; the agent rewrote history",
-  "srv.team.chua_cau_hinh_lenh_kiem_thu": "No test commands configured for this project; add tests in team.config.json",
+  "srv.team.chua_cau_hinh_lenh_kiem_thu": "No test commands for this project — test step skipped, AI review checks instead",
   "srv.team.tests_lam_thay_doi_worktree_khong": "Tests changed the worktree; not marked as tested",
   "srv.team.phan_tich_muc_tieu_va_chia": "Analyse the goal and split the work among {0}; return plan JSON.",
   "srv.team.plan_can_1_12_task": "The plan needs 1–12 tasks",
@@ -592,5 +592,11 @@
   "ui.chat.typing": "working on {stage}…",
   "srv.team.session_default": "General",
   "srv.team.session_name": "Session name cannot be empty",
-  "srv.team.session_missing": "Session not found in this project"
+  "srv.team.session_missing": "Session not found in this project",
+  "srv.team.no_tests_review": "Project has no test commands: AI review required instead of tests",
+  "ui.project.readDirs": "Reference folders (read-only)",
+  "ui.project.readDirsNote": "One folder outside the repo per line. Agents may read/search only, never modify. Secret files (.env, *.pem, *credentials*…) are blocked for Claude; Codex/Gemini are only told via prompt, so don't add folders holding credentials.",
+  "ui.project.saveReadDirs": "Save",
+  "ui.sec.readDirs": "also reads",
+  "srv.accounts.read_dir_invalid": "Invalid reference folder (must exist, not a whole drive/home, max 20): {0}"
 }

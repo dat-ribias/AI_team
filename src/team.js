@@ -106,6 +106,7 @@ export function validateConfig(config) {
   for (const p of config.projects) {
     if (!p.id || !p.path || !Array.isArray(p.tests)) throw new Error(msg("srv.team.project_can_id_path_tests"));
     for (const test of p.tests) if (!Array.isArray(test) || !test.length || test.some(v => typeof v !== 'string')) throw new Error(msg("srv.team.test_phai_la_mang_executable_arguments"));
+    if (p.readDirs !== undefined && (!Array.isArray(p.readDirs) || p.readDirs.some(d => typeof d !== 'string'))) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: p.id }));
   }
   return config;
 }
@@ -218,7 +219,7 @@ export class Team extends EventEmitter {
     return { cpuPercent: this.cpuPercent, ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
   state() {
-    return { demo: !!this.config.demo, roster: roster(this.config), sessions: this.sessions(), jobs: this.jobs(), projects: this.config.projects.map(p => ({ id: p.id, path: p.path, tests: p.tests, network: p.network === true })),
+    return { demo: !!this.config.demo, roster: roster(this.config), sessions: this.sessions(), jobs: this.jobs(), projects: this.config.projects.map(p => ({ id: p.id, path: p.path, tests: p.tests, network: p.network === true, readDirs: p.readDirs || [] })),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: this.active?.agent === a.id ? 'working' : 'idle', quota: this.quota(a.id) })),
@@ -353,7 +354,9 @@ export class Team extends EventEmitter {
     const brief = r => ({ agent: r.agent, stage: r.stage, status: r.status, verdict: r.verdict, summary: String(r.summary || '').slice(0, 1500), findings: (r.findings || []).slice(0, 10), ...(r.output ? { output: r.output } : {}), ...(r.sources ? { sources: r.sources.slice(0, 15), conclusion: String(r.conclusion || '').slice(0, 1500) } : {}) });
     const lastChecks = job.reports.filter(r => ['review', 'verify', 'test'].includes(r.stage)).slice(-3).map(brief);
     const attachments = job.attachments?.length ? { note: 'Files attached by the human, relative to the worktree. Open them (images too) when relevant.', files: job.attachments } : undefined;
-    const common = { goal: job.goal, instructions: instruction, kind: job.kind || 'code', rigor: job.rigor || 'standard', messages: job.messages, attachments };
+    const readDirs = this.project(job.project).readDirs || [];
+    const readOnlyFolders = readDirs.length ? { note: 'Reference folders outside the repository, granted READ-ONLY by the human. Read and search them by absolute path when useful. Never create, edit, delete or move anything there and never run commands that change them; all changes go in your working directory.', paths: readDirs } : undefined;
+    const common = { goal: job.goal, instructions: instruction, kind: job.kind || 'code', rigor: job.rigor || 'standard', messages: job.messages, attachments, readOnlyFolders };
     let scoped;
     if (stage === 'plan') scoped = { round: job.round, ...(job.round ? { lastChecks } : {}), builders: this.members(members.builders, members), skillLibrary: this.skills().slice(0, 120).map(s => ({ name: s.name, description: s.description })) };
     else if (['implement', 'research'].includes(stage)) scoped = { done: job.tasks.slice(0, job.taskIndex).map(t => ({ task: t.instruction.slice(0, 300), by: t.ranBy })), ...(job.round ? { lastChecks } : {}) };
@@ -388,7 +391,7 @@ export class Team extends EventEmitter {
       await this.ensureExclude(worktree); mkdirSync(join(worktree, '.ai-team'), { recursive: true });
       writeFileSync(join(worktree, '.ai-team', 'prompt.md'), prompt); promptFile = '.ai-team/prompt.md';
     }
-    const report = await this.agentRun(agent, { ...job, stage, worktree, promptFile, network: this.project(job.project).network === true, researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal: this.active.abort.signal,
+    const report = await this.agentRun(agent, { ...job, stage, worktree, promptFile, network: this.project(job.project).network === true, readDirs: this.project(job.project).readDirs || [], researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal: this.active.abort.signal,
       onEvent: (type, data) => { if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') tokens += usageTokens(data.details); this.event(job.id, agentId, 'controller', type, data.summary, data.details); } });
     if (this.active.abort.signal.aborted) throw new Error('Run interrupted');
     if (report.status === 'blocked') {
@@ -422,7 +425,12 @@ export class Team extends EventEmitter {
   async testJob(job) {
     const tests = this.project(job.project).tests;
     const manager = (job.roster || roster(this.config)).manager;
-    if (!tests.length) throw new Error(msg("srv.team.chua_cau_hinh_lenh_kiem_thu"));
+    // Project không có lệnh test (tài liệu, cấu hình, script nhỏ...): bỏ qua bước test, cổng rủi ro sẽ buộc AI review thay thế.
+    if (!tests.length) {
+      this.skip(job, 'tests'); job.tested = job.revision;
+      this.event(job.id, 'controller', manager, 'TEST_RESULT', msg("srv.team.chua_cau_hinh_lenh_kiem_thu"), { skipped: true, revision: job.revision });
+      return true;
+    }
     this.active.agent = 'controller';
     for (const command of tests) {
       this.event(job.id, 'controller', manager, 'TEST_START', command.join(' '));
@@ -455,7 +463,8 @@ export class Team extends EventEmitter {
   // Cổng rủi ro không dùng AI: lý do buộc phải review/verify (file nhạy cảm, xóa file, diff lớn, rủi ro cao).
   async gate(job) {
     if (job.kind === 'research') return job.risk === 'high' ? [msg("srv.team.manager_danh_gia_rui_ro_cao")] : [];
-    return (await this.mergeCheck(job)).reasons;
+    const reasons = (await this.mergeCheck(job)).reasons;
+    return this.project(job.project).tests.length ? reasons : [...reasons, msg("srv.team.no_tests_review")];
   }
   skip(job, ...steps) { job.skipped = [...new Set([...(job.skipped || []), ...steps])]; }
   escalate(job, members, reason) {
@@ -636,8 +645,12 @@ export class Team extends EventEmitter {
       const names = await this.attach(job, payload.files);
       job.messages.push({ time: now(), text: payload.message.trim(), ...(names.length ? { attachments: names } : {}) });
       // Steering invalidates a ready-to-merge result; it must go through planning/review again.
-      if (job.status === 'ready') { job.status = 'paused'; job.stage = 'plan'; job.reviewed = job.verified = job.tested = null; }
-      if (job.status === 'waiting') { job.status = 'queued'; job.stage = 'plan'; job.questions = null; setImmediate(() => this.kick()); }
+      if (job.status === 'ready') { job.stage = 'plan'; job.reviewed = job.verified = job.tested = null; }
+      if (job.status === 'waiting') { job.stage = 'plan'; job.questions = null; }
+      // Chat vào task đang dừng/vướng = muốn nhóm làm tiếp: tự xếp hàng lại, chỉ dẫn được giao ở lượt kế tiếp.
+      if (['ready', 'waiting', 'paused', 'blocked'].includes(job.status) && this.active?.job !== id) {
+        job.roster = roster(this.config); job.status = 'queued'; job.error = null; setImmediate(() => this.kick());
+      }
       this.save(job); this.event(id, 'user', (job.roster || roster(this.config)).manager, 'MESSAGE', payload.message, { delivery: 'next invocation' });
     } else if (action === 'reassign') {
       if (!['paused', 'blocked'].includes(job.status) || this.active?.job === id) throw new Error(msg("srv.team.dung_task_truoc_khi_doi_nguoi"));

@@ -74,14 +74,14 @@ test('pause cancels process; resume retains work; new guidance invalidates ready
   while (!team.active) await new Promise(r => setTimeout(r, 10));
   await team.control(job.id, 'pause');
   await settle(team, job.id, 'paused');
-  await team.control(job.id, 'message', { message: 'Keep changes minimal' });
   await team.control(job.id, 'reassign', { agent: 'codex-4' });
-  await team.control(job.id, 'resume');
+  await team.control(job.id, 'message', { message: 'Keep changes minimal' }); // chat vào task đã dừng = tự chạy tiếp
   await settle(team, job.id, 'ready');
   assert(team.events(job.id).some(e => e.to === 'codex-4' && e.type === 'TASK_ASSIGNMENT'));
   await team.control(job.id, 'message', { message: 'New requirement' });
-  assert.equal(team.get(job.id).status, 'paused'); assert.equal(team.get(job.id).reviewed, null);
+  assert.equal(team.get(job.id).status, 'queued'); assert.equal(team.get(job.id).reviewed, null);
   await assert.rejects(team.merge(job.id), /chưa sẵn sàng/);
+  await settle(team, job.id, 'ready');
 });
 
 test('test failure never reaches merge; bounded repair loop; no-tests cannot pass', async t => {
@@ -331,4 +331,10 @@ test('chat sessions per project; fast path picks the strongest member', async t 
   const other = await team.create({ project: 'test', goal: 'x', mode: 'full' });
   assert.notEqual(other.sessionId, undefined);
   team.renameSession(s.id, 'UI work'); assert(team.state().sessions.some(x => x.name === 'UI work'));
+});
+
+test('read-only reference folders map to Claude permission paths', async () => {
+  const { claudePath } = await import('../src/providers.js');
+  assert.equal(claudePath('D:\\docs\\spec\\'), '//d/docs/spec');
+  assert.equal(claudePath('/srv/docs'), '//srv/docs');
 });

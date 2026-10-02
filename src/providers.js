@@ -3,6 +3,9 @@ import { msg } from './i18n.js';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { executable, childEnv, launch, killTree, run, resolveCommand } from './process.js';
+// Quy tắc quyền của Claude dùng dạng POSIX: D:\A\B → //d/A/B, /x/y → //x/y.
+export const claudePath = p => '/' + String(p).replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => '/' + d.toLowerCase()).replace(/\/+$/, '');
+const SECRET_FILES = ['.env', '.env.*', '*.pem', '*.key', '*.pfx', '*credentials*', '*secret*', 'id_rsa*'];
 
 export function parseReport(text) {
   const report = JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));
@@ -187,6 +190,9 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     // MCP bật riêng cho member này; tên công cụ dạng mcp__<server> được cho phép không cần hỏi.
     if (agent.mcp && Object.keys(agent.mcp).length) args.push('--mcp-config', JSON.stringify({ mcpServers: agent.mcp }), '--strict-mcp-config', '--allowedTools', ...Object.keys(agent.mcp).map(n => `mcp__${n}`));
     if (!web) args.push('--disallowedTools', 'WebFetch,WebSearch');
+    // Thư mục tham khảo: chỉ cho Read/Glob/Grep (không dùng --add-dir vì nó cho cả quyền sửa); cấm sửa và cấm đọc file bí mật.
+    const refs = (task.readDirs || []).map(claudePath);
+    if (refs.length) args.push('--allowedTools', ...refs.map(d => `Read(${d}/**)`), '--disallowedTools', ...refs.flatMap(d => [`Edit(${d}/**)`, `Write(${d}/**)`, ...SECRET_FILES.map(f => `Read(${d}/**/${f})`)]));
   } else {
     args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);

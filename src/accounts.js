@@ -1,12 +1,23 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
 import { msg } from './i18n.js';
-import { join } from 'node:path';
+import { join, isAbsolute, resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { executable, commandAvailable, childEnv, run, killTree, resolveCommand, commandFromPath } from './process.js';
 import { codexClient, codexRpc, listModels } from './providers.js';
 import { roster, validateConfig, redact, tiers } from './team.js';
+
+function readDirList(text) {
+  const dirs = [...new Set(String(text ?? '').split(/\r?\n/).map(l => l.trim().replace(/^"|"$/g, '')).filter(Boolean).map(d => resolve(d)))];
+  if (dirs.length > 20) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: dirs.length }));
+  for (const d of dirs) {
+    let ok = false; try { ok = statSync(d).isDirectory(); } catch {}
+    // Không cho cả ổ đĩa hay cả thư mục home: quá rộng, dễ lộ credential.
+    if (!ok || dirname(d) === d || d === resolve(homedir())) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: d }));
+  }
+  return dirs;
+}
 
 export const providerInfo = {
   codex: { label: 'Codex', cli: 'codex', installUrl: 'https://learn.chatgpt.com/docs/cli' },
@@ -150,9 +161,18 @@ export class Accounts {
     }
     const tests = String(input.tests ?? '').split(/\r?\n/).map(l => (l.match(/"[^"]*"|\S+/g) || []).map(w => w.replace(/^"|"$/g, ''))).filter(a => a.length);
     const config = structuredClone(this.team.config);
-    config.projects.push({ id, path, tests, ...(input.network ? { network: true } : {}) });
+    const readDirs = readDirList(input.readDirs);
+    config.projects.push({ id, path, tests, ...(input.network ? { network: true } : {}), ...(readDirs.length ? { readDirs } : {}) });
     this.persist(config);
     return { id };
+  }
+  // Thư mục tham khảo chỉ đọc: chỉ bạn đặt từ dashboard; agent không tự xin thêm được.
+  setReadDirs(id, text) {
+    const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
+    if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
+    const dirs = readDirList(text);
+    if (dirs.length) p.readDirs = dirs; else delete p.readDirs;
+    this.persist(config); return { id, readDirs: dirs };
   }
   removeProject(id) {
     if (this.team.jobs().some(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status))) throw new Error(msg("srv.accounts.project_busy"));

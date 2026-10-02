@@ -74,6 +74,8 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/projects/pick') return send(res, 200, await accounts.pickFolder());
     const projectRemove = /^\/api\/projects\/([a-z0-9-]+)\/remove$/.exec(url.pathname);
     if (req.method === 'POST' && projectRemove) return send(res, 200, accounts.removeProject(projectRemove[1]));
+    const projectDirs = /^\/api\/projects\/([a-z0-9-]+)\/read-dirs$/.exec(url.pathname);
+    if (req.method === 'POST' && projectDirs) return send(res, 200, accounts.setReadDirs(projectDirs[1], (await body(req)).readDirs));
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const input = await body(req);
       if (!languages.includes(input.language)) throw new Error('language: vi | en | ja');

@@ -824,7 +824,7 @@ function drawSecurity() {
   const mark = { Y: ['ok', '✓'], N: ['no', '✗'], P: ['part', '~'] };
   const head = cols.map(c => `<th>${esc(c === 'controller' ? 'Controller' : c === 'you' ? t('ui.who.user') : roleLabel(c))}</th>`).join('');
   $('security-matrix').innerHTML = `<table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map(x => `<td class="${mark[x][0]}">${mark[x][1]}</td>`).join('')}<td class="how">${esc(t('ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table><p class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))}</p>`;
-  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOff'))}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
+  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOff'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
 }
 $('overview').onclick = () => view('work');
 $('security-nav').onclick = () => view('security');
@@ -855,7 +855,8 @@ const toggleChat = open => { const p = document.querySelector('.communication');
 $('chat-expand').onclick = () => toggleChat();
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('chat-open') && !document.querySelector('dialog[open]')) toggleChat(false); });
 function projectList() {
-  $('project-list').innerHTML = state.projects.length ? `<b>${esc(t('ui.project.registered'))}</b>${state.projects.map(p => `<div class="project-row"><span><b>${esc(p.id)}</b> · ${esc(p.path)}${p.tests.length ? '' : ' · ' + esc(t('ui.project.noTests'))}</span><button type="button" data-remove-project="${esc(p.id)}">${esc(t('ui.project.remove'))}</button></div>`).join('')}` : '';
+  $('project-list').innerHTML = state.projects.length ? `<b>${esc(t('ui.project.registered'))}</b>${state.projects.map(p => `<div class="project-row"><span><b>${esc(p.id)}</b> · ${esc(p.path)}${p.tests.length ? '' : ' · ' + esc(t('ui.project.noTests'))}</span><button type="button" data-remove-project="${esc(p.id)}">${esc(t('ui.project.remove'))}</button><details class="read-dirs"><summary>${esc(t('ui.project.readDirs'))} (${p.readDirs.length})</summary><textarea rows="2" data-dirs="${esc(p.id)}">${esc(p.readDirs.join('\n'))}</textarea><button type="button" data-save-dirs="${esc(p.id)}">${esc(t('ui.project.saveReadDirs'))}</button></details></div>`).join('')}` : '';
+  document.querySelectorAll('[data-save-dirs]').forEach(b => b.onclick = () => attempt(async () => { await api(`projects/${b.dataset.saveDirs}/read-dirs`, { readDirs: document.querySelector(`[data-dirs="${b.dataset.saveDirs}"]`).value }); await refresh(); projectList(); }));
   document.querySelectorAll('[data-remove-project]').forEach(b => b.onclick = () => attempt(async () => { if (!confirm(t('ui.project.confirmRemove', { id: b.dataset.removeProject }))) return; await api(`projects/${b.dataset.removeProject}/remove`, {}); await refresh(); projectList(); }));
 }
 $('open-project').onclick = () => { projectList(); $('project-dialog').showModal(); };
@@ -863,7 +864,7 @@ $('close-project').onclick = () => $('project-dialog').close();
 $('pick-folder').onclick = () => attempt(async () => { $('pick-folder').disabled = true; try { const r = await api('projects/pick', {}); if (r.path) { $('project-path').value = r.path; if (!$('project-id').value) $('project-id').value = r.path.split(/[\\/]/).filter(Boolean).pop().toLowerCase().replace(/[^a-z0-9-]+/g, '-'); } } finally { $('pick-folder').disabled = false; } });
 $('project-form').onsubmit = e => {
   e.preventDefault(); attempt(async () => {
-    const r = await api('projects', { path: $('project-path').value, id: $('project-id').value, tests: $('project-tests').value, init: $('project-init').checked, network: $('project-network').checked });
+    const r = await api('projects', { path: $('project-path').value, id: $('project-id').value, tests: $('project-tests').value, init: $('project-init').checked, network: $('project-network').checked, readDirs: $('project-readdirs').value });
     $('project-dialog').close(); $('project-form').reset(); await refresh(); $('project').value = r.id;
   });
 };

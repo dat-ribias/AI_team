@@ -285,7 +285,7 @@
   "srv.team.agent_doi_branch_can_kiem_tra": "Agent đổi branch; cần kiểm tra",
   "srv.team.con_conflict_marker_trong_code": "Còn conflict marker trong code:\n",
   "srv.team.branch_khong_con_chua_base_agent": "Branch không còn chứa base; agent đã viết lại lịch sử",
-  "srv.team.chua_cau_hinh_lenh_kiem_thu": "Chưa cấu hình lệnh kiểm thử cho project; bổ sung tests trong team.config.json",
+  "srv.team.chua_cau_hinh_lenh_kiem_thu": "Project không có lệnh test — bỏ qua bước test, AI review sẽ kiểm tra thay",
   "srv.team.tests_lam_thay_doi_worktree_khong": "Tests làm thay đổi worktree; không đánh dấu đã kiểm thử",
   "srv.team.phan_tich_muc_tieu_va_chia": "Phân tích mục tiêu và chia việc cho {0}; trả plan JSON.",
   "srv.team.plan_can_1_12_task": "Plan cần 1–12 task",
@@ -592,5 +592,11 @@
   "ui.chat.typing": "đang làm {stage}…",
   "srv.team.session_default": "Chung",
   "srv.team.session_name": "Tên phiên không được trống",
-  "srv.team.session_missing": "Phiên không tồn tại trong dự án này"
+  "srv.team.session_missing": "Phiên không tồn tại trong dự án này",
+  "srv.team.no_tests_review": "Project không có lệnh test: cần AI review thay cho test",
+  "ui.project.readDirs": "Thư mục tham khảo (chỉ đọc)",
+  "ui.project.readDirsNote": "Mỗi dòng một thư mục ngoài repo. Agent chỉ được đọc/tìm, không được sửa. File bí mật (.env, *.pem, *credentials*…) bị chặn với Claude; Codex/Gemini chỉ được dặn qua prompt nên đừng thêm thư mục chứa credential.",
+  "ui.project.saveReadDirs": "Lưu",
+  "ui.sec.readDirs": "đọc thêm",
+  "srv.accounts.read_dir_invalid": "Thư mục tham khảo không hợp lệ (phải tồn tại, không phải cả ổ đĩa/home, tối đa 20): {0}"
 }

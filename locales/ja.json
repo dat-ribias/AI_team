@@ -285,7 +285,7 @@
   "srv.team.agent_doi_branch_can_kiem_tra": "エージェントがブランチを切り替えました。確認が必要です",
   "srv.team.con_conflict_marker_trong_code": "コードにコンフリクトマーカーが残っています:\n",
   "srv.team.branch_khong_con_chua_base_agent": "ブランチにベースが含まれていません。エージェントが履歴を書き換えました",
-  "srv.team.chua_cau_hinh_lenh_kiem_thu": "このプロジェクトのテストコマンドが未設定です。team.config.json に tests を追加してください",
+  "srv.team.chua_cau_hinh_lenh_kiem_thu": "このプロジェクトにはテストコマンドがありません。テストを省略し、AI レビューで代替します",
   "srv.team.tests_lam_thay_doi_worktree_khong": "テストがワークツリーを変更しました。テスト済みにはしません",
   "srv.team.phan_tich_muc_tieu_va_chia": "目標を分析し、{0} に作業を割り当て、plan JSON を返してください。",
   "srv.team.plan_can_1_12_task": "プランには 1〜12 個のタスクが必要です",
@@ -592,5 +592,11 @@
   "ui.chat.typing": "{stage} を作業中…",
   "srv.team.session_default": "一般",
   "srv.team.session_name": "セッション名は空にできません",
-  "srv.team.session_missing": "このプロジェクトにセッションがありません"
+  "srv.team.session_missing": "このプロジェクトにセッションがありません",
+  "srv.team.no_tests_review": "テストコマンドがないため、テストの代わりに AI レビューが必要です",
+  "ui.project.readDirs": "参照フォルダー（読み取り専用）",
+  "ui.project.readDirsNote": "リポジトリ外のフォルダーを1行に1つ。エージェントは読み取り・検索のみで変更不可。秘密ファイル（.env, *.pem, *credentials* など）は Claude ではブロックされます。Codex/Gemini はプロンプトでの指示のみなので、認証情報を含むフォルダーは追加しないでください。",
+  "ui.project.saveReadDirs": "保存",
+  "ui.sec.readDirs": "参照",
+  "srv.accounts.read_dir_invalid": "参照フォルダーが無効です（存在すること、ドライブ全体やホーム不可、最大20件）: {0}"
 }
