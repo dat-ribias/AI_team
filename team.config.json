@@ -90,6 +90,19 @@
     {
       "id": "work-team",
       "path": "D:\\work_team",
+      "tests": [
+        [
+          "node",
+          "--test",
+          "test/system.test.js"
+        ]
+      ],
+      "network": true,
+      "readDirs": []
+    },
+    {
+      "id": "fe-new",
+      "path": "D:\\w\\FE_NEW",
       "tests": [],
       "network": true
     }
