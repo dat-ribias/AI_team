@@ -62,6 +62,8 @@ export function childEnv(agent) {
   // Bí mật khác trong môi trường (token, mật khẩu, khóa cloud) cũng không chuyển cho agent.
   for (const key of Object.keys(env)) if (/(TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|CREDENTIAL)|^(AWS_|AZURE_|GCP_|GOOGLE_APPLICATION_CREDENTIALS$|KINTONE_|SSH_AUTH_SOCK$|NPM_CONFIG__AUTH)/i.test(key)) delete env[key];
   if (agent?.home && (agent.provider === 'codex' || !agent.provider)) env.CODEX_HOME = agent.home;
+  // SQLite riêng cho slot ≥ 2 / lần đọc quota; không có thì Codex dùng CODEX_HOME (biến CODEX_* của tiến trình cha đã bị xóa ở trên).
+  if (agent?.sqliteHome && (agent.provider === 'codex' || !agent.provider)) env.CODEX_SQLITE_HOME = agent.sqliteHome;
   if (agent?.home && agent.provider === 'claude') env.CLAUDE_CONFIG_DIR = agent.home;
   if (agent?.home && agent.provider === 'gemini') env.GEMINI_CLI_HOME = agent.home;
   return env;
@@ -93,7 +95,7 @@ export function run(command, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     options.signal?.throwIfAborted();
     let child;
-    try { child = launch(command, args, options); } catch (error) { return reject(error); }
+    try { child = launch(command, args, options); options.onSpawn?.(child.pid); } catch (error) { return reject(error); }
     let stdout = '', stderr = '', failure, stopping = false, termination = Promise.resolve();
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
     const buffers = { stdout: '', stderr: '' };

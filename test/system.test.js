@@ -329,6 +329,226 @@ test('review/verify run the project checks themselves in a detached worktree', a
   assert.deepEqual(impl.checks, []);
 });
 
+test('agy quota counts only the bucket group of the member model', async t => {
+  const f = await fixture(); f.config.demo = false;
+  f.config.agents = f.config.agents.map(a => a.id === 'gemini' ? { ...a, provider: 'antigravity', model: 'gemini-3.8-flash-high' } : { ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) });
+  const w = remaining => [{ name: 'quota', remaining, minutes: null, resetsAt: null }];
+  const team = new Team(f.config, f.data, { readQuota: async a => ({ buckets: a.provider === 'antigravity' ? [{ id: 'gemini-5h', windows: w(98) }, { id: '3p-5h', windows: w(0) }] : [] }) });
+  t.after(() => team.close());
+  await team.refreshQuota();
+  assert.equal(team.remaining('gemini'), 98); assert.equal(team.lowQuota('gemini'), false);
+  team.config.agents.find(a => a.id === 'gemini').model = 'claude-opus';
+  assert.equal(team.remaining('gemini'), 0);
+});
+
+test('builder out of quota mid-task: controller hands the task and partial work to another builder', async t => {
+  const f = await fixture(); f.config.demo = false;
+  f.config.agents = f.config.agents.map(a => ({ ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
+  const seen = [];
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'implement') seen.push({ agent: agent.id, prompt });
+    if (task.stage === 'implement' && seen.length === 1) { writeFileSync(join(task.worktree, 'partial.txt'), 'half done\n'); throw new Error("You've hit your usage limit. Try again later."); }
+    return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
+  }, readQuota: async () => ({ buckets: [] }) });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const ready = await settle(team, job.id, 'ready');
+  assert.equal(seen.length, 2); assert.notEqual(seen[0].agent, seen[1].agent);
+  assert.match(seen[1].prompt, /handover/); assert.match(seen[1].prompt, /partial\.txt/);
+  assert(team.events(job.id).some(e => e.type === 'HANDOVER' && e.details.from === seen[0].agent && e.details.to === seen[1].agent));
+  assert.equal(team.lowQuota(seen[0].agent), true); assert.equal(ready.tasks[0].ranBy, seen[1].agent); assert.equal(ready.tasks[0].handover, undefined);
+});
+
+test('maxJobsPerAccount lets one account run several jobs at once, each in its own slot', async t => {
+  const f = await fixture(); f.config.demo = false; f.config.maxJobsPerAccount = 2; f.config.resources = { reserveGB: 0, ramPerAgentGB: 0.01, maxAgents: 4, hardStopRamPercent: 100 };
+  f.config.agents = f.config.agents.map(a => ({ ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
+  f.config.pipeline.builders = ['codex-2'];
+  let now = 0, peak = 0; const slots = new Set(), held = new Set(), plans = [];
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'plan') plans.push(prompt);
+    if (task.stage === 'implement') {
+      assert(!held.has(task.slot), 'hai việc cùng giữ một slot'); held.add(task.slot); slots.add(task.slot);
+      peak = Math.max(peak, ++now); await new Promise(r => setTimeout(r, 400)); now--; held.delete(task.slot);
+    }
+    return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
+  }, readQuota: async () => ({ buckets: [] }) });
+  t.after(() => team.close());
+  const jobs = [await team.create({ project: 'test', goal: 'Update hello' }), await team.create({ project: 'test', goal: 'Update hello' }), await team.create({ project: 'test', goal: 'Update hello' })];
+  for (const j of jobs) await settle(team, j.id, 'ready');
+  assert.equal(peak, 2); assert.deepEqual([...slots].sort(), [1, 2]); // việc thứ 3 chờ, không nhận trùng slot
+  assert(plans.some(p => p.includes('"otherJobs"')), 'Lead của việc sau phải thấy các việc đang chạy cùng project');
+  // slot 1 không kế thừa CODEX_SQLITE_HOME của tiến trình cha; slot ≥ 2 nhận thư mục riêng
+  process.env.CODEX_SQLITE_HOME = '/parent/state'; t.after(() => delete process.env.CODEX_SQLITE_HOME);
+  const home = team.agent('codex-2').home;
+  assert.equal(childEnv({ provider: 'codex', home }).CODEX_SQLITE_HOME, undefined);
+  assert.equal(childEnv({ provider: 'codex', home, sqliteHome: join(home, 'sqlite-2') }).CODEX_SQLITE_HOME, join(home, 'sqlite-2'));
+  // sqlite_home trong config.toml ghi đè biến môi trường → tắt song song cho tài khoản đó
+  writeFileSync(join(home, 'config.toml'), 'sqlite_home = "C:/shared"\n'); assert.equal(team.maxJobs('codex-2'), 1);
+  writeFileSync(join(home, 'config.toml'), '');
+  assert.equal(team.maxJobs('codex-2'), 2); team.config.maxJobsPerAccount = undefined; assert.equal(team.maxJobs('codex-2'), 1);
+});
+
+test('slot safety: sqlite_home defers busy quota reads, limits count per account email, orphans keep their slot after restart', async t => {
+  const f = await fixture(); f.config.demo = false;
+  f.config.agents = f.config.agents.map(a => ({ ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
+  const reads = [];
+  let team = new Team(f.config, f.data, { readQuota: async a => { reads.push(a.id); return { buckets: [], account: { email: ['codex-2', 'codex-4'].includes(a.id) ? 'same@x.com' : a.id + '@x.com' } }; } });
+  // 1. Tài khoản đang chạy việc: Codex thường vẫn đọc quota (SQLite riêng); có sqlite_home thì hoãn.
+  team.runs.set('fake', { agents: new Set(['codex-2', 'codex-3']), abort: new AbortController() });
+  writeFileSync(join(team.agent('codex-3').home, 'config.toml'), 'sqlite_home = "C:/shared"\n');
+  await team.refreshQuota();
+  assert(reads.includes('codex-2')); assert(!reads.includes('codex-3'));
+  // 2. Hai hồ sơ cùng email: dùng chung bộ đếm (codex-2 đang chạy → codex-4 cũng hết chỗ khi giới hạn là 1).
+  team.runs.set('fake', { agents: new Set(['codex-2']), abort: new AbortController() });
+  assert.equal(team.useOf('codex-4'), 1); assert(team.fullAgents().has('codex-4')); assert(!team.fullAgents().has('codex-1'));
+  team.runs.delete('fake');
+  // 3. Controller tắt đột ngột khi tiến trình con còn sống → sau khởi động lại slot vẫn bị giữ.
+  const job = await team.create({ project: 'test', goal: 'x' });
+  team.save({ ...team.get(job.id), status: 'running', running: [{ agent: 'codex-1', slot: 1, pid: process.pid, startedAt: new Date().toISOString() }] });
+  team.close();
+  team = new Team(f.config, f.data); t.after(() => team.close());
+  assert(team.slotKeys().includes('codex-1')); assert(team.fullAgents().has('codex-1')); assert.equal(team.get(job.id).status, 'paused');
+});
+
+test('plan challenge: risky plans get one evidence-based challenge; serious objections send the plan back once', async t => {
+  for (const objections of [[{ claim: 'Task 1 sửa sai file', failsWhen: 'hello.txt không phải nơi cần đổi', check: 'đọc README', impact: 'high' }], []]) {
+    const f = await fixture(); const prompts = [];
+    const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+      prompts.push({ stage: task.stage, agent: agent.id, prompt });
+      const r = await runAgent(agent, task, prompt, opts);
+      if (task.stage === 'plan') r.rigor = 'strict';
+      if (task.stage === 'challenge') return { summary: 'x', status: 'completed', objections };
+      return r;
+    } });
+    t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: 'Update hello' });
+    await settle(team, job.id, 'ready');
+    const plans = prompts.filter(p => p.stage === 'plan'), challenges = prompts.filter(p => p.stage === 'challenge');
+    assert.equal(challenges.length, 1); assert.notEqual(challenges[0].agent, 'codex-1'); // không để Manager tự phản biện mình
+    assert.equal(plans.length, objections.length ? 2 : 1);
+    if (objections.length) assert.match(plans[1].prompt, /"objections"/);
+    assert(team.events(job.id).some(e => e.type === 'CHALLENGE'));
+  }
+});
+
+test('structured rebuttal: a rejected finding becomes a dispute that forces verify; unresolved high findings go to the human', async t => {
+  const f = await fixture(); const seen = [];
+  const finding = { id: 'F1', claim: 'Thiếu xử lý file rỗng', failsWhen: 'hello.txt rỗng', check: 'chạy test với file rỗng', impact: 'high' };
+  let reviews = 0;
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    seen.push({ stage: task.stage, prompt });
+    const r = await runAgent(agent, task, prompt, opts);
+    if (task.stage === 'review' && reviews++ === 0) return { ...r, verdict: 'changes_requested', findings: [finding] };
+    if (task.stage === 'implement' && task.round) return { ...r, responses: [{ finding: 'F1', action: 'rejected', evidence: 'test hiện có đã phủ file rỗng (test/x:12)' }] };
+    if (task.stage === 'verify') return { ...r, rulings: [{ finding: 'F1', upheld: false, evidence: 'đã chạy test, pass' }] };
+    return r;
+  } });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const ready = await settle(team, job.id, 'ready');
+  const verify = seen.find(x => x.stage === 'verify');
+  assert(verify, 'verify phải bị ép chạy vì có tranh chấp (rigor standard, không có cổng rủi ro)');
+  assert.match(verify.prompt, /"disputes"/); assert.match(verify.prompt, /đã phủ file rỗng/);
+  const ev = team.events(job.id); assert(ev.some(e => e.type === 'DISPUTE')); assert(ev.some(e => e.type === 'RULING'));
+  assert.deepEqual(ready.disputes, []);
+  // Hết vòng sửa mà reviewer vẫn giữ finding mức high → chờ người quyết, không BLOCKED mù.
+  const g = await fixture(); g.config.maxReworkRounds = 0;
+  const team2 = new Team(g.config, g.data, { runAgent: async (agent, task, prompt, opts) => {
+    const r = await runAgent(agent, task, prompt, opts);
+    return task.stage === 'review' ? { ...r, verdict: 'changes_requested', findings: [finding] } : r;
+  } });
+  t.after(() => team2.close());
+  const j2 = await team2.create({ project: 'test', goal: 'Update hello' });
+  const waiting = await settle(team2, j2.id, 'waiting');
+  assert.match(waiting.questions[0], /F1: Thiếu xử lý file rỗng/);
+});
+
+test('Manager-proposed flow: chosen reviewer, skipped verify forced back by the risk gate, invalid id falls back, absent steps keep the old default', async t => {
+  const run = async (flow, cfg = c => c) => {
+    const f = await fixture(); cfg(f.config); const calls = [];
+    const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+      calls.push({ stage: task.stage, agent: agent.id });
+      const r = await runAgent(agent, task, prompt, opts);
+      if (task.stage === 'plan' && flow) r.flow = flow;
+      return r;
+    } });
+    t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: 'Update hello' });
+    return { job: await settle(team, job.id, 'ready'), calls, ev: team.events(job.id) };
+  };
+  // (a) Manager chọn reviewer khác roster (roster.reviewer = gemini)
+  const a = await run({ reviewer: 'codex-1', steps: ['review'] });
+  assert.equal(a.calls.find(c => c.stage === 'review').agent, 'codex-1'); assert.equal(a.job.checkers.reviewer, 'codex-1');
+  assert(!a.calls.some(c => c.stage === 'verify')); assert(a.job.skipped.includes('final'));
+  // (b) Manager bỏ verify nhưng cổng rủi ro ép lại (file nhạy cảm) → ghi override
+  const b = await run({ steps: ['review'] }, c => { c.sensitivePaths = 'hello'; });
+  assert(b.calls.some(c => c.stage === 'verify')); assert.equal(b.job.verified, b.job.revision);
+  assert(b.job.flow.overrides.some(o => o.step === 'verify')); assert(b.ev.some(e => e.type === 'OVERRIDE'));
+  // (c) id không hợp lệ → fallback roster + WARNING
+  const c = await run({ reviewer: 'khong-ton-tai' });
+  assert.equal(c.job.flow.reviewer, null); assert.equal(c.calls.find(x => x.stage === 'review').agent, 'gemini');
+  assert(c.ev.some(e => e.type === 'WARNING' && /khong-ton-tai/.test(e.summary)));
+  // (d) không gửi steps → giữ mặc định cũ: standard không có cổng rủi ro thì KHÔNG verify (tránh lỗi wants() mặc định = true)
+  const d = await run({ reviewer: 'codex-1' });
+  assert(d.calls.some(x => x.stage === 'review')); assert(!d.calls.some(x => x.stage === 'verify'));
+  // (e) steps: [] khác với không gửi: Manager bỏ hết, test vẫn chạy, không có review/verify/final
+  const e = await run({ steps: [] });
+  assert(!e.calls.some(x => ['review', 'verify', 'final'].includes(x.stage))); assert.equal(e.job.tested, e.job.revision);
+});
+
+test('independent checker: a reviewer who wrote the code is swapped for another member', async t => {
+  const f = await fixture(); f.config.pipeline.reviewer = 'codex-2'; f.config.pipeline.builders = ['codex-2']; const calls = [];
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => { calls.push({ stage: task.stage, agent: agent.id }); return runAgent(agent, task, prompt, opts); } });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const ready = await settle(team, job.id, 'ready');
+  const builder = calls.find(c => c.stage === 'implement').agent, reviewer = calls.find(c => c.stage === 'review').agent;
+  assert.equal(builder, 'codex-2'); assert.notEqual(reviewer, 'codex-2'); assert.equal(ready.checkers.reviewer, reviewer);
+  assert(team.events(job.id).some(e => e.type === 'REROUTE' && e.details?.role === 'reviewer' && e.details.from === 'codex-2'));
+  assert(!team.events(job.id).some(e => e.type === 'WARNING' && /codex-2/.test(e.summary))); // đã có người thay → không còn cảnh báo tự review
+});
+
+test('task graph: per-task review nodes review exact commits, auto-fix on failure, escalate to the Leader after 2 fixes', async t => {
+  const graph = [
+    { instruction: 'write a.txt', files: ['a.txt'], dependsOn: [], difficulty: 2 },
+    { instruction: 'write b.txt', files: ['b.txt'], dependsOn: [], difficulty: 2 },
+    { kind: 'review', dependsOn: [0] }, { kind: 'review', dependsOn: [1] }];
+  const go = async (reviewVerdict) => {
+    const f = await fixture(); const calls = []; let plans = 0, nodeReviews = 0;
+    const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+      const r = await runAgent(agent, task, prompt, opts);
+      calls.push({ stage: task.stage, agent: agent.id, prompt });
+      if (task.stage === 'plan' && plans++ === 0) { r.tasks = structuredClone(graph); r.flow = { steps: ['verify'] }; }
+      if (task.stage === 'implement') { const m = /write (\w+\.txt)/.exec(prompt); if (m) writeFileSync(join(task.worktree, m[1]), m[1] + Date.now() + '\n'); }
+      if (task.stage === 'review' && /Review ONLY this part/.test(prompt)) { const v = reviewVerdict(nodeReviews++); if (v !== 'approved') return { ...r, verdict: v, findings: [{ claim: 'thiếu kiểm tra', impact: 'high' }] }; }
+      return r;
+    } });
+    t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: 'Update hello' });
+    return { team, job, calls };
+  };
+  // (a) 2 task → 2 review theo task → verify cuối; review cấp job bị Manager bỏ
+  { const { team, job, calls } = await go(() => 'approved'); const ready = await settle(team, job.id, 'ready');
+    const nodeRev = calls.filter(c => c.stage === 'review' && /Review ONLY this part/.test(c.prompt));
+    assert.equal(nodeRev.length, 2);
+    for (const [k, idx] of [[0, 2], [1, 3]]) {
+      const node = ready.tasks[idx], dep = ready.tasks[idx - 2];
+      assert(node.done && node.verdict === 'approved'); assert.notEqual(node.ranBy, dep.ranBy);
+      assert(nodeRev.some(c => c.prompt.includes(`${dep.base}..${dep.commit}`)), 'review đúng commit của task');
+    }
+    assert(!calls.some(c => c.stage === 'review' && !/Review ONLY this part/.test(c.prompt)), 'review cấp job đã bị bỏ theo flow.steps');
+    assert(calls.some(c => c.stage === 'verify')); assert.equal(ready.verified, ready.revision); }
+  // (b) review node fail 1 lần → task sửa tự động (tác giả cũ) → review lại → đạt
+  { const { team, job } = await go(n => n === 0 ? 'changes_requested' : 'approved'); const ready = await settle(team, job.id, 'ready');
+    const fix = ready.tasks.find(x => x.auto); assert(fix && fix.done); assert.equal(fix.agent, ready.tasks[fix.fixOf - 2].ranBy);
+    assert.equal(ready.tasks[fix.fixOf].attempts, 1); assert(ready.tasks[fix.fixOf].done);
+    assert(team.events(job.id).some(e => e.type === 'FIX_TASK')); }
+  // (c) luôn fail → sau 2 lần sửa thì về Leader lập kế hoạch lại (kế hoạch 2 không có node review)
+  { const { team, job, calls } = await go(() => 'changes_requested'); await settle(team, job.id, 'ready');
+    assert.equal(calls.filter(c => c.stage === 'plan').length, 2);
+    assert(team.events(job.id).some(e => e.type === 'REWORK_REQUEST')); }
+});
+
 test('per-member speed and token use are measured and shown to the lead', async t => {
   const f = await fixture();
   const { runAgent } = await import('../src/providers.js');

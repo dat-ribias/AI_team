@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { msg } from './i18n.js';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -8,7 +8,15 @@ export const claudePath = p => '/' + String(p).replace(/\\/g, '/').replace(/^([A
 const SECRET_FILES = ['.env', '.env.*', '*.pem', '*.key', '*.pfx', '*credentials*', '*secret*', 'id_rsa*'];
 
 export function parseReport(text) {
-  const report = JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, ''));
+  let report;
+  try { report = JSON.parse(text.trim().replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '')); }
+  catch {
+    // Agent đôi khi viết thêm chữ quanh JSON: lấy object JSON cuối cùng có "summary"; không có thì báo kèm đoạn đầu câu trả lời.
+    for (let i = text.lastIndexOf('{'); i >= 0 && !report; i = text.lastIndexOf('{', i - 1)) {
+      for (let j = text.lastIndexOf('}'); j > i; j = text.lastIndexOf('}', j - 1)) { try { const r = JSON.parse(text.slice(i, j + 1)); if (r && typeof r.summary === 'string') { report = r; break; } } catch {} }
+    }
+    if (!report) throw new Error('Agent response must be JSON with a summary. Got: ' + text.trim().slice(0, 300));
+  }
   if (!report || typeof report !== 'object' || Array.isArray(report) || typeof report.summary !== 'string') throw new Error('Agent response must be JSON with a summary');
   return report;
 }
@@ -80,7 +88,7 @@ export async function codexClient(agent, onNotification = () => {}) {
 const homeLocks = new Map();
 export function withHome(agent, fn) {
   if (!agent.home) return fn();
-  const key = agent.home.toLowerCase(), next = (homeLocks.get(key) || Promise.resolve()).then(fn, fn);
+  const key = (agent.lockKey || agent.home).toLowerCase(), next = (homeLocks.get(key) || Promise.resolve()).then(fn, fn);
   homeLocks.set(key, next.catch(() => {}));
   return next;
 }
@@ -103,7 +111,8 @@ export async function codexRpc(agent, methods) {
 const unsupportedUsage = new Set();
 export async function readQuota(agent) {
   if (agent.provider === 'codex') {
-    const [account, quota] = await codexRpc(agent, ['account/read', 'account/rateLimits/read']);
+    const sqliteHome = join(agent.home, 'sqlite-quota'); mkdirSync(sqliteHome, { recursive: true });
+    const [account, quota] = await codexRpc({ ...agent, sqliteHome, lockKey: agent.home + '#quota' }, ['account/read', 'account/rateLimits/read']);
     return { buckets: normalizeCodexQuota(quota), account: account.account || null };
   }
   if (agent.provider !== 'antigravity') throw new Error(msg("srv.providers.cli_nay_chua_co_bo_doc"));
@@ -204,8 +213,12 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
     // Antigravity (agy) không có cờ quyền theo lượt: lệnh check phải được cho phép trong ~/.gemini/antigravity-cli/settings.json (permissions.allow).
   }
+  // Slot ≥ 2 của cùng tài khoản Codex: SQLite riêng (CODEX_SQLITE_HOME), giữ chung đăng nhập. sqlite_home trong config.toml sẽ ghi đè biến này.
+  const slot = task.slot > 1 && agent.provider === 'codex' ? task.slot : 1, slotAgent = slot > 1 ? { ...agent, sqliteHome: join(agent.home, `sqlite-${slot}`), lockKey: `${agent.home}#${slot}` } : agent;
+  if (slot > 1) mkdirSync(slotAgent.sqliteHome, { recursive: true });
+  const env = childEnv(slotAgent);
   const exec = () => run(resolveCommand(agent), args, {
-    cwd: task.worktree, env: childEnv(agent), input: ['codex', 'claude'].includes(agent.provider) ? prompt : '', signal,
+    cwd: task.worktree, env, onSpawn: pid => onEvent('SPAWN', { summary: `PID ${pid} · slot ${slot}`, details: { pid, slot, cwd: task.worktree, sqliteHome: env.CODEX_SQLITE_HOME || agent.home || null } }), input: ['codex', 'claude'].includes(agent.provider) ? prompt : '', signal,
     onLine(line, stream) {
       if (!line) return;
       if (stream === 'stderr') { if (/blocked by policy|CreateRestrictedToken|sandbox setup/i.test(line)) policyBlocked = true; onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
@@ -213,7 +226,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
       // Deliberately expose actions and messages, not reasoning items.
       const item = event.item;
       if (event.type === 'item.completed' && item?.type === 'agent_message') final = item.text;
-      if (item && ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'].includes(item.type)) onEvent('ACTIVITY', { summary: item.command || item.type, details: item });
+      if (item && ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'].includes(item.type) || event.type === 'item.completed' && item?.type === 'agent_message') onEvent('ACTIVITY', { summary: item.command || (item.text ? item.text.slice(0, 200) : item.type), details: item });
       if (event.type === 'turn.completed') onEvent('USAGE', { summary: 'Token usage', details: event.usage });
       if (['error', 'turn.failed'].includes(event.type)) failed = event.message || event.error?.message || event.type;
       if (event.type === 'message' && event.role === 'assistant') final += event.content || '';
@@ -228,6 +241,9 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
       if (agent.provider === 'claude' && event.type === 'assistant') {
         for (const block of event.message?.content || []) if (block.type === 'tool_use') onEvent('ACTIVITY', { summary: block.name, details: { name: block.name, input: block.input } });
       }
+      if (agent.provider === 'claude' && event.type === 'user') {
+        for (const block of event.message?.content || []) if (block.type === 'tool_result') { const out = Array.isArray(block.content) ? block.content.map(c => c.text || '').join('\n') : String(block.content ?? ''); onEvent('ACTIVITY', { summary: 'tool_result', details: { type: 'tool_result', output: out.slice(-8000), is_error: !!block.is_error } }); }
+      }
       if (agent.provider === 'claude' && event.type === 'rate_limit_event') onEvent('RATE_LIMIT', { summary: `Quota: ${event.rate_limit_info?.status || ''} ${event.rate_limit_info?.rateLimitType || ''}`.trim(), details: event.rate_limit_info });
       if (agent.provider === 'claude' && event.type === 'result') {
         final = event.result || '';
@@ -236,7 +252,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
       }
     },
   });
-  await (agent.provider === 'codex' ? withHome(agent, exec) : exec());
+  await (agent.provider === 'codex' ? withHome(slotAgent, exec) : exec());
   const hint = policyBlocked ? '\n' + msg("srv.providers.codex_sandbox_hint") : '';
   if (failed) throw new Error(failed + hint);
   if (!final) throw new Error(msg("srv.providers.cli_khong_tra_ket_qua_cuoi") + hint);

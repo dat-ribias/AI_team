@@ -16,7 +16,7 @@ async function loadLanguage(next) {
   document.documentElement.lang = lang; $('lang-select').value = lang;
   document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
-  document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', t(el.dataset.i18nAria)); if (el.dataset.i18nTitle) el.title = t(el.dataset.i18nTitle); });
 }
 // ---- giao diện sáng/tối: lưu theo trình duyệt ----
 function applyTheme(theme) { document.documentElement.dataset.theme = ['dark', 'light'].includes(theme) ? theme : 'system'; $('theme-select').value = document.documentElement.dataset.theme; }
@@ -67,6 +67,7 @@ function duration(minutes) {
 }
 const untilReset = time => { const ms = Date.parse(time) - Date.now(); return Number.isFinite(ms) && ms > 0 ? ' · ' + t('ui.quota.left', { time: duration(ms / 60000) }) : ''; };
 function quotaPercent(q) {
+  if ('pct' in q) return q.pct == null ? null : Math.round(q.pct); // server đã lọc theo nhóm model (agy: Gemini vs Claude/GPT)
   if (q.observed) { const v = q.buckets.flatMap(b => b.windows).filter(w => !w.resetsAt || Date.parse(w.resetsAt) > Date.now()).map(w => w.remaining).filter(Number.isFinite); return v.length ? Math.round(Math.min(...v)) : null; }
   if (!q.checkedAt || Date.now() - Date.parse(q.checkedAt) > 10 * 60000) return null;
   const values = q.buckets.flatMap(b => b.windows.map(w => w.remaining)).filter(Number.isFinite);
@@ -234,11 +235,12 @@ function drawState() {
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
   ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
-  drawSessions();
+  drawSessions(); syncTab();
   { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${j.eta != null ? ' · ' + t('ui.eta', { time: duration(j.eta) }) : ''}` : t('ui.flow.summaryIdle'); }
   drawJobsList();
   drawJobsDialog();
   drawFlow();
+  if ($('slot-dialog').open && slot?.current) refreshSlotLive();
   document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => openSlot(b.dataset.slot, b.dataset.agent || null));
   document.querySelectorAll('[data-bench]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.bench)));
   $('running-label').textContent = t('ui.team.running', { n: state.resources.active });
@@ -383,7 +385,16 @@ const roleChecks = a => `<div class="role-checks">${ROLE_KEYS.map(k => `<label c
 // Bấm ô trên sơ đồ: đổi member cho vai trò đó + sửa system prompt của member ngay tại chỗ.
 let slot = null;
 // Phiên chat theo dự án (lưu lựa chọn theo trình duyệt).
-let curProject = store.get('project') || '', curSession = store.get('session') || '';
+// Mỗi tab giữ dự án/phiên/việc riêng trên URL (#p=&s=&j=), mở nhiều tab = nhiều phòng điều phối; localStorage chỉ là mặc định cho tab mới.
+const tabHash = new URLSearchParams(location.hash.slice(1));
+let curProject = tabHash.get('p') ?? (store.get('project') || ''), curSession = tabHash.get('s') ?? (store.get('session') || '');
+if (tabHash.get('j')) selected = tabHash.get('j');
+function syncTab() {
+  const q = new URLSearchParams({ p: curProject, s: curSession, ...(selected ? { j: selected } : {}) });
+  if (location.hash.slice(1) !== q.toString()) history.replaceState(null, '', '#' + q);
+  const s = state.sessions.find(x => x.id === curSession);
+  document.title = `${s ? s.name + ' · ' : ''}${curProject || 'AI Team'} · Control Room`;
+}
 function drawSessions() {
   if (!state.projects.some(p => p.id === curProject)) curProject = state.projects[0]?.id || '';
   const list = state.sessions.filter(x => x.project === curProject);
@@ -398,13 +409,33 @@ function slotLive(id) {
   const job = state.jobs.find(j => j.id === selected);
   if (!id || !job) return '';
   const mine = events.filter(e => e.from === id);
-  const acts = mine.filter(e => e.type === 'ACTIVITY').slice(-5), res = mine.filter(e => ['RESULT', 'REVIEW_RESULT', 'CONCLUSION', 'BLOCKER'].includes(e.type)).at(-1);
+  // Codex gửi in_progress rồi completed cho cùng item: giữ bản mới nhất.
+  const last = new Map(); for (const e of mine.filter(e => e.type === 'ACTIVITY')) last.set(e.details?.id ? e.details.id + (e.details.command || e.details.text || "") : e.seq, e); // id (item_1…) lặp lại giữa các lượt
+  const acts = [...last.values()].slice(-40), res = mine.filter(e => ['RESULT', 'REVIEW_RESULT', 'CONCLUSION', 'BLOCKER'].includes(e.type)).at(-1);
   const cur = job.current?.agent === id ? job.current : null;
-  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${acts.length ? `<ul>${acts.map(e => `<li><code>${esc(cut(e.summary, 140))}</code></li>`).join('')}</ul>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
+  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${acts.length ? `<div class="live-log">${acts.map((e, i) => actView(e, i === acts.length - 1)).join('')}</div>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
+}
+const shortCmd = c => String(c || '').replace(/^"?[^"]*powershell(\.exe)?"?\s+(-NoProfile\s+)?-Command\s+/i, '');
+function actView(e, open) {
+  const d = e.details || {}, pre = (head, body) => `<details data-seq="${e.seq}" ${open ? 'open' : ''}><summary>${head}</summary><pre>${esc(String(body).slice(-6000))}</pre></details>`;
+  if (d.type === 'command_execution') return pre(`<code>$ ${esc(cut(shortCmd(d.command), 160))}</code> <span class="muted">${d.status === 'in_progress' ? '…' : 'exit ' + d.exit_code}</span>`, shortCmd(d.command) + '\n\n' + (d.aggregated_output || ''));
+  if (d.type === 'file_change') return `<div class="live-file">✎ ${(d.changes || []).map(c => esc(c.kind + ' ' + c.path)).join('<br>')}</div>`;
+  if (d.type === 'agent_message') return `<div class="chat-bubble">${esc(cut(d.text, 3000))}</div>`;
+  if (d.type === 'tool_result') return pre(`<span class="muted">↳ output${d.is_error ? ' (error)' : ''}</span>`, d.output);
+  if (d.name) return pre(`<code>${esc(d.name)}</code> <span class="muted">${esc(cut(JSON.stringify(d.input || {}), 120))}</span>`, JSON.stringify(d.input || {}, null, 2));
+  return pre(`<code>${esc(cut(e.summary, 160))}</code>`, JSON.stringify(d, null, 2));
+}
+// Giữ trạng thái mở/đóng và vị trí cuộn khi cập nhật live.
+function refreshSlotLive() {
+  const el = $('slot-live'), log = el.querySelector('.live-log'), atEnd = !log || log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  const opened = new Set([...el.querySelectorAll('details[open]')].map(x => x.dataset.seq)), top = log?.scrollTop;
+  el.innerHTML = slotLive(slot.current);
+  el.querySelectorAll('details').forEach(x => { if (opened.size) x.open = opened.has(x.dataset.seq); });
+  const nlog = el.querySelector('.live-log'); if (nlog) nlog.scrollTop = atEnd ? nlog.scrollHeight : top;
 }
 function openSlot(kind, current) {
   slot = { kind, current };
-  $('slot-live').innerHTML = slotLive(current);
+  $('slot-live').innerHTML = slotLive(current); const lg = $('slot-live').querySelector('.live-log'); if (lg) lg.scrollTop = lg.scrollHeight;
   $('slot-title').textContent = t(current || kind !== 'builder' ? 'ui.slot.title' : 'ui.slot.addBuilderTitle', { role: roleLabel(kind) });
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
     const h = agentHealth(a);
@@ -433,18 +464,26 @@ async function saveSlot() {
 function drawFlow() {
   const job = state.jobs.find(j => j.id === selected), r = job?.roster || state.roster;
   const byId = Object.fromEntries(state.agents.map(a => [a.id, a]));
-  const builders = r.builders.filter(id => byId[id]), rowH = 68, top = 34;
-  const H = Math.max(140, builders.length * rowH + 20), cy = top + H / 2, W = 1260, nodes = {};
+  const graph = !!job?.tasks?.some(x => x.kind === 'review'), gtasks = graph ? job.tasks : [];
+  const depsOf = (x, i) => Array.isArray(x.dependsOn) ? x.dependsOn : i ? [i - 1] : [];
+  // Task sửa tự động nằm cuối danh sách nhưng chạy trước node review của nó → tính độ sâu theo phụ thuộc, không theo chỉ số.
+  const level = [], lv = (i, seen = new Set()) => level[i] ?? (seen.has(i) ? 0 : (seen.add(i), level[i] = depsOf(gtasks[i], i).filter(d => gtasks[d]).reduce((m, d) => Math.max(m, lv(d, seen) + 1), 0)));
+  gtasks.forEach((x, i) => lv(i));
+  const cols = graph ? Math.max(...level) + 1 : 1, colW = 190, shift = (cols - 1) * colW;
+  const perCol = Array.from({ length: cols }, (_, c) => level.filter(l => l === c).length);
+  const builders = graph ? [] : r.builders.filter(id => byId[id]), rowH = 68, top = 34;
+  const H = Math.max(140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, W = 1260 + shift, nodes = {};
   const place = (key, x, y, w = 172) => nodes[key] = { x, y, w };
   place('user', 10, cy, 90);
   place('manager', 140, cy, 172);
   builders.forEach((id, i) => place('b:' + id, 365, cy + (i - (builders.length - 1) / 2) * rowH, 172));
-  place('tests', 585, cy, 96);
-  place('reviewer', 730, cy, 172);
-  place('verifier', 945, cy, 172);
-  place('merge', 1155, cy, 92);
+  { const seen = Array(cols).fill(0); gtasks.forEach((x, i) => { const c = level[i], k = seen[c]++; place('t:' + i, 365 + c * colW, cy + (k - (perCol[c] - 1) / 2) * rowH, 172); }); }
+  place('tests', 585 + shift, cy, 96);
+  place('reviewer', 730 + shift, cy, 172);
+  place('verifier', 945 + shift, cy, 172);
+  place('merge', 1155 + shift, cy, 92);
   const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
-  const runs = runningOf(job), live = new Set(runs.map(nodeOfRun));
+  const runs = runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
   const active = new Set(job?.status === 'running' ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
   const edge = (a, b, cls, label = '') => {
     const A = nodes[a], B = nodes[b]; if (!A || !B) return '';
@@ -460,22 +499,30 @@ function drawFlow() {
     const n = nodes[key], a = agentId && byId[agentId];
     const h = a ? agentHealth(a) : null;
     const cls = [
-      (live.has(key) || a?.state === 'working') && 'working',
+      (job ? live.has(key) : a?.state === 'working') && 'working',
+      job && !live.has(key) && a?.state === 'working' && 'elsewhere',
       filter && filter === agentId && 'filtered',
       agentId === null && 'missing',
       a && !a.enabled && 'disabled',
       h && `health-${h.cls}`
     ].filter(Boolean).join(' ');
     const healthDot = h ? `<circle cx="${n.w - 12}" cy="14" r="4.5" class="flow-dot ${h.cls}"><title>${esc(h.title)}</title></circle>` : '';
-    const tip = a ? `${a.label} · ${rolesText(a.id)}\n${t('ui.health.title')}: ${h ? `${h.label} (${h.rem != null ? h.rem + '% quota' : '—'})` : '—'}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}` : title;
+    const tip = a ? `${a.label} · ${rolesText(a.id)}\n${t('ui.health.title')}: ${h ? `${h.label} (${h.rem != null ? h.rem + '% quota' : '—'})` : '—'}${a.speed?.samples ? `\n${t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall, n: a.speed.samples })}` : ''}\n${a.provider} · ${a.model || t('ui.flow.defaultModel')} · ${tierLabel(a.tier)}${a.enabled ? '' : ' · ' + t('ui.flow.disabled')}${job && !live.has(key) && a.state === 'working' ? '\n' + t('ui.flow.busyElsewhere') : ''}` : title;
     const titleW = n.w - (h ? 24 : 16);
     const subW = n.w - 16;
     const titleEl = svgText({ text: title, x: 10, y: 19, cls: 't', maxW: titleW, baseSize: 12, minSize: 9.5 });
     const subEl = svgText({ text: subtitle, x: 10, y: 37, cls: 's', maxW: subW, baseSize: 10.5, minSize: 7.8 });
     return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}</title><rect width="${n.w}" height="48" rx="8"/><rect class="ring" width="${n.w}" height="48" rx="8" pathLength="100" style="animation-delay:-${(Date.now() % 2000) / 1000}s"/>${healthDot}${titleEl}${subEl}</g>`;
   };
-  const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step);
+  const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step) || ['review', 'verify', 'final'].includes(step) && !!job?.flow?.requested?.steps && !job.flow.requested.steps.includes(step) && !job.flow.overrides?.some(o => o.step === step); // Manager đã bỏ (chưa bị ép lại)
   let edges = edge('user', 'manager', 'used');
+  // Đồ thị: manager → task gốc, task → task phụ thuộc, task cuối (không ai phụ thuộc) → tests.
+  gtasks.forEach((x, i) => {
+    const deps = depsOf(x, i).filter(d => gtasks[d]), on = live.has('t:' + i) ? ' active' : '';
+    if (!deps.length) edges += edge('manager', 't:' + i, 'used' + on);
+    for (const d of deps) edges += edge('t:' + d, 't:' + i, 'used' + on);
+    if (!gtasks.some((y, j) => depsOf(y, j).includes(i))) edges += edge('t:' + i, 'tests', 'used');
+  });
   for (const id of builders) {
     const tasks = tasksOf(id), used = !job || tasks.length > 0;
     edges += edge('manager', 'b:' + id, used ? 'used' : 'idle', tasks.map(x => `T${x.n}·k${x.difficulty ?? '?'}${x.done ? '✓' : ''}`).join(' '));
@@ -483,11 +530,16 @@ function drawFlow() {
   }
   edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
   edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active.has('rework') ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round }) : t('ui.flow.rework'))}</text>`;
+  // Người review/verify thực tế của job: đã chạy → Manager chọn (flow) → mặc định đội. Bước bị controller ép thêm ghi "bị ép".
+  const rvId = job?.checkers?.reviewer || job?.flow?.reviewer || r.reviewer, vfId = job?.checkers?.verifier || job?.flow?.verifier || r.verifier;
+  const forced = step => { const o = job?.flow?.overrides?.find(x => x.step === step); return o ? t('ui.flow.forced', { why: o.reasons.join('; ') }) : ''; };
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
-    + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', r.reviewer), skipped('review') ? t('ui.flow.skipped') : sub(r.reviewer), r.reviewer || null, 'reviewer')
-    + box('verifier', named('Verify', r.verifier), skipped('verify') ? t('ui.flow.skipped') : sub(r.verifier), r.verifier || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
+    + gtasks.map((x, i) => { const who = x.ranBy || x.agent; return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review' : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
+      x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40), who || null, x.kind === 'review' ? 'reviewer' : 'builder'); }).join('')
+    + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', rvId), skipped('review') ? t('ui.flow.skipped') : forced('review') || sub(rvId), rvId || null, 'reviewer')
+    + box('verifier', named('Verify', vfId), skipped('verify') ? t('ui.flow.skipped') : forced('verify') || sub(vfId), vfId || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
   $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
   const inRoster = new Set([r.manager, r.reviewer, r.verifier, ...r.builders]);
   const bench = state.agents.filter(a => !inRoster.has(a.id));
@@ -503,7 +555,7 @@ function drawInspector() {
   if (!job) { $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span></div>`; return; }
   const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
   const research = job.kind === 'research';
-  const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), job.round], [t('ui.inspector.started'), clock(job.createdAt)]];
+  const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), job.round], [t('ui.inspector.started'), clock(job.createdAt)], ...(job.metrics ? [[t('ui.inspector.debate'), Object.entries(job.metrics).map(([k, v]) => t('ui.metric.' + k) + ' ' + v).join(' · ')]] : []), ...(job.flow?.requested?.steps ? [[t('ui.inspector.flow'), job.flow.requested.steps.join(' → ') || '—']] : [])];
   // Tiến độ: bước đang chạy + ước tính dựa trên thời gian trung bình các bước agent trước đó.
   const progress = (() => {
     if (!['running', 'queued'].includes(job.status)) return '';
@@ -917,6 +969,7 @@ function selectSessionJob() {
 }
 $('session-project').onchange = () => { curProject = $('session-project').value; curSession = ''; store.set('project', curProject); drawSessions(); selectSessionJob(); };
 $('session-select').onchange = () => { curSession = $('session-select').value; store.set('session', curSession); selectSessionJob(); };
+$('session-tab').onclick = () => window.open(location.pathname + '#' + new URLSearchParams({ p: curProject }), '_blank');
 $('session-new').onclick = () => attempt(async () => { const name = prompt(t('ui.session.newPrompt')); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); selected = undefined; events = []; await refresh(); });
 $('session-rename').onclick = () => attempt(async () => { if (!curSession) return; const name = prompt(t('ui.session.renamePrompt'), state.sessions.find(x => x.id === curSession)?.name || ''); if (name) { await api(`sessions/${curSession}/rename`, { name }); await refresh(); } });
 $('close-slot').onclick = () => $('slot-dialog').close();
