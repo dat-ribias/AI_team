@@ -47,3 +47,6 @@ $RECYCLE.BIN/
 
 # Local overrides
 *.local.json
+
+# Machine-specific config (copy from team.config.example.json)
+team.config.json

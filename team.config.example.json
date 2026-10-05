@@ -1,21 +1,22 @@
 {
   "demo": false,
   "port": 3333,
-  "dataDir": "D:\\ai_team\\.team\\state",
+  "dataDir": "D:\\<TEAM_DIR>\\.team\\state",
   "maxRamPercent": 85,
   "maxCpuPercent": 90,
   "minRemainingPercent": 15,
   "maxReworkRounds": 3,
+  "codexWindowsSandbox": "unelevated",
   "agents": [
     {
       "id": "codex-1",
       "label": "Nahin-C",
       "role": "Builder",
       "provider": "codex",
-      "home": "C:\\Users\\admin\\.ai-team\\accounts\\codex-1",
+      "home": "C:\\Users\\<USER>\\.ai-team\\accounts\\codex-1",
       "command": [
         "C:\\Program Files\\nodejs\\node.exe",
-        "C:\\Users\\admin\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+        "C:\\Users\\<USER>\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
       ],
       "enabled": true,
       "model": "gpt-6.1-sol",
@@ -28,10 +29,10 @@
       "label": "Lobao-C",
       "role": "Builder / Verifier",
       "provider": "codex",
-      "home": "C:\\Users\\admin\\.ai-team\\accounts\\codex-2",
+      "home": "C:\\Users\\<USER>\\.ai-team\\accounts\\codex-2",
       "command": [
         "C:\\Program Files\\nodejs\\node.exe",
-        "C:\\Users\\admin\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+        "C:\\Users\\<USER>\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
       ],
       "enabled": true,
       "model": "gpt-6.1-sol",
@@ -44,10 +45,10 @@
       "label": "Ymimi-C",
       "role": "Builder",
       "provider": "codex",
-      "home": "C:\\Users\\admin\\.ai-team\\accounts\\codex-3",
+      "home": "C:\\Users\\<USER>\\.ai-team\\accounts\\codex-3",
       "command": [
         "C:\\Program Files\\nodejs\\node.exe",
-        "C:\\Users\\admin\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
+        "C:\\Users\\<USER>\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js"
       ],
       "enabled": true,
       "model": "gpt-5.6-sol",
@@ -61,7 +62,7 @@
       "role": "Reviewer",
       "provider": "antigravity",
       "command": [
-        "C:\\Users\\admin\\AppData\\Local\\agy\\bin\\agy.exe"
+        "C:\\Users\\<USER>\\AppData\\Local\\agy\\bin\\agy.exe"
       ],
       "enabled": true,
       "quotaPrintSupported": true,
@@ -70,7 +71,7 @@
       "kind": "reviewer"
     },
     {
-      "id": "claude-86a9ac9c",
+      "id": "claude-1",
       "label": "Mailue-CL",
       "kind": "manager",
       "role": "Manager",
@@ -79,17 +80,17 @@
         "claude"
       ],
       "enabled": true,
-      "home": "C:\\Users\\admin\\.ai-team\\accounts\\claude-86a9ac9c",
+      "home": "C:\\Users\\<USER>\\.ai-team\\accounts\\claude-1",
       "tier": "strong",
       "model": "opus",
       "effort": "medium",
-      "systemPrompt": "tôi hỏi tiếng nào thì khi báo cáo kết quả cuối cùng hoặc trả lười tôi bạn phải trả lười bằng thứ tiếng ấy. \n \nưu tiên những member có sức mạnh trung bình đổ lên, mem sức yếu chỉ ra lệnh khi đã hết quota mà thôi"
+      "systemPrompt": ""
     }
   ],
   "projects": [
     {
       "id": "work-team",
-      "path": "D:\\ai_team",
+      "path": "D:\\<TEAM_DIR>",
       "tests": [
         [
           "node",
@@ -102,7 +103,7 @@
     }
   ],
   "pipeline": {
-    "manager": "claude-86a9ac9c",
+    "manager": "claude-1",
     "reviewer": "gemini",
     "verifier": "codex-2",
     "builders": [
