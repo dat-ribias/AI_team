@@ -310,6 +310,25 @@ test('Gemini/Antigravity get the prompt via a file (Windows command-line limit) 
   assert(ready.durations.length >= 4); assert.equal(ready.current, null);
 });
 
+test('review/verify run the project checks themselves in a detached worktree', async t => {
+  const f = await fixture(); f.config.demo = false;
+  f.config.agents = f.config.agents.map(a => ({ ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
+  const seen = [];
+  const team = new Team(f.config, f.data, { runAgent: (agent, task, prompt, opts) => {
+    seen.push({ stage: task.stage, checks: task.checks, worktree: task.worktree, prompt });
+    if (task.stage === 'review') writeFileSync(join(task.worktree, 'coverage.tmp'), 'x'); // check sinh file tạm: không được chặn
+    return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
+  }, readQuota: async () => ({ buckets: [] }) });
+  t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const ready = await settle(team, job.id, 'ready');
+  const review = seen.find(s => s.stage === 'review'), impl = seen.find(s => s.stage === 'implement');
+  assert.deepEqual(review.checks, f.config.projects[0].tests);
+  assert.notEqual(review.worktree, ready.worktree);
+  assert.match(review.prompt, /Run the commands in "checks" yourself/);
+  assert.deepEqual(impl.checks, []);
+});
+
 test('per-member speed and token use are measured and shown to the lead', async t => {
   const f = await fixture();
   const { runAgent } = await import('../src/providers.js');

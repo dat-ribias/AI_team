@@ -171,9 +171,11 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   // Tìm kiếm/đọc web: chỉ khi project bật network, hoặc việc nghiên cứu (tắt bằng "researchWeb": false).
   const web = task.network === true || task.kind === 'research' && task.researchWeb !== false;
   const args = [];
+  // Lệnh check reviewer/verifier được phép chạy (= lệnh tests của project), dạng chuỗi.
+  const checks = (task.checks || []).map(c => c.join(' '));
   if (agent.provider === 'codex') {
     if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap", { 0: agent.id }));
-    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', task.stage === 'implement' ? 'workspace-write' : 'read-only', '-C', task.worktree);
+    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', task.stage === 'implement' || checks.length ? 'workspace-write' : 'read-only', '-C', task.worktree);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
     // Sandbox Codex: chỉ ghi trong worktree; mạng tắt trừ khi project bật "network": true.
@@ -187,7 +189,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     args.push('-');
   } else if (agent.provider === 'claude') {
     args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
-    if (task.stage !== 'implement') args.push('--tools', `Read,Glob,Grep,Bash${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${web ? ',WebSearch,WebFetch' : ''}`);
+    if (task.stage !== 'implement') args.push('--tools', `Read,Glob,Grep,Bash${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${checks.map(c => `,Bash(${c}),Bash(${c} *)`).join('')}${web ? ',WebSearch,WebFetch' : ''}`);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
     // MCP bật riêng cho member này; tên công cụ dạng mcp__<server> được cho phép không cần hỏi.
@@ -199,7 +201,8 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   } else {
     args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);
-    if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : 'plan');
+    if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
+    // Antigravity (agy) không có cờ quyền theo lượt: lệnh check phải được cho phép trong ~/.gemini/antigravity-cli/settings.json (permissions.allow).
   }
   const exec = () => run(resolveCommand(agent), args, {
     cwd: task.worktree, env: childEnv(agent), input: ['codex', 'claude'].includes(agent.provider) ? prompt : '', signal,
