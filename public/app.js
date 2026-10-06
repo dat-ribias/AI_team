@@ -270,6 +270,10 @@ function drawJobsList() {
   `).join('') : `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`)
   + (hasMore ? `<button type="button" class="sidebar-more-jobs" id="sidebar-more-jobs"><span>⤢</span> ${esc(t('ui.jobs.viewAll', { n: sessionJobs.length }))}</button>` : '');
 
+  // Việc đang chạy ở dự án/phiên khác: hiện lối tắt để khỏi nhìn sơ đồ sáng mà khung chat trống.
+  const away = state.jobs.filter(j => ['running', 'queued', 'waiting'].includes(j.status) && !sessionJobs.includes(j));
+  if (away.length) $('job-list').insertAdjacentHTML('beforeend', `<p class="muted away-title">${esc(t('ui.nav.runningElsewhere'))}</p>` + away.slice(0, 4).map(j => `<button class="job-button away ${runningOf(j).length ? 'working' : ''}" data-away="${esc(j.id)}" title="${esc(j.goal)}"><span class="job-dot-status ${j.status}"></span><div class="job-button-content"><strong>${esc(j.goal)}</strong><small>${esc(j.project)} · ${esc(state.sessions.find(x => x.id === j.sessionId)?.name || '')} · #${esc(j.id.slice(0, 8))}</small></div></button>`).join(''));
+  document.querySelectorAll('[data-away]').forEach(b => b.onclick = () => { const j = state.jobs.find(x => x.id === b.dataset.away); if (!j) return; curProject = j.project; curSession = j.sessionId || ''; selected = j.id; events = []; filter = null; store.set('project', curProject); store.set('session', curSession); drawSessions(); attempt(refresh); });
   document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => attempt(async () => {
     selected = b.dataset.job;
     events = [];

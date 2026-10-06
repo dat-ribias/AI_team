@@ -692,5 +692,6 @@
   "ui.mem.backupNow": "Back up now",
   "ui.mem.export": "Export",
   "ui.mem.exportTitle": "Download this job as Markdown (goal, plan, conversation, results, diff)",
-  "ui.mem.saveSummary": "Save summary"
+  "ui.mem.saveSummary": "Save summary",
+  "ui.nav.runningElsewhere": "Running in other projects/sessions:"
 }

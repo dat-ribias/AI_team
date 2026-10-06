@@ -183,3 +183,7 @@ Bộ nhớ được đánh dấu là dữ liệu (không phải chỉ dẫn) và
 
 - **Sao lưu**: `VACUUM INTO` vào `backupDir` (mặc định `<dataDir>/backups`), tự động mỗi ngày và trước khi xóa việc/phiên, giữ `backupKeep` bản (14). Tắt bằng `"backup": false`. Khôi phục: dừng server, chép bản sao lưu đè lên `team.sqlite`.
 - **Xuất**: nút "Xuất" ở việc → file Markdown (mục tiêu, kế hoạch, báo cáo, trao đổi, diff).
+
+### Codex trên Windows không sandbox (`"codexWindowsSandbox": "none"`)
+
+Chế độ `elevated` bắt Codex chạy `codex-windows-sandbox-setup` (UAC) mỗi khi trạng thái sandbox lệch — với nhiều CODEX_HOME trên cùng máy thì hỏi liên tục (lỗi đang mở của Codex). `"none"` chạy Codex với `--sandbox danger-full-access`: không còn UAC, nhưng Codex có toàn quyền của user Windows (ghi ngoài worktree, có mạng). Controller vẫn kiểm tra worktree/repo liên kết sau mỗi lượt và mọi thay đổi vẫn phải qua test/review/verify và bạn duyệt merge. Quay lại: đặt `"elevated"`.

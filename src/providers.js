@@ -184,14 +184,16 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   const checks = (task.checks || []).map(c => c.join(' '));
   if (agent.provider === 'codex') {
     if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap", { 0: agent.id }));
-    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', task.stage === 'implement' || checks.length ? 'workspace-write' : 'read-only', '-C', task.worktree);
+    // "none" (Windows): bỏ sandbox của Codex → không còn cửa sổ UAC codex-windows-sandbox-setup, đổi lại Codex có toàn quyền của user
+    // (đọc/ghi mọi nơi, có mạng). Chỉ còn ràng buộc bằng prompt + kiểm tra worktree của controller. Bật bằng "codexWindowsSandbox": "none".
+    const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated', noSandbox = process.platform === 'win32' && winSandbox === 'none';
+    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', noSandbox ? 'danger-full-access' : task.stage === 'implement' || checks.length ? 'workspace-write' : 'read-only', '-C', task.worktree);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
     // Sandbox Codex: chỉ ghi trong worktree; mạng tắt trừ khi project bật "network": true.
     args.push('-c', `sandbox_workspace_write.network_access=${task.network === true}`, '-c', `features.web_search=${web}`);
     // Windows: không bật sandbox thì Codex (approval=never) từ chối mọi lệnh, kể cả lệnh chỉ đọc. "unelevated" không cần quyền admin.
-    const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated';
-    if (process.platform === 'win32' && winSandbox !== 'off') args.push('-c', `windows.sandbox="${winSandbox}"`);
+    if (process.platform === 'win32' && !['off', 'none'].includes(winSandbox)) args.push('-c', `windows.sandbox="${winSandbox}"`);
     // MCP bật riêng cho member này (TOML inline qua -c).
     const toml = v => typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(toml).join(',')}]` : `{${Object.entries(v).map(([k, x]) => `${JSON.stringify(k)}=${toml(x)}`).join(',')}}`;
     // Repo liên kết được cấp quyền sửa: thêm làm thư mục ghi được của sandbox.

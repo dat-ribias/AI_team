@@ -692,5 +692,6 @@
   "ui.mem.backupNow": "今すぐバックアップ",
   "ui.mem.export": "書き出し",
   "ui.mem.exportTitle": "このジョブを Markdown で保存（目標・計画・やり取り・結果・diff）",
-  "ui.mem.saveSummary": "要約を保存"
+  "ui.mem.saveSummary": "要約を保存",
+  "ui.nav.runningElsewhere": "他のプロジェクト/セッションで実行中:"
 }

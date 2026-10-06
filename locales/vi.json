@@ -692,5 +692,6 @@
   "ui.mem.backupNow": "Sao lưu ngay",
   "ui.mem.export": "Xuất",
   "ui.mem.exportTitle": "Tải việc này về file Markdown (mục tiêu, kế hoạch, trao đổi, kết quả, diff)",
-  "ui.mem.saveSummary": "Lưu tóm tắt"
+  "ui.mem.saveSummary": "Lưu tóm tắt",
+  "ui.nav.runningElsewhere": "Đang chạy ở dự án/phiên khác:"
 }
