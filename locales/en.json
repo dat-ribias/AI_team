@@ -50,7 +50,7 @@
   "ui.flow.notChosen": "not set",
   "ui.flow.defaultModel": "default",
   "ui.flow.disabled": "disabled",
-  "ui.flow.reworkRound": "rework · round {n}",
+  "ui.flow.reworkRound": "rework · round {n}/{max}",
   "ui.flow.rework": "changes requested → re-plan",
   "ui.flow.goal": "goal",
   "ui.flow.testsBy": "run by controller",
@@ -646,5 +646,14 @@
   "ui.ev.FIX_TASK": "Automatic fix task",
   "ui.flow.fix": "Fix",
   "ui.flow.attempts": "fix #{n}",
-  "ui.flow.running": "working…"
+  "ui.flow.running": "working…",
+  "ui.inspector.delete": "Delete",
+  "ui.inspector.confirmDelete": "Permanently delete this job: its worktree, unmerged branch and all logs. Continue?",
+  "srv.team.delete_not_finished": "This job is running: pause or cancel it first.",
+  "ui.session.confirmDelete": "Delete this session and its {n} job(s) (worktrees, unmerged branches, logs)? This cannot be undone.",
+  "srv.team.token_budget": "Stopped: this job used {0} tokens, over the {1} budget (maxTokensPerJob). Review it, then Resume to continue.",
+  "ui.inspector.usage": "AI usage",
+  "ui.inspector.usageText": "{calls} calls · {tokens}{limit} tokens",
+  "srv.team.access_busy": "The Leader is already proposing permissions for this project.",
+  "srv.accounts.access_member": "Unknown member in permissions: {0}"
 }

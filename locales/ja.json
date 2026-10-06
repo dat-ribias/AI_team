@@ -50,7 +50,7 @@
   "ui.flow.notChosen": "未設定",
   "ui.flow.defaultModel": "既定",
   "ui.flow.disabled": "停止中",
-  "ui.flow.reworkRound": "修正・{n} 回目",
+  "ui.flow.reworkRound": "修正 · ラウンド {n}/{max}",
   "ui.flow.rework": "修正依頼 → 再計画",
   "ui.flow.goal": "目標",
   "ui.flow.testsBy": "コントローラーが実行",
@@ -646,5 +646,14 @@
   "ui.ev.FIX_TASK": "自動修正タスク",
   "ui.flow.fix": "修正",
   "ui.flow.attempts": "修正{n}回目",
-  "ui.flow.running": "作業中…"
+  "ui.flow.running": "作業中…",
+  "ui.inspector.delete": "削除",
+  "ui.inspector.confirmDelete": "このジョブを完全に削除します（worktree・未マージのブランチ・ログ）。続行しますか？",
+  "srv.team.delete_not_finished": "実行中のジョブです。先に一時停止かキャンセルしてください。",
+  "ui.session.confirmDelete": "このセッションと {n} 件のジョブ（worktree・未マージのブランチ・ログ）を削除しますか？元に戻せません。",
+  "srv.team.token_budget": "停止: このジョブは {0} トークンを使い、予算 {1}（maxTokensPerJob）を超えました。確認後、再開してください。",
+  "ui.inspector.usage": "AI 使用量",
+  "ui.inspector.usageText": "{calls} 回 · {tokens}{limit} トークン",
+  "srv.team.access_busy": "リーダーがこのプロジェクトの権限を提案中です。",
+  "srv.accounts.access_member": "権限に存在しないメンバーがあります: {0}"
 }

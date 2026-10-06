@@ -92,10 +92,17 @@ Ask before guessing: if the goal is ambiguous, contradictory, or missing a decis
   challenge: 'Challenge the PLAN before anyone builds it: wrong assumptions, missing requirements, steps that cannot be tested, risky ordering, or a clearly simpler approach. Return at most 3 objections, most important first. Each names the plan statement it disputes (claim), when it fails (failsWhen), your evidence, a concrete check, and impact. objections: [] ("no significant issue") is a valid answer; never invent problems just to disagree.',
   implement: 'Do only the assigned task. Keep the diff minimal and consistent with the existing code style. Start from the given taskContext; read beyond it only when needed and list what you had to look up in contextGaps. If the task is beyond what you can do reliably, return status=blocked with the reason instead of guessing.',
   review: 'For a research job (kind=research): check that each conclusion follows from the cited evidence, flag unsupported or missing points, and request changes when evidence is weak. For code: review independently: correctness, edge cases, security, data loss, whether tests really cover the change, and scope creep. Approve only if you would merge it yourself; otherwise changes_requested with concrete findings (file, problem, fix). At most 5 findings, most important first; "no significant issue" is a valid result.',
-  verify: 'Verify against the original goal, not the plan: every requirement met, review findings resolved, test evidence matches this exact revision. Approve only with evidence. If "disputes" are listed (a builder rejected a finding), settle each one by running a check or reading the code and report rulings: the evidence decides, not who argued better.',
+  verify: 'Verify against the original goal, not the plan: every requirement met, review findings resolved, test evidence matches this exact revision. Approve only with evidence. If "disputes" are listed (a builder rejected a finding), settle each one by running a check or reading the code and report rulings: the evidence decides, not who argued better. Judge the change, not the paperwork: if checks you ran yourself pass, missing or thin evidence in another member\'s report is not a finding and never a reason for status=blocked.',
   final: 'For code: summarise for the human who decides the merge: what changed, risk, tests, open limitations. For research: write the final answer for the human: the conclusion, the reasoning, evidence/sources, confidence and open questions. Keep the summary to about 200-400 words; details stay in the reports.',
 };
 
+// Quyền theo project: thư mục ngoài repo (chỉ đọc) + Internet, cấp riêng từng member ('*' = mọi member).
+// Cấu hình cũ (readDirs, network: true) được hiểu là cấp cho mọi member.
+export function accessOf(p) {
+  if (p.access) return { folders: (p.access.folders || []).map(f => ({ path: f.path, members: f.members || ['*'], ...(f.why ? { why: f.why } : {}) })), network: p.access.network || [] };
+  return { folders: (p.readDirs || []).map(path => ({ path, members: ['*'] })), network: p.network === true ? ['*'] : [] };
+}
+export const granted = (list, id) => list.includes('*') || list.includes(id);
 export function roster(config) {
   const agents = config.agents, pipeline = config.pipeline || {};
   const find = (kind, fallback) => agents.find(a => a.kind === kind)?.id || agents.find(a => a.id === fallback)?.id;
@@ -125,6 +132,10 @@ export function validateConfig(config) {
     if (!p.id || !p.path || !Array.isArray(p.tests)) throw new Error(msg("srv.team.project_can_id_path_tests"));
     for (const test of p.tests) if (!Array.isArray(test) || !test.length || test.some(v => typeof v !== 'string')) throw new Error(msg("srv.team.test_phai_la_mang_executable_arguments"));
     if (p.readDirs !== undefined && (!Array.isArray(p.readDirs) || p.readDirs.some(d => typeof d !== 'string'))) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: p.id }));
+    if (p.access !== undefined) {
+      const ok = l => Array.isArray(l) && l.every(x => typeof x === 'string');
+      if (!Array.isArray(p.access.folders || []) || (p.access.folders || []).some(f => typeof f?.path !== 'string' || !ok(f.members || [])) || !ok(p.access.network || [])) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: p.id }));
+    }
   }
   return config;
 }
@@ -258,6 +269,10 @@ export class Team extends EventEmitter {
     const pending = job.stage === 'implement' ? job.tasks.filter((t, i) => !t.done && !(job.running || []).some(r => r.task === i)).reduce((s, t) => s + (t.estMinutes || 10), 0) : 0;
     return Math.round(Math.max(0, ...running) + pending);
   }
+  accessFor(projectId, agentId) {
+    const a = accessOf(this.project(projectId));
+    return { readDirs: a.folders.filter(f => granted(f.members, agentId)).map(f => f.path), network: granted(a.network, agentId) };
+  }
   project(id) { const p = this.config.projects.find(p => p.id === id); if (!p) throw new Error(msg("srv.team.project_chua_dang_ky")); return p; }
   agent(id) { const a = this.config.agents.find(a => a.id === id); if (!a) throw new Error(msg("srv.team.agent_khong_ton_tai")); return a; }
   // Phiên chat theo dự án: mỗi công việc thuộc một phiên; notes để dành cho quản lý memory sau này.
@@ -271,6 +286,14 @@ export class Team extends EventEmitter {
   renameSession(id, name) {
     const n = String(name || '').trim().slice(0, 80); if (!n) throw new Error(msg("srv.team.session_name"));
     if (!this.db.prepare('UPDATE sessions SET name=? WHERE id=?').run(n, id).changes) throw new Error(msg("srv.team.session_missing")); this.emit('change'); return { id, name: n };
+  }
+  // Xóa phiên kèm mọi việc trong phiên; có việc đang chạy thì từ chối (dừng/hủy trước).
+  async deleteSession(id) {
+    if (!this.db.prepare('SELECT 1 FROM sessions WHERE id=?').get(id)) throw new Error(msg("srv.team.session_missing"));
+    const jobs = this.jobs().filter(j => j.sessionId === id);
+    if (jobs.some(j => ['running', 'queued', 'merging'].includes(j.status) || this.runs.has(j.id))) throw new Error(msg("srv.team.delete_not_finished"));
+    for (const j of jobs) await this.control(j.id, 'delete');
+    this.db.prepare('DELETE FROM sessions WHERE id=?').run(id); this.emit('change'); return { id, deleted: true, jobs: jobs.length };
   }
   sessionFor(project, sessionId) {
     const s = sessionId && this.db.prepare('SELECT id, project FROM sessions WHERE id=?').get(sessionId);
@@ -301,10 +324,11 @@ export class Team extends EventEmitter {
   }
   state() {
     const busy = this.busyAgents(), cap = this.capacity(), used = this.runs.size + this.extra;
-    return { demo: !!this.config.demo, roster: roster(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, eta: this.eta(j) })), projects: this.config.projects.map(p => ({ id: p.id, path: p.path, tests: p.tests, network: p.network === true, readDirs: p.readDirs || [] })),
+    return { demo: !!this.config.demo, roster: roster(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, eta: this.eta(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
+      limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, slots: used + cap.start, active: used, waitingReason: this.waitingReason },
     };
   }
@@ -338,6 +362,43 @@ export class Team extends EventEmitter {
     this.event(id, 'controller', 'team', 'ROUTE', msg(route.fast ? "srv.team.route_fast" : "srv.team.route_full", { 0: route.reason }), route); this.kick(); return job;
   }
   // .ai-team/ (file đính kèm, prompt) nằm trong worktree nhưng git luôn bỏ qua.
+  // Leader đề xuất quyền cho project (lần đầu khỏi phải tự set từng thư mục). Chỉ trả bản nháp; bạn xem rồi bấm Lưu.
+  async proposeAccess(projectId, candidates = []) {
+    const p = this.project(projectId), members = roster(this.config), manager = members.manager, key = `access:${projectId}`;
+    if (this.runs.has(key)) throw new Error(msg("srv.team.access_busy"));
+    const agent = this.agent(manager); this.assertAvailable(agent);
+    const current = accessOf(p), others = this.config.projects.filter(x => x.id !== projectId).map(x => ({ id: x.id, path: x.path }));
+    const look = [...new Set([...current.folders.map(f => f.path), ...others.map(x => x.path), ...candidates.map(String)])].filter(d => { try { return statSync(d).isDirectory(); } catch { return false; } });
+    const roles = id => ['manager', 'reviewer', 'verifier'].filter(r => members[r] === id).concat(members.builders.includes(id) ? ['builder'] : []);
+    const team = this.config.agents.filter(a => a.enabled !== false).map(a => ({ id: a.id, label: a.label, provider: a.provider, roles: roles(a.id) }));
+    const slotRun = { job: key, agents: new Set(), abort: new AbortController() }; this.runs.set(key, slotRun);
+    const wt = join(this.dataDir, 'worktrees', `access-${projectId}-${randomUUID().slice(0, 8)}`);
+    try {
+      await git(p.path, ['worktree', 'add', '--detach', wt, 'HEAD']);
+      const slot = await this.acquire(slotRun, manager, slotRun.abort.signal);
+      const prompt = `You are ${manager} (${agent.label}), the Leader of AI Team Control Room. Propose folder and Internet permissions for project "${projectId}" (repository: your current directory, a read-only snapshot). Do not edit anything.
+Principle: least privilege per member. A folder outside the repository is granted READ-ONLY, and only to members whose role needs it (e.g. builders that implement against a spec, the reviewer/verifier that check against it, you as Leader to plan). Use "*" only when every member needs it. Never propose a drive root, a home directory, credential/secret folders (.ssh, .aws, .codex, .claude, AppData, auth files) or folders unrelated to the project. Internet: only members that really need it (package docs, web research); empty list when not needed.
+Inspect the candidate folders (read them by absolute path) and the repository (README, package files, docs, imports, relative paths) to decide which candidates relate to this project, and suggest other folders you find referenced (e.g. ../shared-lib) if they exist.
+Team: ${JSON.stringify(team)}
+Current permissions: ${JSON.stringify(current)}
+Other registered projects: ${JSON.stringify(others)}
+Candidate folders: ${JSON.stringify(look)}
+Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sentences in the owner's language (${this.config.language || 'vi'})","status":"completed","folders":[{"path":"absolute path","members":["member id or *"],"why":"short reason"}],"network":{"members":["member id or *"],"why":"short reason"},"notes":["risks or things the owner should decide"]}`;
+      let promptFile;
+      if (['antigravity', 'gemini'].includes(agent.provider)) { await this.ensureExclude(wt); mkdirSync(join(wt, '.ai-team'), { recursive: true }); writeFileSync(join(wt, '.ai-team', 'prompt.md'), prompt); promptFile = '.ai-team/prompt.md'; }
+      const r = await this.agentRun(agent, { id: key, project: projectId, goal: 'access proposal', stage: 'plan', kind: 'research', worktree: wt, promptFile, slot, checks: [], network: false, readDirs: look, researchWeb: false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt,
+        { signal: slotRun.abort.signal, onEvent: (type, data) => { if (type === 'RATE_LIMIT') this.observeQuota(manager, data.details); } });
+      const ids = this.config.agents.map(a => a.id), keep = l => (Array.isArray(l) ? l : []).map(String).filter(x => x === '*' || ids.includes(x));
+      // Lọc bản nháp: bỏ thư mục không tồn tại/quá rộng và member không có thật; phần còn lại để bạn duyệt.
+      const folders = (Array.isArray(r.folders) ? r.folders : []).filter(f => { try { const d = resolve(String(f?.path)); return statSync(d).isDirectory() && resolve(d, '..') !== d; } catch { return false; } })
+        .map(f => ({ path: resolve(String(f.path)), members: keep(f.members), why: String(f.why || '').slice(0, 300) })).filter(f => f.members.length).slice(0, 20);
+      return { summary: String(r.summary || ''), draft: { folders, network: keep(r.network?.members) }, networkWhy: String(r.network?.why || ''), notes: (Array.isArray(r.notes) ? r.notes : []).map(String).slice(0, 10) };
+    } finally {
+      slotRun.agents.clear(); this.runs.delete(key);
+      await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
+      this.emit('change'); this.kick();
+    }
+  }
   async ensureExclude(worktree) {
     const exclude = join(resolve(worktree, await git(worktree, ['rev-parse', '--git-common-dir'])), 'info', 'exclude');
     mkdirSync(join(exclude, '..'), { recursive: true });
@@ -421,7 +482,10 @@ export class Team extends EventEmitter {
     const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && members.builders.includes(id) && a.enabled !== false && !this.lowQuota(id) && !busy.has(id); };
     const level = (id, effort = task.effort) => levelOf(this.agent(id), effort);
     const fits = id => usable(id) && level(id) >= task.difficulty;
-    const checker = id => [members.reviewer, members.verifier].includes(id);
+    // Chỉ né người sẽ thật sự review/verify việc này: Manager bỏ bước verify thì verifier rảnh để build.
+    // Nếu cổng rủi ro bật lại verify, checker() lúc đó tự đổi sang người không viết code.
+    const steps = job.flow?.requested?.steps, verifies = !Array.isArray(steps) || steps.includes('verify');
+    const checker = id => id === (job.checkers?.reviewer || members.reviewer) || verifies && id === members.verifier;
     if (fits(task.agent) && !checker(task.agent)) return task.agent;
     const remaining = id => this.remaining(id) ?? 50;
     // Ưu tiên người mạnh nhất còn quota; người yếu nhận việc khi người mạnh bận (xem pickBuilder).
@@ -489,12 +553,16 @@ export class Team extends EventEmitter {
     // Lead chọn mức suy luận theo từng task; chỉ áp dụng mức CLI của member đó hỗ trợ, không sửa cấu hình gốc.
     const agent = effort && effortsOf(base).includes(effort) ? { ...base, effort } : base;
     const members = job.roster || roster(this.config);
+    // Chặn đốt token vô hạn: đếm lượt gọi + token theo việc; vượt ngân sách (maxTokensPerJob) thì dừng, chờ người quyết.
+    const limit = this.config.maxTokensPerJob;
+    if (limit && (job.usage?.tokens || 0) >= limit) throw new Error(msg("srv.team.token_budget", { 0: job.usage.tokens, 1: limit }));
+    job.usage = { calls: (job.usage?.calls || 0) + 1, tokens: job.usage?.tokens || 0 };
     const started = Date.now(); let tokens = 0;
     // Prompt gọn theo vai: mỗi bước chỉ nhận đúng thứ nó cần, không kéo theo cả lịch sử (Git là bộ nhớ chung).
-    const brief = r => ({ agent: r.agent, stage: r.stage, status: r.status, verdict: r.verdict, summary: String(r.summary || '').slice(0, 1500), findings: (r.findings || []).slice(0, 10), ...(r.output ? { output: r.output } : {}), ...(r.sources ? { sources: r.sources.slice(0, 15), conclusion: String(r.conclusion || '').slice(0, 1500) } : {}) });
+    const brief = r => ({ agent: r.agent, stage: r.stage, status: r.status, verdict: r.verdict, summary: String(r.summary || '').slice(0, 1500), findings: (r.findings || []).slice(0, r.sources ? 40 : 10), ...(r.tests ? { tests: String(r.tests).slice(0, 600) } : {}), ...(r.output ? { output: r.output } : {}), ...(r.sources ? { sources: r.sources.slice(0, 15), conclusion: String(r.conclusion || '').slice(0, 1500) } : {}) });
     const lastChecks = job.reports.filter(r => ['review', 'verify', 'test'].includes(r.stage)).slice(-3).map(brief);
     const attachments = job.attachments?.length ? { note: 'Files attached by the human, relative to the worktree. Open them (images too) when relevant.', files: job.attachments } : undefined;
-    const readDirs = this.project(job.project).readDirs || [];
+    const access = this.accessFor(job.project, agentId), readDirs = access.readDirs;
     const readOnlyFolders = readDirs.length ? { note: 'Reference folders outside the repository, granted READ-ONLY by the human. Read and search them by absolute path when useful. Never create, edit, delete or move anything there and never run commands that change them; all changes go in your working directory.', paths: readDirs } : undefined;
     const common = { goal: job.goal, instructions: instruction, kind: job.kind || 'code', rigor: job.rigor || 'standard', messages: job.messages, attachments, readOnlyFolders };
     let scoped;
@@ -502,7 +570,9 @@ export class Team extends EventEmitter {
       .map(j => ({ id: j.id, status: j.status, goal: j.goal.slice(0, 300), files: [...new Set(j.tasks.flatMap(t => t.files || []))].slice(0, 40) }));
     if (stage === 'plan') scoped = { round: job.round, ...(job.challenge?.length ? { objections: { note: 'A challenger reviewed your previous plan. For each objection: change the plan, or keep it and say why in the summary.', items: job.challenge } } : {}), ...(otherJobs.length ? { otherJobs: { note: 'Other teams are working on this project in parallel on their own branches. Avoid editing the same files when an alternative exists; if overlap is unavoidable, say so in riskReasons (it will need a merge/sync later).', jobs: otherJobs } } : {}), ...(job.round ? { lastChecks } : {}), builders: this.members(members.builders, members), skillLibrary: this.skills().slice(0, 120).map(s => ({ name: s.name, description: s.description })) };
     else if (['implement', 'research'].includes(stage)) scoped = { done: job.tasks.filter(t => t.done).map(t => ({ task: t.instruction.slice(0, 300), by: t.ranBy })),
-      ...(opts.task?.context ? { taskContext: opts.task.context } : {}), ...(opts.task?.handover ? { handover: opts.task.handover } : {}), ...(opts.task?.files?.length ? { files: opts.task.files } : {}), ...(job.round ? { lastChecks } : {}) };
+      ...(opts.task?.context ? { taskContext: opts.task.context } : {}),
+      // Task phụ thuộc (vd. tổng hợp sau T1, T2) cần chính kết quả của các task trước, không chỉ tên việc.
+      ...(opts.task?.dependsOn?.length ? { inputs: opts.task.dependsOn.map(d => job.reports.filter(r => r.task === d && ['implement', 'research'].includes(r.stage)).at(-1)).filter(Boolean).map(brief) } : {}), ...(opts.task?.handover ? { handover: opts.task.handover } : {}), ...(opts.task?.files?.length ? { files: opts.task.files } : {}), ...(job.round ? { lastChecks } : {}) };
     else if (['review', 'verify'].includes(stage)) scoped = { acceptance: job.planSummary, diff: opts.ranges ? opts.ranges.map(([a, b]) => `${a}..${b}`).join(' + ') : `${job.base}..${job.revision}`,
       ...(opts.ranges ? { scope: 'Review ONLY this part of the job: the listed commit ranges (other tasks are reviewed separately).', taskContext: opts.task?.context || undefined } : {}),
       changedFiles: job.kind === 'research' ? undefined : (await Promise.all((opts.ranges || [[job.base, job.revision]]).map(([a, b]) => git(job.worktree, ['diff', '--stat', a, b])))).join('\n').split('\n').slice(-40).join('\n'),
@@ -539,7 +609,7 @@ export class Team extends EventEmitter {
     }
     const given = await this.provideSkills(worktree, skills);
     signal.throwIfAborted();
-    const skillNote = given.length ? `\nSkills assigned to you for this step. Before starting, read each SKILL.md and follow it (its other files are in the same folder):\n${given.map(n => `- ${n}: .ai-team/skills/${n}/SKILL.md`).join('\n')}\n` : '';
+    const skillNote = given.length ? `\nSkills assigned to you for this step. Before starting, read each SKILL.md and follow it (its other files are in the same folder). Skills are guidance written for other tools: if a skill needs a tool, agent or workflow you do not have, apply its checklist with your own tools instead; a missing tool is never a reason for status=blocked:\n${given.map(n => `- ${n}: .ai-team/skills/${n}/SKILL.md`).join('\n')}\n` : '';
     prompt = prompt.replace('Follow repository instructions.', `${skillNote}Follow repository instructions.`);
     this.event(job.id, ['implement', 'research'].includes(stage) ? members.manager : 'controller', agentId, stage === 'review' ? 'REVIEW_REQUEST' : 'TASK_ASSIGNMENT', instruction, { stage, effort: agent.effort || 'default', skills: given, prompt });
     // Gemini/Antigravity nhận prompt qua dòng lệnh; Windows giới hạn ~32K ký tự → ghi prompt ra file trong worktree.
@@ -549,8 +619,8 @@ export class Team extends EventEmitter {
       writeFileSync(join(worktree, '.ai-team', 'prompt.md'), prompt); promptFile = '.ai-team/prompt.md';
     }
     signal.throwIfAborted();
-    const report = await this.agentRun(agent, { ...job, stage, worktree, promptFile, slot: opts.slot || 1, checks: checking ? this.project(job.project).tests : [], network: this.project(job.project).network === true, readDirs: this.project(job.project).readDirs || [], researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal,
-      onEvent: (type, data) => { if (type === 'SPAWN' && opts.entry) { opts.entry.pid = data.details.pid; this.save(job); } if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') tokens += usageTokens(data.details); this.event(job.id, agentId, 'controller', type, data.summary, data.details); } });
+    const report = await this.agentRun(agent, { ...job, stage, worktree, promptFile, slot: opts.slot || 1, checks: checking ? this.project(job.project).tests : [], network: access.network, readDirs, researchWeb: this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt, { signal,
+      onEvent: (type, data) => { if (type === 'SPAWN' && opts.entry) { opts.entry.pid = data.details.pid; this.save(job); } if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') { const n = usageTokens(data.details); tokens += n; job.usage.tokens += n; } this.event(job.id, agentId, 'controller', type, data.summary, data.details); } });
     signal.throwIfAborted();
     if (report.status === 'blocked') {
       this.event(job.id, agentId, members.manager, 'BLOCKER', report.summary, report);
@@ -562,7 +632,7 @@ export class Team extends EventEmitter {
     job.durations = [...(job.durations || []), Date.now() - started].slice(-20);
     // Đo thật tốc độ và token mỗi lượt để Lead cân nhắc nhanh-nhưng-tốn hay rẻ-nhưng-chậm; est để học hệ số ETA.
     this.db.prepare('INSERT INTO member_stats (agent, model, effort, stage, ms, tokens, at, est) VALUES (?,?,?,?,?,?,?,?)').run(agentId, agent.model || '', agent.effort || '', stage, Date.now() - started, tokens, now(), opts.task?.estMinutes || null);
-    const entry = { ...scrub(report), agent: agentId, stage, revision: job.revision };
+    const entry = { ...scrub(report), agent: agentId, stage, revision: job.revision, ...(opts.taskIndex != null ? { task: opts.taskIndex } : {}) };
     job.reports.push(entry);
     this.event(job.id, agentId, stage === 'final' ? 'user' : agentId === members.manager ? 'controller' : members.manager, stage === 'review' ? 'REVIEW_RESULT' : 'RESULT', report.summary, report);
     return report;
@@ -963,6 +1033,16 @@ export class Team extends EventEmitter {
   async control(id, action, payload = {}) {
     const job = this.get(id);
     if (action === 'cancel' && job.status === 'cancelled') return job;
+    if (action === 'delete') {
+      // Xóa được mọi việc không có tiến trình đang chạy (đang chạy thì Tạm dừng/Hủy trước). Xóa cả worktree, branch và log.
+      if (['running', 'queued', 'merging'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.delete_not_finished"));
+      const root = this.config.projects.find(p => p.id === job.project)?.path;
+      const own = job.worktree?.startsWith(join(this.dataDir, 'worktrees')); // chỉ đụng worktree controller tạo
+      if (root && own) for (const wt of [job.worktree, ...job.tasks.map((_, i) => `${job.worktree}-t${i + 1}`)]) await run(['git'], ['-C', root, 'worktree', 'remove', '--force', wt], { allowFailure: true });
+      if (root && own && job.branch?.startsWith('ai-team/')) await run(['git'], ['-C', root, 'branch', '-D', job.branch], { allowFailure: true });
+      this.db.prepare('DELETE FROM events WHERE job = ?').run(id); this.db.prepare('DELETE FROM jobs WHERE id = ?').run(id);
+      this.emit('change'); return { id, deleted: true };
+    }
     if (terminal.has(job.status)) throw new Error(msg("srv.team.task_da_ket_thuc"));
     if (job.status === 'merging') throw new Error(msg("srv.team.merge_dang_chay"));
     if (action === 'pause' || action === 'cancel') {

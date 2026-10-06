@@ -6,13 +6,24 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { executable, commandAvailable, childEnv, run, killTree, resolveCommand, commandFromPath } from './process.js';
 import { codexClient, codexRpc, listModels } from './providers.js';
-import { roster, validateConfig, redact, tiers } from './team.js';
+import { roster, validateConfig, redact, tiers, accessOf } from './team.js';
 
 // Lệnh test: chuỗi nhiều dòng ("node --test x.js") hoặc mảng [executable, ...args]; mỗi phần tử là chuỗi không rỗng.
 export function testList(input) {
   const list = Array.isArray(input) ? input : String(input ?? '').split(/\r?\n/).map(l => (l.match(/"[^"]*"|\S+/g) || []).map(w => w.replace(/^"|"$/g, ''))).filter(a => a.length);
   if (list.length > 20 || list.some(c => !Array.isArray(c) || !c.length || c.some(v => typeof v !== 'string' || !v))) throw new Error(msg("srv.team.test_phai_la_mang_executable_arguments"));
   return list;
+}
+// Chuẩn hóa quyền project từ dashboard/Leader: thư mục phải tồn tại (không cho cả ổ / cả home), member phải có thật.
+export function accessList(input, agentIds) {
+  const members = l => { const v = [...new Set((Array.isArray(l) ? l : []).map(String))]; if (v.some(x => x !== '*' && !agentIds.includes(x))) throw new Error(msg("srv.accounts.access_member", { 0: v.join(', ') })); return v.includes('*') ? ['*'] : v; };
+  const folders = [], seen = new Set();
+  for (const f of Array.isArray(input?.folders) ? input.folders : []) {
+    const [path] = readDirList(f?.path); if (!path || seen.has(path)) continue; seen.add(path);
+    folders.push({ path, members: members(f.members), ...(f.why ? { why: String(f.why).slice(0, 300) } : {}) });
+  }
+  if (folders.length > 20) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: folders.length }));
+  return { folders, network: members(input?.network) };
 }
 function readDirList(text) {
   const dirs = [...new Set(String(text ?? '').split(/\r?\n/).map(l => l.trim().replace(/^"|"$/g, '')).filter(Boolean).map(d => resolve(d)))];
@@ -168,7 +179,7 @@ export class Accounts {
     const tests = testList(input.tests);
     const config = structuredClone(this.team.config);
     const readDirs = readDirList(input.readDirs);
-    config.projects.push({ id, path, tests, ...(input.network ? { network: true } : {}), ...(readDirs.length ? { readDirs } : {}) });
+    config.projects.push({ id, path, tests, access: { folders: readDirs.map(path => ({ path, members: ['*'] })), network: input.network ? ['*'] : [] } });
     this.persist(config);
     return { id };
   }
@@ -177,20 +188,30 @@ export class Accounts {
     const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
     if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
     if ('tests' in input) p.tests = testList(input.tests);
-    if ('network' in input) { if (typeof input.network !== 'boolean') throw new Error('network: true | false'); if (input.network) p.network = true; else delete p.network; }
-    if ('readDirs' in input) { const dirs = readDirList(input.readDirs); if (dirs.length) p.readDirs = dirs; else delete p.readDirs; }
+    const acc = accessOf(p);
+    if ('network' in input) { if (typeof input.network !== 'boolean') throw new Error('network: true | false'); acc.network = input.network ? (acc.network.length ? acc.network : ['*']) : []; }
+    if ('readDirs' in input) acc.folders = readDirList(input.readDirs).map(path => acc.folders.find(f => f.path === path) || { path, members: ['*'] });
+    p.access = acc; delete p.readDirs; delete p.network;
     this.persist(config);
     // Lệnh không tìm thấy trên PATH của máy chạy controller → cảnh báo ngay thay vì đợi lúc test mới lỗi ("npm" vẫn chạy được: tự đổi sang node + npm-cli.js).
     const warnings = p.tests.filter(c => !/[\\/]/.test(c[0]) && executable(c[0]).join() === c[0]).map(c => msg("srv.accounts.test_cmd_warning", { 0: c[0] }));
-    return { id, tests: p.tests, network: p.network === true, readDirs: p.readDirs || [], warnings };
+    return { id, tests: p.tests, network: acc.network.length > 0, readDirs: acc.folders.map(f => f.path), access: acc, warnings };
   }
   // Thư mục tham khảo chỉ đọc: chỉ bạn đặt từ dashboard; agent không tự xin thêm được.
   setReadDirs(id, text) {
     const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
     if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
-    const dirs = readDirList(text);
-    if (dirs.length) p.readDirs = dirs; else delete p.readDirs;
+    const acc = accessOf(p), dirs = readDirList(text);
+    acc.folders = dirs.map(path => acc.folders.find(f => f.path === path) || { path, members: ['*'] });
+    p.access = acc; delete p.readDirs; delete p.network;
     this.persist(config); return { id, readDirs: dirs };
+  }
+  // Quyền riêng từng member trong project (thư mục tham khảo chỉ đọc + Internet). Chỉ bạn lưu được; Leader chỉ đề xuất.
+  setAccess(id, input) {
+    const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
+    if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
+    p.access = accessList(input, config.agents.map(a => a.id)); delete p.readDirs; delete p.network;
+    this.persist(config); return { id, access: p.access };
   }
   async removeProject(id, { cancelJobs = false } = {}) {
     const open = this.team.jobs().filter(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status));

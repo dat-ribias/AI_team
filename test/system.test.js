@@ -115,6 +115,17 @@ test('cancel during a mock agent run is terminal and idempotent; stale saves can
   }
   assert.equal(team.active, null);
   assert(!team.events(stale.id).some(e => e.type === 'BLOCKER' || /Run interrupted/.test(e.summary)));
+  // Xóa việc đã kết thúc: mất cả job lẫn log; xóa lần hai báo lỗi.
+  await team.control(stale.id, 'delete');
+  assert.throws(() => team.get(stale.id)); assert.equal(team.events(stale.id).length, 0);
+  await assert.rejects(team.control(stale.id, 'delete'));
+  // Xóa phiên: từ chối khi còn việc đang chạy; không thì xóa cả việc trong phiên.
+  const ses = team.createSession({ project: 'test', name: 'tmp' });
+  team.save({ ...stale, id: 'ses-job', sessionId: ses.id, status: 'running' });
+  await assert.rejects(team.deleteSession(ses.id));
+  team.save({ ...team.get('ses-job'), status: 'done' });
+  assert.equal((await team.deleteSession(ses.id)).jobs, 1);
+  assert.throws(() => team.get('ses-job')); assert(!team.sessions().some(x => x.id === ses.id));
 });
 
 test('pre-aborted process and mock provider preserve the cancellation reason', async () => {
@@ -695,6 +706,8 @@ test('independent tasks run in parallel; dependsOn waits; code tasks merge from 
   for (const n of [1, 2, 3]) assert.match(files.stdout, new RegExp(`t${n}\\.txt`));
   assert(ready.tasks.every(x => x.done)); assert.deepEqual(ready.tasks[0].contextGaps, ['read utils.js']);
   assert.match(prompts.find(p => /T1 edit/.test(p)), /see utils\.js:10/);
+  // T3 phụ thuộc T1, T2: nhận chính báo cáo của hai task đó.
+  const t3 = prompts.find(p => /T3 edit/.test(p)); assert.match(t3, /"inputs":\[\{/); assert.equal(t3.match(/"stage":"implement","status"/g)?.length, 2);
   const branches = await run(['git'], ['-C', f.path, 'branch', '--list', 'ai-team/*-t[0-9]*']);
   assert.equal(branches.stdout.trim(), '', 'child branches are cleaned up');
 });
@@ -734,4 +747,19 @@ test('busy strong builder: weak one takes the task only when it finishes sooner'
   team.remainingMinutes = () => 1; team.factor = id => id === 'codex-4' ? 3 : 1;
   assert.equal(team.pickBuilder(job, { ...task }, new Set(['codex-2'])), null); // waiting 1+10 < 30 → wait
   assert.equal(team.pickBuilder(job, { ...task, difficulty: 5 }, new Set(['codex-2'])), null); // beyond weaker member
+});
+
+test('token budget per job: a job over maxTokensPerJob stops before the next AI call', async t => {
+  const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100, maxTokensPerJob: 1000,
+    agents: [{ id: 'solo', label: 'solo', provider: 'mock' }],
+    pipeline: { manager: 'solo', builders: ['solo'], reviewer: 'solo', verifier: 'solo' },
+    projects: [{ id: 'test', path: process.cwd(), tests: [] }] };
+  let calls = 0;
+  const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-budget-')), { runAgent: (...a) => { calls++; return runAgent(...a); } });
+  t.after(() => team.close());
+  team.save({ id: 'budget', project: 'test', goal: 'x', status: 'queued', stage: 'plan', worktree: process.cwd(), tasks: [], taskIndex: 0, reports: [], messages: [], round: 0, usage: { calls: 7, tokens: 5000 } });
+  await team.tick();
+  const job = team.get('budget');
+  assert.equal(job.status, 'blocked'); assert.match(job.error, /5000.*1000/); assert.equal(calls, 0);
+  assert.equal(team.state().limits.tokens, 1000);
 });

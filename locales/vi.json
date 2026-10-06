@@ -50,7 +50,7 @@
   "ui.flow.notChosen": "chưa chọn",
   "ui.flow.defaultModel": "mặc định",
   "ui.flow.disabled": "đang tắt",
-  "ui.flow.reworkRound": "sửa lại · vòng {n}",
+  "ui.flow.reworkRound": "sửa lại · vòng {n}/{max}",
   "ui.flow.rework": "changes requested → lập kế hoạch lại",
   "ui.flow.goal": "mục tiêu",
   "ui.flow.testsBy": "controller chạy",
@@ -646,5 +646,14 @@
   "ui.ev.FIX_TASK": "Task sửa tự động",
   "ui.flow.fix": "Sửa",
   "ui.flow.attempts": "sửa lần {n}",
-  "ui.flow.running": "đang làm…"
+  "ui.flow.running": "đang làm…",
+  "ui.inspector.delete": "Xóa",
+  "ui.inspector.confirmDelete": "Xóa hẳn việc này: worktree, branch chưa merge và toàn bộ log sẽ mất. Tiếp tục?",
+  "srv.team.delete_not_finished": "Việc đang chạy: bấm Tạm dừng hoặc Hủy trước rồi mới xóa.",
+  "ui.session.confirmDelete": "Xóa phiên này cùng {n} việc trong phiên (worktree, branch chưa merge, log)? Không hoàn tác được.",
+  "srv.team.token_budget": "Dừng: việc này đã dùng {0} token, vượt ngân sách {1} (maxTokensPerJob). Xem lại rồi bấm Tiếp tục nếu muốn chạy thêm.",
+  "ui.inspector.usage": "AI đã dùng",
+  "ui.inspector.usageText": "{calls} lượt gọi · {tokens}{limit} token",
+  "srv.team.access_busy": "Leader đang đề xuất quyền cho dự án này, đợi xong đã.",
+  "srv.accounts.access_member": "Member không tồn tại trong danh sách quyền: {0}"
 }
