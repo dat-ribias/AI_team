@@ -694,5 +694,6 @@
   "ui.mem.exportTitle": "Tải việc này về file Markdown (mục tiêu, kế hoạch, trao đổi, kết quả, diff)",
   "ui.mem.saveSummary": "Lưu tóm tắt",
   "ui.nav.runningElsewhere": "Đang chạy ở dự án/phiên khác:",
-  "ui.nav.agentsRunning": "{n} AI đang chạy"
+  "ui.nav.agentsRunning": "{n} AI đang chạy",
+  "srv.team.token_budget_extended": "Tiếp tục với ngân sách token: đã dùng {0}, giới hạn mới {1}."
 }

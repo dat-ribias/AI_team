@@ -694,5 +694,6 @@
   "ui.mem.exportTitle": "このジョブを Markdown で保存（目標・計画・やり取り・結果・diff）",
   "ui.mem.saveSummary": "要約を保存",
   "ui.nav.runningElsewhere": "他のプロジェクト/セッションで実行中:",
-  "ui.nav.agentsRunning": "AI {n} 件 実行中"
+  "ui.nav.agentsRunning": "AI {n} 件 実行中",
+  "srv.team.token_budget_extended": "トークン予算を更新して再開: 使用 {0}、新しい上限 {1}。"
 }

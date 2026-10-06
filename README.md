@@ -187,3 +187,7 @@ Bộ nhớ được đánh dấu là dữ liệu (không phải chỉ dẫn) và
 ### Codex trên Windows không sandbox (`"codexWindowsSandbox": "none"`)
 
 Chế độ `elevated` bắt Codex chạy `codex-windows-sandbox-setup` (UAC) mỗi khi trạng thái sandbox lệch — với nhiều CODEX_HOME trên cùng máy thì hỏi liên tục (lỗi đang mở của Codex). `"none"` chạy Codex với `--sandbox danger-full-access`: không còn UAC, nhưng Codex có toàn quyền của user Windows (ghi ngoài worktree, có mạng). Controller vẫn kiểm tra worktree/repo liên kết sau mỗi lượt và mọi thay đổi vẫn phải qua test/review/verify và bạn duyệt merge. Quay lại: đặt `"elevated"`.
+
+### Antigravity tự duyệt quyền (`"agyAutoApprove": true`)
+
+agy headless kết thúc phiên ngay khi một lệnh bị từ chối (không có report). Bật tùy chọn này để chạy agy với `--dangerously-skip-permissions`: không còn bị chặn lệnh, đổi lại agy có toàn quyền như Codex `"none"`. Tắt thì agy chỉ chạy được lệnh trong `permissions.allow` của `~/.gemini/antigravity-cli/settings.json` và được dặn chỉ dùng công cụ đọc file.

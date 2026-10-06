@@ -249,6 +249,9 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (agent.provider === 'gemini' && task.addDirs?.length) args.push('--include-directories', task.addDirs.join(','));
     if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
     // Antigravity (agy) không có cờ quyền theo lượt: lệnh check phải được cho phép trong ~/.gemini/antigravity-cli/settings.json (permissions.allow).
+    // Lệnh ngoài allow-list bị từ chối = phiên headless kết thúc không có report. "agyAutoApprove": true bỏ hỏi quyền (toàn quyền như Codex "none");
+    // controller vẫn kiểm tra worktree sau mỗi lượt và mọi thay đổi vẫn qua review/verify + bạn duyệt merge.
+    if (agent.provider === 'antigravity' && (agent.autoApprove ?? task.agyAutoApprove)) args.push('--dangerously-skip-permissions');
   }
   // Slot ≥ 2 của cùng tài khoản Codex: SQLite riêng (CODEX_SQLITE_HOME), giữ chung đăng nhập. sqlite_home trong config.toml sẽ ghi đè biến này.
   const slot = task.slot > 1 && agent.provider === 'codex' ? task.slot : 1, slotAgent = slot > 1 ? { ...agent, sqliteHome: join(agent.home, `sqlite-${slot}`), lockKey: `${agent.home}#${slot}` } : agent;

@@ -762,6 +762,13 @@ test('token budget per job: a job over maxTokensPerJob stops before the next AI 
   const job = team.get('budget');
   assert.equal(job.status, 'blocked'); assert.match(job.error, /5000.*1000/); assert.equal(calls, 0);
   assert.equal(team.state().limits.tokens, 1000);
+  // Tiếp tục: tính lại từ sự kiện USAGE (Codex: trừ phần cache); vẫn vượt thì cấp thêm một lượt ngân sách.
+  team.event('budget', 'solo', 'controller', 'USAGE', 'u', { input_tokens: 900000, cached_input_tokens: 899500, output_tokens: 100 });
+  await team.control('budget', 'resume'); let j = team.get('budget');
+  assert.equal(j.usage.tokens, 600); assert.equal(j.tokenBudget, undefined); assert.equal(j.status, 'queued');
+  team.save({ ...j, status: 'blocked', usage: { calls: 9, tokens: 5000 } }); team.event('budget', 'solo', 'controller', 'USAGE', 'u', { input_tokens: 2000, output_tokens: 0 });
+  await team.control('budget', 'resume'); j = team.get('budget');
+  assert.equal(j.usage.tokens, 2600); assert.equal(j.tokenBudget, 3600);
 });
 
 test('per-project access: folders and Internet per member; Leader proposes a draft that the owner saves', async t => {

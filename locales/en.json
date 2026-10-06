@@ -694,5 +694,6 @@
   "ui.mem.exportTitle": "Download this job as Markdown (goal, plan, conversation, results, diff)",
   "ui.mem.saveSummary": "Save summary",
   "ui.nav.runningElsewhere": "Running in other projects/sessions:",
-  "ui.nav.agentsRunning": "{n} AI running"
+  "ui.nav.agentsRunning": "{n} AI running",
+  "srv.team.token_budget_extended": "Resumed with token budget: used {0}, new limit {1}."
 }
