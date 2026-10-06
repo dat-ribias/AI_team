@@ -38,13 +38,44 @@ export function normalizeGoogleQuota(result) {
   const buckets = [];
   function visit(value, name = 'Google') {
     if (!value || typeof value !== 'object') return;
-    if (Number.isFinite(value.remaining_fraction)) buckets.push({ id: name, name, windows: [{
-      name: 'quota', remaining: Math.max(0, Math.min(100, value.remaining_fraction * 100)),
-      minutes: null, resetsAt: value.reset_time || null,
-    }] });
-    else for (const [key, item] of Object.entries(value)) if (item && typeof item === 'object') visit(item, item.modelId || item.model_id || item.id || key);
+    if (Number.isFinite(value.remaining_fraction)) {
+      const raw = `${name || ''} ${value.id || ''} ${value.name || ''} ${value.window || ''}`.toLowerCase();
+      const is5h = value.window === '5h' || /five[_\s-]*hour|session|\b5h\b/i.test(raw);
+      const isWeekly = value.window === 'weekly' || /seven[_\s-]*day|week|\b7d\b/i.test(raw);
+      const minutes = is5h ? 300 : (isWeekly ? 10080 : (Number.isFinite(value.minutes) ? value.minutes : null));
+      const winName = is5h ? '5h' : (isWeekly ? 'week' : (value.window || 'quota'));
+      let bucketName = name;
+      if (/^gemini-(5h|weekly)/i.test(name)) bucketName = 'gemini';
+      else if (/^3p-(5h|weekly)/i.test(name)) bucketName = '3p';
+      buckets.push({
+        id: name,
+        name: bucketName,
+        windows: [{
+          name: winName,
+          remaining: Math.max(0, Math.min(100, value.remaining_fraction * 100)),
+          minutes,
+          resetsAt: value.reset_time || null,
+        }],
+      });
+    } else {
+      for (const [key, item] of Object.entries(value)) {
+        if (item && typeof item === 'object') visit(item, item.modelId || item.model_id || item.id || key);
+      }
+    }
   }
   visit(result);
+  const rank = b => {
+    const m = b.windows?.[0]?.minutes;
+    if (m === 300) return 1;
+    if (m === 10080) return 2;
+    return 3;
+  };
+  buckets.sort((a, b) => {
+    const groupA = String(a.id).startsWith('3p') ? 1 : 0;
+    const groupB = String(b.id).startsWith('3p') ? 1 : 0;
+    if (groupA !== groupB) return groupA - groupB;
+    return rank(a) - rank(b);
+  });
   return buckets;
 }
 

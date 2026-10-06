@@ -82,8 +82,9 @@ function dedupeBuckets(buckets) {
   if (!Array.isArray(buckets)) return [];
   const canonicalKey = b => {
     const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
-    if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 'claude-session';
-    if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 'claude-weekly';
+    const prefix = String(b.id || '').startsWith('3p') ? '3p:' : (String(b.id || '').startsWith('gemini') ? 'gemini:' : '');
+    if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return prefix + 'session';
+    if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return prefix + 'weekly';
     return (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
   };
   const map = new Map();
@@ -91,7 +92,20 @@ function dedupeBuckets(buckets) {
     const key = canonicalKey(b);
     if (!map.has(key)) map.set(key, b);
   }
-  return Array.from(map.values());
+  const result = Array.from(map.values());
+  const rank = b => {
+    const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
+    const min = b.windows?.[0]?.minutes;
+    if (min === 300 || /five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 1;
+    if (min === 10080 || /seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 2;
+    return 3;
+  };
+  return result.sort((a, b) => {
+    const groupA = String(a.id).startsWith('3p') ? 1 : 0;
+    const groupB = String(b.id).startsWith('3p') ? 1 : 0;
+    if (groupA !== groupB) return groupA - groupB;
+    return rank(a) - rank(b);
+  });
 }
 
 function quota5hInfo(q) {
@@ -273,7 +287,7 @@ function drawJobsList() {
   // Việc đang chạy ở dự án/phiên khác: hiện lối tắt để khỏi nhìn sơ đồ sáng mà khung chat trống.
   const away = state.jobs.filter(j => ['running', 'queued', 'waiting'].includes(j.status) && !sessionJobs.includes(j));
   if (away.length) $('job-list').insertAdjacentHTML('beforeend', `<p class="muted away-title">${esc(t('ui.nav.runningElsewhere'))}</p>` + away.slice(0, 4).map(j => `<button class="job-button away ${runningOf(j).length ? 'working' : ''}" data-away="${esc(j.id)}" title="${esc(j.goal)}"><span class="job-dot-status ${j.status}"></span><div class="job-button-content"><strong>${esc(j.goal)}</strong><small>${esc(j.project)} · ${esc(state.sessions.find(x => x.id === j.sessionId)?.name || '')} · #${esc(j.id.slice(0, 8))}</small></div></button>`).join(''));
-  document.querySelectorAll('[data-away]').forEach(b => b.onclick = () => { const j = state.jobs.find(x => x.id === b.dataset.away); if (!j) return; curProject = j.project; curSession = j.sessionId || ''; selected = j.id; events = []; filter = null; store.set('project', curProject); store.set('session', curSession); drawSessions(); attempt(refresh); });
+  document.querySelectorAll('[data-away]').forEach(b => b.onclick = () => gotoJob(b.dataset.away));
   document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => attempt(async () => {
     selected = b.dataset.job;
     events = [];
@@ -407,7 +421,10 @@ function drawSessions() {
   if (!state.projects.some(p => p.id === curProject)) curProject = state.projects[0]?.id || '';
   const list = state.sessions.filter(x => x.project === curProject);
   if (!list.some(x => x.id === curSession)) curSession = list.at(-1)?.id || '';
-  $('session-project').innerHTML = state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join('') + `<option value="__add">${esc(t('ui.project.add'))}</option>`;
+  // Dự án có AI đang chạy: chấm ● + số AI trong ô chọn; ô sáng khi có dự án KHÁC đang chạy.
+  const busyOf = id => state.jobs.filter(j => j.project === id).reduce((n, j) => n + runningOf(j).length, 0);
+  $('session-project').innerHTML = state.projects.map(p => { const n = busyOf(p.id); return `<option value="${esc(p.id)}">${n ? `● ${esc(p.id)} · ${esc(t('ui.nav.agentsRunning', { n }))}` : esc(p.id)}</option>`; }).join('') + `<option value="__add">${esc(t('ui.project.add'))}</option>`;
+  $('session-project').classList.toggle('working', state.projects.some(p => p.id !== curProject && busyOf(p.id)));
   $('session-project').value = curProject;
   $('session-tabs').innerHTML = list.map(x => { const st = sessionState(x.id); return `<button role="tab" class="stab ${x.id === curSession ? 'active' : ''} ${st.cls}" data-session="${esc(x.id)}" title="${esc(x.name + ' · ' + st.label)}"><span class="job-dot-status ${st.dot}"></span>${esc(cut(x.name, 28))}<span class="stab-x" data-session-del="${esc(x.id)}" title="${esc(t('ui.inspector.delete'))}">×</span></button>`; }).join('') || `<span class="muted">${esc(t('ui.session.none'))}</span>`;
   $('session-tabs').querySelectorAll('[data-session]').forEach(b => { b.onclick = () => { curSession = b.dataset.session; store.set('session', curSession); drawSessions(); selectSessionJob(); }; b.ondblclick = () => $('session-rename').click(); });
@@ -574,7 +591,13 @@ function drawFlow() {
 function drawInspector() {
   const job = state.jobs.find(j => j.id === selected);
   $('message').disabled = !!job && ['merged', 'cancelled'].includes(job.status) || !job && !curProject;
-  if (!job) { $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span></div>`; return; }
+  if (!job) {
+    // Chưa chọn việc mà nơi khác đang chạy: đưa lối tắt ngay giữa khung, khỏi phải đoán dự án/phiên.
+    const live = state.jobs.filter(j => ['running', 'queued', 'waiting'].includes(j.status));
+    $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span>${live.length ? `<p class="muted">${esc(t('ui.nav.runningElsewhere'))}</p>${live.slice(0, 5).map(j => `<button class="primary" data-goto="${esc(j.id)}">${esc(j.project)} · #${esc(j.id.slice(0, 8))} · ${esc(cut(j.goal, 50))}</button>`).join('')}` : ''}</div>`;
+    document.querySelectorAll('[data-goto]').forEach(b => b.onclick = () => gotoJob(b.dataset.goto));
+    return;
+  }
   const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
   const research = job.kind === 'research';
   const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], ...(job.linked?.length ? [[t('ui.inspector.linked'), job.linked.map(l => `${l.project} · ${l.revision.slice(0, 8)}${l.revision !== l.base ? ' ✎' : ''}`).join(', ')]] : []), [t('ui.inspector.round'), `${job.round} / ${state.limits?.rounds ?? 3}`], ...(job.usage ? [[t('ui.inspector.usage'), t('ui.inspector.usageText', { calls: job.usage.calls, tokens: job.usage.tokens.toLocaleString(), limit: state.limits?.tokens ? ' / ' + state.limits.tokens.toLocaleString() : '' })]] : []), [t('ui.inspector.started'), clock(job.createdAt)], ...(job.metrics ? [[t('ui.inspector.debate'), Object.entries(job.metrics).map(([k, v]) => t('ui.metric.' + k) + ' ' + v).join(' · ')]] : []), ...(job.flow?.requested?.steps ? [[t('ui.inspector.flow'), job.flow.requested.steps.join(' → ') || '—']] : [])];
@@ -797,15 +820,25 @@ function drawQuota() {
     const auth = a.auth || { status: 'unknown' }, connected = ['connected', 'cached'].includes(auth.status);
     const tag = a.provider === 'mock' ? t('ui.members.mock') : a.provider === 'antigravity' ? 'Gemini Pro' : a.provider;
     const actions = state.demo ? '' : `<button data-check="${esc(a.id)}">${esc(t('ui.login.check'))}</button><button data-profile="${esc(a.id)}">${esc(t('ui.members.profile'))}</button>${a.provider === 'claude' ? `<button data-usage="${esc(a.id)}">${esc(t('ui.members.checkQuota'))}</button><button data-term="${esc(a.id)}">${esc(t('ui.members.openTerminal'))}</button>` : ''}`;
-    const cleanBuckets = dedupeBuckets(a.quota.buckets);
-    const windows = cleanBuckets.map(b => b.windows.map(w => {
-      const bName = b.name.replace(/[:\s]+$/, '');
-      const winLabel = w.minutes ? `${esc(bName)} · ${esc(t('ui.quota.window', { time: duration(w.minutes) }))}` : (w.name && w.name !== 'used' && w.name !== 'quota' ? `${esc(bName)} · ${esc(w.name)}` : esc(bName));
+    const model = a.provider === 'antigravity' && a.model;
+    const rawBuckets = model ? a.quota.buckets?.filter(b => String(b.id).startsWith('3p-') !== /^gemini/i.test(model)) : a.quota.buckets;
+    const cleanBuckets = dedupeBuckets(rawBuckets || []);
+    const winItems = cleanBuckets.flatMap(b => (b.windows || []).map(w => {
+      const raw = `${b.id || ''} ${b.name || ''} ${w.name || ''}`.toLowerCase();
+      const is5h = w.minutes === 300 || /five[_\s-]*hour|session|\b5h\b/i.test(raw);
+      const isWeekly = w.minutes === 10080 || /seven[_\s-]*day|week|\b7d\b/i.test(raw);
+      const minutes = w.minutes ?? (is5h ? 300 : (isWeekly ? 10080 : null));
+      let bName = b.name.replace(/-(5h|weekly|session)$/i, '').replace(/[:\s]+$/, '');
+      return { b, w, minutes, bName, rank: is5h ? 1 : (isWeekly ? 2 : 3) };
+    }));
+    winItems.sort((x, y) => x.rank - y.rank);
+    const windows = winItems.map(({ b, w, minutes, bName }) => {
+      const winLabel = minutes ? `${esc(bName)} · ${esc(t('ui.quota.window', { time: duration(minutes) }))}` : (w.name && w.name !== 'used' && w.name !== 'quota' ? `${esc(bName)} · ${esc(w.name)}` : esc(bName));
       const remVal = w.remaining == null ? null : Math.max(0, Math.min(100, Math.round(w.remaining)));
       const usedVal = remVal == null ? null : Math.max(0, Math.min(100, Math.round(w.used != null ? w.used : (100 - remVal))));
       const remLabel = remVal == null ? '?' : `${t('ui.quota.windowRemaining', { n: remVal })} (${t('ui.quota.used', { n: usedVal })})`;
       return `<div class="quota-window"><label><span>${winLabel}</span><strong>${esc(remLabel)}</strong></label><progress max="100" value="${remVal ?? 0}"></progress><small>${esc(t('ui.quota.reset'))} ${w.resetText ? esc(w.resetText) : esc(clock(w.resetsAt) + untilReset(w.resetsAt))}</small></div>`;
-    }).join('')).join('');
+    }).join('');
     const sp = a.speed?.samples ? t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall >= 1000 ? Math.round(a.speed.avgTokensPerCall / 1000) + 'K' : a.speed.avgTokensPerCall, n: a.speed.samples }) : t('ui.members.speedUnknown');
     const mcpNames = Object.keys(a.mcp || {});
     const facts = [sp, mcpNames.length && 'MCP: ' + mcpNames.join(', '), t('ui.members.model', { model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ` · ${effortLabel(a.effort)}` : '') }), t('ui.members.tier', { tier: tierLabel(a.tier) }), !a.enabled && t('ui.members.disabled'), a.systemPrompt && t('ui.members.hasPrompt')].filter(Boolean).join(' · ');
@@ -1058,6 +1091,11 @@ $('nav-toggle').onclick = () => { store.set('nav', store.get('nav') === 'min' ? 
 const applyFlow = () => { const min = store.get('flow') === 'min'; document.querySelector('.network').classList.toggle('collapsed', min); $('flow-toggle').textContent = min ? '▸' : '▾'; $('flow-summary').hidden = !min; };
 $('flow-toggle').onclick = () => { store.set('flow', store.get('flow') === 'min' ? '' : 'min'); applyFlow(); }; applyFlow();
 // Đổi phiên: khung chat chỉ hiện công việc của phiên đó (phiên mới thì trống).
+function gotoJob(id) {
+  const j = state.jobs.find(x => x.id === id); if (!j) return;
+  curProject = j.project; curSession = j.sessionId || ''; selected = j.id; events = []; filter = null;
+  store.set('project', curProject); store.set('session', curSession); drawSessions(); attempt(refresh);
+}
 function selectSessionJob() {
   const own = state.jobs.filter(j => j.project === curProject && (!curSession || j.sessionId === curSession));
   if (!own.some(j => j.id === selected)) { selected = own[0]?.id; events = []; filter = null; }

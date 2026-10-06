@@ -172,45 +172,72 @@ export class Team extends EventEmitter {
         try {
           const q = JSON.parse(row.body);
           if (Array.isArray(q.buckets)) {
-            const canonicalKey = b => {
-              const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
-              if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 'claude-session';
-              if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 'claude-weekly';
-              return (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
-            };
-            const map = new Map();
-            for (const b of q.buckets) {
-              const k = canonicalKey(b);
-              const existing = map.get(k);
-              if (!existing) {
-                if (k === 'claude-session') {
-                  b.id = 'claude-session';
-                  b.name = 'Current session';
-                  if (b.windows?.[0]) {
-                    b.windows[0].name = '5h';
-                    b.windows[0].minutes = 300;
+            const isClaude = row.agent.startsWith('claude') || row.agent === 'claude';
+            const isGemini = row.agent.startsWith('gemini') || row.agent === 'gemini';
+            if (isClaude) {
+              const canonicalKey = b => {
+                const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
+                if (/five[_\s-]*hour|session|\b5h\b/i.test(raw)) return 'claude-session';
+                if (/seven[_\s-]*day|week|\b7d\b/i.test(raw)) return 'claude-weekly';
+                return (b.id || b.name || '').toLowerCase().replace(/[:\s]+$/, '');
+              };
+              const map = new Map();
+              for (const b of q.buckets) {
+                const k = canonicalKey(b);
+                const existing = map.get(k);
+                if (!existing) {
+                  if (k === 'claude-session') {
+                    b.id = 'claude-session';
+                    b.name = 'Current session';
+                    if (b.windows?.[0]) {
+                      b.windows[0].name = '5h';
+                      b.windows[0].minutes = 300;
+                    }
+                  } else if (k === 'claude-weekly') {
+                    b.id = 'claude-weekly';
+                    b.name = 'Current week (all models)';
+                    if (b.windows?.[0]) {
+                      b.windows[0].name = 'week';
+                    }
                   }
-                } else if (k === 'claude-weekly') {
-                  b.id = 'claude-weekly';
-                  b.name = 'Current week (all models)';
-                  if (b.windows?.[0]) {
-                    b.windows[0].name = 'week';
+                  map.set(k, b);
+                } else {
+                  if (b.windows?.[0]?.resetsAt && !existing.windows?.[0]?.resetsAt) {
+                    existing.windows[0].resetsAt = b.windows[0].resetsAt;
                   }
-                }
-                map.set(k, b);
-              } else {
-                if (b.windows?.[0]?.resetsAt && !existing.windows?.[0]?.resetsAt) {
-                  existing.windows[0].resetsAt = b.windows[0].resetsAt;
-                }
-                if (b.windows?.[0]?.remaining != null) {
-                  existing.windows[0].remaining = b.windows[0].remaining;
-                  if (b.windows[0].used != null) existing.windows[0].used = b.windows[0].used;
+                  if (b.windows?.[0]?.remaining != null) {
+                    existing.windows[0].remaining = b.windows[0].remaining;
+                    if (b.windows[0].used != null) existing.windows[0].used = b.windows[0].used;
+                  }
                 }
               }
-            }
-            const unique = Array.from(map.values());
-            if (unique.length !== q.buckets.length || JSON.stringify(unique) !== JSON.stringify(q.buckets)) {
-              q.buckets = unique;
+              const unique = Array.from(map.values());
+              if (unique.length !== q.buckets.length || JSON.stringify(unique) !== JSON.stringify(q.buckets)) {
+                q.buckets = unique;
+                this.db.prepare('UPDATE quotas SET body=? WHERE agent=?').run(JSON.stringify(q), row.agent);
+              }
+            } else if (isGemini) {
+              for (const b of q.buckets) {
+                const raw = `${b.id || ''} ${b.name || ''}`.toLowerCase();
+                const is5h = /five[_\s-]*hour|session|\b5h\b/i.test(raw);
+                const isWeekly = /seven[_\s-]*day|week|\b7d\b/i.test(raw);
+                if (is5h && b.windows?.[0]) {
+                  b.windows[0].name = '5h';
+                  b.windows[0].minutes = 300;
+                } else if (isWeekly && b.windows?.[0]) {
+                  b.windows[0].name = 'week';
+                  b.windows[0].minutes = 10080;
+                }
+                if (/^gemini-(5h|weekly)/i.test(b.id || '')) b.name = 'gemini';
+                else if (/^3p-(5h|weekly)/i.test(b.id || '')) b.name = '3p';
+              }
+              const rank = b => (b.windows?.[0]?.minutes === 300 ? 1 : (b.windows?.[0]?.minutes === 10080 ? 2 : 3));
+              q.buckets.sort((a, b) => {
+                const groupA = String(a.id).startsWith('3p') ? 1 : 0;
+                const groupB = String(b.id).startsWith('3p') ? 1 : 0;
+                if (groupA !== groupB) return groupA - groupB;
+                return rank(a) - rank(b);
+              });
               this.db.prepare('UPDATE quotas SET body=? WHERE agent=?').run(JSON.stringify(q), row.agent);
             }
           }
@@ -583,10 +610,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     // Nếu cổng rủi ro bật lại verify, checker() lúc đó tự đổi sang người không viết code.
     const steps = job.flow?.requested?.steps, verifies = !Array.isArray(steps) || steps.includes('verify');
     const checker = id => id === (job.checkers?.reviewer || members.reviewer) || verifies && id === members.verifier;
-    if (fits(task.agent) && !checker(task.agent)) return task.agent;
+    // Tải hiện tại (kể cả task vừa xếp trong đợt này): một tài khoản nhận được nhiều slot không có nghĩa là nên dồn hết việc cho nó.
+    const load = id => this.loadMap?.get(id) ?? this.useOf(id);
+    if (fits(task.agent) && !checker(task.agent) && !load(task.agent)) return task.agent;
     const remaining = id => this.remaining(id) ?? 50;
-    // Ưu tiên người mạnh nhất còn quota; người yếu nhận việc khi người mạnh bận (xem pickBuilder).
-    const pool = members.builders.filter(fits).sort((x, y) => checker(x) - checker(y) || level(y) - level(x) || remaining(y) - remaining(x));
+    // Ưu tiên người đang rảnh, rồi người không kiêm review/verify (kiêm thì checker() tự đổi người kiểm), rồi người Manager chọn, rồi mạnh nhất còn quota.
+    const pool = members.builders.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
     if (fits(task.agent) && (!pool.length || checker(pool[0]))) return task.agent;
     if (pool.length) return pool[0];
     // Người mạnh hết quota/đang tắt: tăng mức suy luận cho người còn quota nếu nhờ đó đủ năng lực.
@@ -779,6 +808,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const head0 = code ? await git(job.worktree, ['rev-parse', 'HEAD']) : null;
     const overlap = (a, b) => !a.files?.length || !b.files?.length || a.files.some(x => b.files.some(y => x === y || x.startsWith(y.replace(/\/?$/, '/')) || y.startsWith(x.replace(/\/?$/, '/'))));
     const limit = 1 + this.capacity().start, busy = this.fullAgents(), batch = [], use = new Map(this.slotKeys().map(k => k.split('#')[0]).reduce((m, id) => m.set(id, (m.get(id) || 0) + 1), new Map()));
+    this.loadMap = use;
     for (const [task, i] of ready) {
       if (batch.length >= limit) break;
       if (code && batch.some(([t]) => overlap(t, task))) continue;
@@ -788,6 +818,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (!who) continue;
       use.set(who, (use.get(who) || 0) + 1); if (use.get(who) >= this.maxJobs(who)) busy.add(who); batch.push([task, i, who]);
     }
+    this.loadMap = null;
     if (!batch.length) {
       // Người phù hợp đang bận việc khác: nhả slot, thử lại sau.
       job.waiting = msg("srv.team.wait_builder"); this.save(job);

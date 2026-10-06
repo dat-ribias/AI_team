@@ -870,3 +870,15 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   await team.control(b.id, 'cancel'); await team.control(b.id, 'delete');
   assert(team.backups().some(x => /before-delete/.test(x.file)));
 });
+
+test('load balancing: an account with spare slots does not take every parallel task while other builders are idle', async t => {
+  const { team, spans } = await parallelTeam(t, [
+    { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [], estMinutes: 5 },
+    { agent: 'codex-2', difficulty: 2, instruction: 'T2 edit', files: ['t2.txt'], dependsOn: [], estMinutes: 5 },
+  ]);
+  team.config.maxJobsPerAccount = 3;
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Balance' });
+  await settle(team, job.id, 'ready');
+  assert.notEqual(spans.find(s => s.n === 1).agent, spans.find(s => s.n === 2).agent);
+});

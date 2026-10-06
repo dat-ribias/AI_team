@@ -219,3 +219,4 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 .access-table small.warn{color:var(--amber)}.access-table .repo-row th.path{border-left:2px solid var(--amber)}
 #memory-dialog{width:min(820px,95vw)}#memory-dialog h3{font-size:14px;margin:16px 0 6px}.mem-list{list-style:none;padding:0;margin:0 0 8px;display:grid;gap:6px;max-height:40vh;overflow:auto}.mem-list li{display:flex;gap:8px;justify-content:space-between;align-items:flex-start;background:var(--c1c232c);border-radius:6px;padding:7px 9px;font-size:12px;overflow-wrap:anywhere}.mem-log{font-size:11px;color:var(--muted);padding-left:18px;max-height:30vh;overflow:auto}#memory-dialog textarea{margin-bottom:6px}
 .away-title{font-size:10px;margin:10px 4px 2px}.job-button.away{opacity:.85;border-style:dashed}
+#session-project.working{animation:glow 1.6s ease-in-out infinite;border-color:var(--mint)}
