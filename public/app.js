@@ -573,7 +573,7 @@ function drawInspector() {
   if (!job) { $('inspector').innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.inspector.emptyTitle'))}</b><span>${esc(t('ui.inspector.emptyText'))}</span></div>`; return; }
   const stopped = ['blocked', 'paused'].includes(job.status), finished = ['merged', 'cancelled'].includes(job.status), idle = ['paused', 'blocked', 'ready'].includes(job.status);
   const research = job.kind === 'research';
-  const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], [t('ui.inspector.round'), `${job.round} / ${state.limits?.rounds ?? 3}`], ...(job.usage ? [[t('ui.inspector.usage'), t('ui.inspector.usageText', { calls: job.usage.calls, tokens: job.usage.tokens.toLocaleString(), limit: state.limits?.tokens ? ' / ' + state.limits.tokens.toLocaleString() : '' })]] : []), [t('ui.inspector.started'), clock(job.createdAt)], ...(job.metrics ? [[t('ui.inspector.debate'), Object.entries(job.metrics).map(([k, v]) => t('ui.metric.' + k) + ' ' + v).join(' · ')]] : []), ...(job.flow?.requested?.steps ? [[t('ui.inspector.flow'), job.flow.requested.steps.join(' → ') || '—']] : [])];
+  const facts = [['Task', job.id], ...(job.kind ? [[t('ui.inspector.mode'), `${t('ui.kind.' + job.kind)} · ${t('ui.rigor.' + (job.rigor || 'standard'))}`]] : []), [t('ui.inspector.stage'), job.stage], ['Branch', job.branch], ['Commit', job.revision.slice(0, 12)], ['Worktree', job.worktree], ...(job.linked?.length ? [[t('ui.inspector.linked'), job.linked.map(l => `${l.project} · ${l.revision.slice(0, 8)}${l.revision !== l.base ? ' ✎' : ''}`).join(', ')]] : []), [t('ui.inspector.round'), `${job.round} / ${state.limits?.rounds ?? 3}`], ...(job.usage ? [[t('ui.inspector.usage'), t('ui.inspector.usageText', { calls: job.usage.calls, tokens: job.usage.tokens.toLocaleString(), limit: state.limits?.tokens ? ' / ' + state.limits.tokens.toLocaleString() : '' })]] : []), [t('ui.inspector.started'), clock(job.createdAt)], ...(job.metrics ? [[t('ui.inspector.debate'), Object.entries(job.metrics).map(([k, v]) => t('ui.metric.' + k) + ' ' + v).join(' · ')]] : []), ...(job.flow?.requested?.steps ? [[t('ui.inspector.flow'), job.flow.requested.steps.join(' → ') || '—']] : [])];
   // Tiến độ: bước đang chạy + ước tính dựa trên thời gian trung bình các bước agent trước đó.
   const progress = (() => {
     if (!['running', 'queued'].includes(job.status)) return '';
@@ -594,7 +594,7 @@ function drawInspector() {
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => {
     if (b.dataset.action === 'cancel' && !confirm(t('ui.inspector.confirmCancel'))) return;
     if (b.dataset.action === 'delete' && !confirm(t('ui.inspector.confirmDelete'))) return;
@@ -602,6 +602,7 @@ function drawInspector() {
   }));
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
+  $('export-job').onclick = () => { location.href = `/api/jobs/${encodeURIComponent(selected)}/export`; };
   if ($('merge')) $('merge').onclick = () => attempt(openMerge);
   if ($('send-answer')) $('send-answer').onclick = () => attempt(async () => { const v = $('answer').value.trim(); if (!v) return; await api(`jobs/${selected}/control`, { action: 'message', message: v }); await refresh(); });
 }
@@ -891,7 +892,7 @@ function view(name) {
   name = name === true ? 'members' : name || 'work';
   $('work-view').hidden = name !== 'work'; $('quota-view').hidden = name !== 'members'; $('security-view').hidden = name !== 'security';
   $('overview').classList.toggle('active', name === 'work'); $('quota-nav').classList.toggle('active', name === 'members'); $('security-nav').classList.toggle('active', name === 'security');
-  if (name === 'security') drawSecurity();
+  if (name === 'security') { drawSecurity(); drawAccess(); }
 }
 // Bảng quyền: mô tả đúng những gì code đang áp dụng (sandbox, công cụ, mạng, bí mật, merge).
 function drawSecurity() {
@@ -906,6 +907,76 @@ function drawSecurity() {
   $('security-matrix').innerHTML = `<table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map(x => `<td class="${mark[x][0]}">${mark[x][1]}</td>`).join('')}<td class="how">${esc(t('ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table><p class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))}</p>`;
   $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOff'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
 }
+// Quyền theo dự án, riêng từng member: thư mục tham khảo (chỉ đọc) + Internet. Leader đề xuất, bạn sửa và Lưu.
+let acc = null;
+function drawAccess(reset = false) {
+  const projects = state.projects;
+  if (!projects.length) { $('project-access').innerHTML = ''; return; }
+  if (reset || !acc || !projects.some(p => p.id === acc.project)) {
+    const p = projects.find(x => x.id === (acc?.project || curProject)) || projects[0];
+    acc = { project: p.id, folders: structuredClone(p.access.folders), network: [...p.access.network], repos: structuredClone(p.access.repos || []), dirty: false, proposal: null, busy: false };
+  }
+  const members = state.agents.filter(a => a.enabled), on = (list, id) => list.includes('*') || list.includes(id);
+  const cells = (list, key) => `<td><input type="checkbox" data-acc="${key}" data-m="*" ${list.includes('*') ? 'checked' : ''} aria-label="${esc(t('ui.access.all'))}"></td>` +
+    members.map(a => `<td><input type="checkbox" data-acc="${key}" data-m="${esc(a.id)}" ${on(list, a.id) ? 'checked' : ''} ${list.includes('*') ? 'disabled' : ''} aria-label="${esc(a.label)}"></td>`).join('');
+  const others = projects.filter(p => p.id !== acc.project && !acc.folders.some(f => f.path === p.path));
+  const pr = acc.proposal;
+  $('project-access').innerHTML = `<h3>${esc(t('ui.access.title'))}</h3><p class="muted">${esc(t('ui.access.intro'))}</p>
+    <div class="access-bar"><select id="acc-project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === acc.project ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select>
+      <button id="acc-propose" ${acc.busy ? 'disabled' : ''}>${esc(t(acc.busy ? 'ui.access.proposing' : 'ui.access.propose'))}</button>
+      <button id="acc-save" class="primary" ${acc.dirty ? '' : 'disabled'}>${esc(t('ui.access.save'))}</button><button id="acc-undo" ${acc.dirty ? '' : 'disabled'}>${esc(t('ui.access.undo'))}</button></div>
+    ${pr ? `<div class="notice">${esc(t('ui.access.proposed'))} ${esc(pr.summary)}${pr.networkWhy ? `\n🌐 ${esc(pr.networkWhy)}` : ''}${pr.notes.length ? '\n• ' + pr.notes.map(esc).join('\n• ') : ''}</div>` : ''}
+    <div class="sec-wrap"><table class="sec-table access-table"><thead><tr><th>${esc(t('ui.access.folder'))}</th><th>${esc(t('ui.access.all'))}</th>${members.map(a => `<th title="${esc(rolesText(a.id))}">${esc(a.label)}<br><small>${esc(rolesText(a.id))}</small></th>`).join('')}<th></th></tr></thead><tbody>
+      ${acc.folders.map((f, i) => `<tr><th class="path">📁 ${esc(f.path)}${f.why ? `<br><small class="muted">${esc(f.why)}</small>` : ''}<br><small class="muted">${esc(t('ui.access.readOnly'))}</small></th>${cells(f.members, 'f' + i)}<td><button class="icon-btn" data-acc-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('') || `<tr><td colspan="${members.length + 3}" class="muted">${esc(t('ui.access.noFolders'))}</td></tr>`}
+      ${acc.repos.map((r, i) => `<tr class="repo-row"><th class="path">🔗 ${esc(r.project)} · ${esc(projects.find(p => p.id === r.project)?.path || '')}${r.why ? `<br><small class="muted">${esc(r.why)}</small>` : ''}<br><small class="warn">${esc(t('ui.access.editTogether'))}</small></th>${cells(r.members, 'r' + i)}<td><button class="icon-btn" data-acc-repo-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('')}
+      <tr><th class="path">🌐 ${esc(t('ui.access.network'))}</th>${cells(acc.network, 'net')}<td></td></tr></tbody></table></div>
+    <div class="access-bar"><input id="acc-path" placeholder="D:\\other\\project\\docs"><button id="acc-pick">${esc(t('ui.project.pick'))}</button><button id="acc-add">${esc(t('ui.access.add'))}</button>
+      ${projects.some(p => p.id !== acc.project && !acc.repos.some(r => r.project === p.id)) ? `<select id="acc-repo"><option value="">${esc(t('ui.access.addRepo'))}</option>${projects.filter(p => p.id !== acc.project && !acc.repos.some(r => r.project === p.id)).map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.path)}</option>`).join('')}</select>` : ''}
+      ${others.length ? `<select id="acc-other"><option value="">${esc(t('ui.access.addProject'))}</option>${others.map(p => `<option value="${esc(p.path)}">${esc(p.id)} · ${esc(p.path)}</option>`).join('')}</select>` : ''}</div>`;
+  const touch = () => { acc.dirty = true; drawAccess(); };
+  $('acc-project').onchange = () => { if (acc.dirty && !confirm(t('ui.access.discard'))) { $('acc-project').value = acc.project; return; } acc = { project: $('acc-project').value }; drawAccess(true); };
+  document.querySelectorAll('[data-acc]').forEach(x => x.onchange = () => {
+    const key = x.dataset.acc, row = key === 'net' ? null : (key[0] === 'r' ? acc.repos : acc.folders)[+key.slice(1)], list = row ? row.members : acc.network, m = x.dataset.m;
+    const next = m === '*' ? (x.checked ? ['*'] : []) : x.checked ? [...new Set([...list.filter(v => v !== '*'), m])] : list.filter(v => v !== m);
+    if (row) row.members = next; else acc.network = next; touch();
+  });
+  document.querySelectorAll('[data-acc-del]').forEach(x => x.onclick = () => { acc.folders.splice(+x.dataset.accDel, 1); touch(); });
+  document.querySelectorAll('[data-acc-repo-del]').forEach(x => x.onclick = () => { acc.repos.splice(+x.dataset.accRepoDel, 1); touch(); });
+  if ($('acc-repo')) $('acc-repo').onchange = () => { if ($('acc-repo').value) { acc.repos.push({ project: $('acc-repo').value, members: [] }); touch(); } };
+  const add = path => { path = path.trim().replace(/^"|"$/g, ''); if (!path || acc.folders.some(f => f.path === path)) return; acc.folders.push({ path, members: [] }); touch(); };
+  $('acc-add').onclick = () => add($('acc-path').value);
+  if ($('acc-other')) $('acc-other').onchange = () => add($('acc-other').value);
+  $('acc-pick').onclick = () => attempt(async () => { const r = await api('projects/pick', {}); if (r.path) add(r.path); });
+  $('acc-undo').onclick = () => drawAccess(true);
+  $('acc-save').onclick = () => attempt(async () => { const r = await api(`projects/${acc.project}/access`, { folders: acc.folders, network: acc.network, repos: acc.repos }); await refresh(); acc = { project: r.id }; drawAccess(true); notice(t('ui.access.saved')); });
+  $('acc-propose').onclick = () => attempt(async () => {
+    acc.busy = true; drawAccess();
+    try { const r = await api(`projects/${acc.project}/access/propose`, { candidates: acc.folders.map(f => f.path) }); acc.folders = r.draft.folders; acc.network = r.draft.network; acc.repos = r.draft.repos || []; acc.proposal = r; acc.dirty = true; }
+    finally { acc.busy = false; drawAccess(); }
+  });
+}
+// Bộ nhớ của dự án/phiên + sao lưu: bạn thấy đúng thứ AI được nhắc lại, sửa/xóa được.
+async function drawMemory() {
+  const [m, b] = await Promise.all([api(`memory?project=${encodeURIComponent(curProject)}&session=${encodeURIComponent(curSession)}`), api('backups')]);
+  const ses = state.sessions.find(x => x.id === curSession);
+  $('memory-body').innerHTML = `<p class="muted">${esc(t('ui.mem.intro'))}</p>
+    <h3>${esc(t('ui.mem.facts', { project: curProject, n: m.facts.length }))}</h3>
+    <ul class="mem-list">${m.facts.map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${f.id} · ${esc(f.job || '')} · ${esc(clock(f.at))}</small></span><button class="icon-btn" data-mem-del="${f.id}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
+    <div class="row-input"><input id="mem-add" maxlength="300" placeholder="${esc(t('ui.mem.addPlaceholder'))}"><button id="mem-add-btn">${esc(t('ui.mem.add'))}</button></div>
+    <h3>${esc(t('ui.mem.session', { name: ses?.name || '—' }))}</h3>
+    <textarea id="mem-summary" rows="4" maxlength="1500">${esc(m.summary)}</textarea><button id="mem-summary-save">${esc(t('ui.mem.saveSummary'))}</button>
+    <details><summary>${esc(t('ui.mem.log', { n: m.log.length }))}</summary><ul class="mem-log">${m.log.map(l => `<li>${esc(l.text)}</li>`).join('')}</ul></details>
+    <h3>${esc(t('ui.mem.backups'))}</h3><p class="muted">${esc(b.dir)}</p>
+    <ul class="mem-log">${b.list.slice(0, 5).map(x => `<li>${esc(x.file.split(/[\\/]/).pop())} · ${esc(clock(x.at))} · ${Math.round(x.bytes / 1024)} KB</li>`).join('') || `<li class="muted">${esc(t('ui.mem.noBackup'))}</li>`}</ul>
+    <button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>`;
+  const edit = body => attempt(async () => { await api('memory', { project: curProject, session: curSession, ...body }); await drawMemory(); });
+  document.querySelectorAll('[data-mem-del]').forEach(x => x.onclick = () => edit({ remove: x.dataset.memDel }));
+  $('mem-add-btn').onclick = () => $('mem-add').value.trim() && edit({ add: $('mem-add').value });
+  $('mem-summary-save').onclick = () => edit({ summary: $('mem-summary').value });
+  $('backup-now').onclick = () => attempt(async () => { $('backup-now').disabled = true; await api('backup', {}); await drawMemory(); });
+}
+$('memory-open').onclick = () => attempt(async () => { await drawMemory(); $('memory-dialog').showModal(); });
+$('close-memory').onclick = () => $('memory-dialog').close();
 $('overview').onclick = () => view('work');
 $('security-nav').onclick = () => view('security');
 $('quota-nav').onclick = () => attempt(async () => { view('members'); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });

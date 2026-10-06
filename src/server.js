@@ -80,6 +80,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && projectDirs) return send(res, 200, accounts.setReadDirs(projectDirs[1], (await body(req)).readDirs));
     const projectAccess = /^\/api\/projects\/([a-z0-9-]+)\/access(\/propose)?$/.exec(url.pathname);
     if (req.method === 'POST' && projectAccess) { const input = await body(req); return send(res, 200, projectAccess[2] ? await team.proposeAccess(projectAccess[1], Array.isArray(input.candidates) ? input.candidates.slice(0, 20) : []) : accounts.setAccess(projectAccess[1], input)); }
+    if (req.method === 'GET' && url.pathname === '/api/memory') return send(res, 200, team.memory(team.project(url.searchParams.get('project') || '').id, url.searchParams.get('session') || null));
+    if (req.method === 'POST' && url.pathname === '/api/memory') return send(res, 200, team.editMemory(await body(req)));
+    if (req.method === 'GET' && url.pathname === '/api/backups') return send(res, 200, { dir: team.backupDir(), list: team.backups() });
+    if (req.method === 'POST' && url.pathname === '/api/backup') return send(res, 200, { file: team.backup('manual'), list: team.backups() });
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const input = await body(req);
       if (!languages.includes(input.language)) throw new Error('language: vi | en | ja');
@@ -111,13 +115,14 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
-    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check))?$/.exec(url.pathname);
+    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export))?$/.exec(url.pathname);
     if (match) {
       const [, id, action] = match;
       if (req.method === 'GET' && !action) return send(res, 200, team.get(id));
       if (req.method === 'GET' && action === 'events') return send(res, 200, team.events(id, Math.max(0, Number(url.searchParams.get('after')) || 0)));
       if (req.method === 'GET' && action === 'diff') return send(res, 200, await team.diff(id));
       if (req.method === 'POST' && action === 'control') { const input = await body(req, 160e6); return send(res, 200, await team.control(id, input.action, input)); }
+      if (req.method === 'GET' && action === 'export') { const md = await team.exportJob(id); res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-${id}.md"` }); res.end(md); return; }
       if (req.method === 'GET' && action === 'merge-check') return send(res, 200, await team.mergeCheck(id));
       if (req.method === 'POST' && action === 'merge') return send(res, 200, await team.merge(id, await body(req)));
     }

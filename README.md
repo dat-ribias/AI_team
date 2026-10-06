@@ -150,3 +150,36 @@ Nghiên cứu và nguồn: [RESEARCH.md](RESEARCH.md).
 - base branch phải chưa đổi. Nếu đã đổi: bấm **Cập nhật theo base** → merge base vào branch việc; không xung đột thì chạy lại test/review/verify, có xung đột thì tạo task gỡ xung đột (độ khó 4) rồi mới đi tiếp. Commit còn conflict marker bị chặn;
 - rủi ro cao (Manager đánh giá cao, đụng file nhạy cảm, xóa file, diff > `largeDiffLines` = 300 dòng, hoặc task do người thiếu năng lực làm) → phải gõ mã commit để xác nhận;
 - merge chỉ fast-forward vào branch gốc. Tùy chỉnh trong `team.config.json`: `sensitivePaths` (regex), `largeDiffLines`.
+
+## Quyền theo dự án và repo sửa cùng
+
+Mỗi project có `access` riêng trong `team.config.json` (sửa ở trang **Quyền & bảo mật**):
+
+```json
+"access": {
+  "folders": [{ "path": "D:\\w\\FE_NEW\\docs", "members": ["codex-1", "claude-x"], "why": "spec" }],
+  "network": ["claude-x"],
+  "repos":   [{ "project": "fe-new", "members": ["codex-1"], "why": "API dùng chung" }]
+}
+```
+
+- `folders`: thư mục ngoài repo, **chỉ đọc**, cấp theo từng member (`"*"` = mọi member). Claude bị chặn thật bằng quyền công cụ; Codex đọc được cả máy trong sandbox nên với Codex đây là chỉ dẫn trong prompt.
+- `network`: member được dùng Internet (Codex: sandbox mở mạng; Claude: WebSearch/WebFetch).
+- `repos`: project **khác đã đăng ký** được SỬA cùng việc. Mỗi việc tạo worktree + branch `ai-team/<id>` trong từng repo liên kết; chỉ member có tên được ghi (Codex/Claude `--add-dir`, Gemini `--include-directories`; agy chưa hỗ trợ). Test của cả hai project đều chạy; reviewer/verifier thấy diff của từng repo; commit rỗng `linked <repo>@<sha>` trong repo chính làm mọi duyệt cũ mất hiệu lực khi repo liên kết đổi; merge kiểm mọi repo trước rồi mới fast-forward lần lượt. Member không được cấp mà sửa repo liên kết → việc dừng. Giới hạn: repo liên kết đổi base thì chưa có "cập nhật" tự động (hủy và giao lại); việc có repo liên kết chạy task code lần lượt.
+- Nút **Leader đề xuất**: Leader đọc repo và các thư mục/dự án ứng viên rồi soạn bản nháp (ít quyền nhất); bạn sửa và bấm **Lưu**. Leader không tự lưu được.
+- Cấu hình cũ `readDirs` / `network: true` vẫn chạy (= cấp cho mọi member) và được chuyển sang `access` khi sửa.
+
+## Bộ nhớ AI, sao lưu, xuất
+
+Mỗi lượt gọi CLI là phiên mới (không `--resume`), nên "trí nhớ" của đội nằm trong `team.sqlite`, không phụ thuộc lịch sử của CLI/tài khoản. Có 3 tầng, đều có giới hạn để không phình prompt:
+
+| Tầng | Ai ghi | Ai đọc | Giới hạn |
+|---|---|---|---|
+| Ghi chú dự án (fact) | Leader ở bước tổng kết: `memory.add` (≤5/lần), `memory.remove` theo id `M<n>` | Leader khi lập kế hoạch/tổng kết; builder chỉ ở đường nhanh | 60 fact/dự án (`maxMemoryFacts`), ~4.000 ký tự vào prompt |
+| Tóm tắt phiên | Leader viết lại mỗi lần tổng kết (`memory.session`) | Leader | 1.500 ký tự |
+| Nhật ký phiên | Controller, 1 dòng/việc, không tốn AI | Leader (8 dòng gần nhất) | 200 dòng/phiên |
+
+Bộ nhớ được đánh dấu là dữ liệu (không phải chỉ dẫn) và có thể đã cũ: AI phải đối chiếu code. Builder nhận phần liên quan qua `context` của task do Leader soạn. Xem/sửa/xóa ở nút 🧠 trên thanh phiên.
+
+- **Sao lưu**: `VACUUM INTO` vào `backupDir` (mặc định `<dataDir>/backups`), tự động mỗi ngày và trước khi xóa việc/phiên, giữ `backupKeep` bản (14). Tắt bằng `"backup": false`. Khôi phục: dừng server, chép bản sao lưu đè lên `team.sqlite`.
+- **Xuất**: nút "Xuất" ở việc → file Markdown (mục tiêu, kế hoạch, báo cáo, trao đổi, diff).

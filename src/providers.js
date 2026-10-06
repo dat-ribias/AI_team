@@ -194,6 +194,8 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (process.platform === 'win32' && winSandbox !== 'off') args.push('-c', `windows.sandbox="${winSandbox}"`);
     // MCP bật riêng cho member này (TOML inline qua -c).
     const toml = v => typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(toml).join(',')}]` : `{${Object.entries(v).map(([k, x]) => `${JSON.stringify(k)}=${toml(x)}`).join(',')}}`;
+    // Repo liên kết được cấp quyền sửa: thêm làm thư mục ghi được của sandbox.
+    for (const d of task.addDirs || []) args.push('--add-dir', d);
     for (const [name, s] of Object.entries(agent.mcp || {})) args.push('-c', `mcp_servers.${name}=${toml({ command: s.command, args: s.args || [], ...(s.env ? { env: s.env } : {}) })}`);
     args.push('-');
   } else if (agent.provider === 'claude') {
@@ -201,6 +203,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (task.stage !== 'implement') args.push('--tools', `Read,Glob,Grep,Bash${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${checks.map(c => `,Bash(${c}),Bash(${c} *)`).join('')}${web ? ',WebSearch,WebFetch' : ''}`);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
+    for (const d of task.addDirs || []) args.push('--add-dir', d); // repo liên kết được cấp quyền sửa (acceptEdits áp dụng cả ở đây)
     // MCP bật riêng cho member này; tên công cụ dạng mcp__<server> được cho phép không cần hỏi.
     if (agent.mcp && Object.keys(agent.mcp).length) args.push('--mcp-config', JSON.stringify({ mcpServers: agent.mcp }), '--strict-mcp-config', '--allowedTools', ...Object.keys(agent.mcp).map(n => `mcp__${n}`));
     if (!web) args.push('--disallowedTools', 'WebFetch,WebSearch');
@@ -210,6 +213,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   } else {
     args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);
+    if (agent.provider === 'gemini' && task.addDirs?.length) args.push('--include-directories', task.addDirs.join(','));
     if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
     // Antigravity (agy) không có cờ quyền theo lượt: lệnh check phải được cho phép trong ~/.gemini/antigravity-cli/settings.json (permissions.allow).
   }

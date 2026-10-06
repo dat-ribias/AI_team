@@ -15,7 +15,7 @@ export function testList(input) {
   return list;
 }
 // Chuẩn hóa quyền project từ dashboard/Leader: thư mục phải tồn tại (không cho cả ổ / cả home), member phải có thật.
-export function accessList(input, agentIds) {
+export function accessList(input, agentIds, projectIds = [], self = null) {
   const members = l => { const v = [...new Set((Array.isArray(l) ? l : []).map(String))]; if (v.some(x => x !== '*' && !agentIds.includes(x))) throw new Error(msg("srv.accounts.access_member", { 0: v.join(', ') })); return v.includes('*') ? ['*'] : v; };
   const folders = [], seen = new Set();
   for (const f of Array.isArray(input?.folders) ? input.folders : []) {
@@ -23,7 +23,14 @@ export function accessList(input, agentIds) {
     folders.push({ path, members: members(f.members), ...(f.why ? { why: String(f.why).slice(0, 300) } : {}) });
   }
   if (folders.length > 20) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: folders.length }));
-  return { folders, network: members(input?.network) };
+  // Repo liên kết (được sửa cùng việc): phải là project đã đăng ký khác project này.
+  const repos = [], seenRepo = new Set();
+  for (const r of Array.isArray(input?.repos) ? input.repos : []) {
+    const pid = String(r?.project || ''); if (!pid || seenRepo.has(pid)) continue; seenRepo.add(pid);
+    if (pid === self || !projectIds.includes(pid)) throw new Error(msg("srv.accounts.access_repo", { 0: pid }));
+    repos.push({ project: pid, members: members(r.members), ...(r.why ? { why: String(r.why).slice(0, 300) } : {}) });
+  }
+  return { folders, network: members(input?.network), repos };
 }
 function readDirList(text) {
   const dirs = [...new Set(String(text ?? '').split(/\r?\n/).map(l => l.trim().replace(/^"|"$/g, '')).filter(Boolean).map(d => resolve(d)))];
@@ -210,14 +217,16 @@ export class Accounts {
   setAccess(id, input) {
     const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
     if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
-    p.access = accessList(input, config.agents.map(a => a.id)); delete p.readDirs; delete p.network;
+    p.access = accessList(input, config.agents.map(a => a.id), config.projects.map(x => x.id), id); delete p.readDirs; delete p.network;
     this.persist(config); return { id, access: p.access };
   }
   async removeProject(id, { cancelJobs = false } = {}) {
     const open = this.team.jobs().filter(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status));
     if (open.length && !cancelJobs) throw Object.assign(new Error(msg("srv.accounts.project_busy_list", { 0: open.length, 1: open.map(j => j.id).join(', ') })), { code: 409, jobs: open.map(j => j.id) });
     for (const j of open) await this.team.control(j.id, 'cancel');
-    const config = structuredClone(this.team.config); config.projects = config.projects.filter(p => p.id !== id); this.persist(config);
+    const config = structuredClone(this.team.config); config.projects = config.projects.filter(p => p.id !== id);
+    for (const p of config.projects) if (p.access?.repos) p.access.repos = p.access.repos.filter(r => r.project !== id); // bỏ liên kết tới project đã gỡ
+    this.persist(config);
     return { removed: id };
   }
   // Hộp chọn thư mục của Windows (server chạy trên chính máy này).

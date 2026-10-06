@@ -282,7 +282,7 @@ test('projects can be registered from the UI, including git init and "npm test"-
   const p = team.project(id); assert.deepEqual(p.tests, [['node', '-e', 'process.exit(0)']]);
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).projects.length, 2);
   const upd = accounts.updateProject(id, { tests: 'node --test x.js\nno-such-cmd-xyz run', network: true });
-  assert.deepEqual(team.project(id).tests, [['node', '--test', 'x.js'], ['no-such-cmd-xyz', 'run']]); assert.equal(team.project(id).network, true);
+  assert.deepEqual(team.project(id).tests, [['node', '--test', 'x.js'], ['no-such-cmd-xyz', 'run']]); assert.deepEqual(team.project(id).access.network, ['*']); assert.equal(team.accessFor(id, 'c').network, true);
   assert.equal(upd.warnings.length, 1); assert.match(upd.warnings[0], /no-such-cmd-xyz/);
   assert.throws(() => accounts.updateProject(id, { tests: [['node', 1]] })); assert.throws(() => accounts.updateProject(id, { network: 'yes' }));
   // Còn công việc chưa xong: 409 kèm danh sách; cancelJobs=true thì hủy rồi gỡ.
@@ -762,4 +762,111 @@ test('token budget per job: a job over maxTokensPerJob stops before the next AI 
   const job = team.get('budget');
   assert.equal(job.status, 'blocked'); assert.match(job.error, /5000.*1000/); assert.equal(calls, 0);
   assert.equal(team.state().limits.tokens, 1000);
+});
+
+test('per-project access: folders and Internet per member; Leader proposes a draft that the owner saves', async t => {
+  const f = await fixture();
+  const agents = [{ id: 'lead', label: 'L', provider: 'mock' }, { id: 'b1', label: 'B1', provider: 'mock' }, { id: 'b2', label: 'B2', provider: 'mock' }];
+  const docs = mkdtempSync(join(tmpdir(), 'docs-')), spec = mkdtempSync(join(tmpdir(), 'spec-'));
+  let seen;
+  const team = new Team({ ...f.config, agents, pipeline: { manager: 'lead', builders: ['b1', 'b2'], reviewer: 'lead', verifier: 'lead' } }, f.data, { runAgent: async (agent, task, prompt) => {
+    seen = { agent: agent.id, readDirs: task.readDirs, prompt };
+    return { summary: 'ok', status: 'completed', folders: [{ path: docs, members: ['b1', 'ghost'], why: 'API spec' }, { path: join(docs, 'missing'), members: ['*'] }], network: { members: ['b2'], why: 'npm docs' }, notes: ['check spec'] };
+  } });
+  t.after(() => team.close());
+  const { Accounts } = await import('../src/accounts.js');
+  const file = join(f.data, 'cfg.json'); writeFileSync(file, '{}');
+  const accounts = new Accounts(team, file, process.cwd(), { commandAvailable: () => true }); t.after(() => accounts.close());
+  const pid = f.config.projects[0].id;
+  // Cấu hình cũ (readDirs cho mọi người) vẫn hiểu được; sửa bằng ô cũ thì chuyển sang access mà giữ quyền riêng.
+  accounts.updateProject(pid, { readDirs: spec, network: false });
+  assert.deepEqual(team.accessFor(pid, 'b2'), { readDirs: [spec], network: false });
+  // Leader đề xuất: được đọc các thư mục ứng viên; bản nháp bỏ member/thư mục không có thật; chưa lưu gì.
+  const r = await team.proposeAccess(pid, [docs]);
+  assert.equal(seen.agent, 'lead'); assert(seen.readDirs.includes(docs)); assert.match(seen.prompt, /least privilege/);
+  assert.deepEqual(r.draft, { folders: [{ path: docs, members: ['b1'], why: 'API spec' }], network: ['b2'], repos: [] });
+  assert.deepEqual(team.accessFor(pid, 'b1').readDirs, [spec]);
+  // Bạn lưu: mỗi member chỉ thấy đúng thư mục/mạng được cấp.
+  accounts.setAccess(pid, { folders: [...r.draft.folders, { path: spec, members: ['*'] }], network: r.draft.network });
+  assert.deepEqual(team.accessFor(pid, 'b1'), { readDirs: [docs, spec], network: false });
+  assert.deepEqual(team.accessFor(pid, 'b2'), { readDirs: [spec], network: true });
+  assert.throws(() => accounts.setAccess(pid, { folders: [{ path: docs, members: ['ghost'] }] }), /ghost/);
+  assert.throws(() => accounts.setAccess(pid, { folders: [{ path: join(docs, 'missing'), members: ['*'] }] }));
+  assert.deepEqual(team.state().projects.find(p => p.id === pid).access.network, ['b2']);
+});
+
+test('linked repos: a job edits another registered project in its own worktree; tests, review and merge cover both; unpermitted edits stop the job', async t => {
+  const f = await fixture(), lib = await fixture();
+  const libProject = { id: 'lib', path: lib.path, tests: [[process.execPath, '-e', "require('node:fs').readFileSync('lib.txt')"]] };
+  const make = (members) => {
+    const config = { ...f.config, projects: [{ ...f.config.projects[0], access: { folders: [], network: [], repos: [{ project: 'lib', members }] } }, libProject] };
+    const seen = [];
+    const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-linked-')), { runAgent: async (agent, task, prompt, opts) => {
+      seen.push({ agent: agent.id, stage: task.stage, addDirs: task.addDirs, readDirs: task.readDirs, prompt });
+      if (task.stage === 'implement') writeFileSync(join(task.linked[0].worktree, 'lib.txt'), members.join() + '\n');
+      return runAgent(agent, task, prompt, opts);
+    } });
+    t.after(() => team.close()); return { team, seen };
+  };
+  // Builder được cấp: sửa repo liên kết; test chạy ở cả hai; reviewer thấy diff liên kết; merge cả hai.
+  const { team, seen } = make(['codex-2']);
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Update hello and the shared lib' });
+  assert.equal(job.linked[0].project, 'lib');
+  const ready = await settle(team, job.id, 'ready');
+  const impl = seen.find(s => s.stage === 'implement');
+  assert.deepEqual(impl.addDirs, [ready.linked[0].worktree]);
+  const review = seen.find(s => s.stage === 'review');
+  assert(review.readDirs.includes(ready.linked[0].worktree)); assert.match(review.prompt, /"linkedRepos"/); assert.match(review.prompt, /"writable":false/);
+  assert.notEqual(ready.linked[0].revision, ready.linked[0].base);
+  assert(team.events(job.id).some(e => e.type === 'TEST_START' && /^\[lib\]/.test(e.summary)));
+  const log = await run(['git'], ['-C', ready.worktree, 'log', '--format=%s', '-3']); assert.match(log.stdout, /linked lib@/);
+  assert.match((await team.diff(job.id)).diff, /### lib[\s\S]*lib\.txt/);
+  const check = await team.mergeCheck(job.id);
+  await team.merge(job.id, { confirm: check.code });
+  assert.equal(readFileSync(join(lib.path, 'lib.txt'), 'utf8'), 'codex-2\n');
+  assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8'), 'Hello from AI Team demo!\n');
+  // Builder không được cấp mà vẫn sửa repo liên kết → việc dừng.
+  const other = make(['codex-4']);
+  other.team.start();
+  const bad = await other.team.create({ project: 'test', goal: 'Update hello again' });
+  const blocked = await settle(other.team, bad.id, 'blocked');
+  assert.match(blocked.error, /lib/);
+});
+
+test('memory: Leader keeps durable project notes and a session summary; next job sees them; backups and export work', async t => {
+  const f = await fixture(), prompts = [];
+  let round = 0;
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    prompts.push({ stage: task.stage, prompt });
+    const r = await runAgent(agent, task, prompt, opts);
+    if (task.stage === 'final') return { ...r, memory: round++ === 0 ? { add: ['Tests: node --test', 'token sk-abcdefghijklmnopqrstuvwxyz123456 leaked'], session: 'Đang sửa hello.txt' } : { remove: [`M${team.memory('test').facts[0].id}`], session: 'Xong hello.txt' } };
+    return r;
+  } });
+  t.after(() => team.close());
+  team.start();
+  const ses = team.createSession({ project: 'test', name: 'S' });
+  const a = await team.create({ project: 'test', goal: 'Update hello', mode: 'full', sessionId: ses.id });
+  await settle(team, a.id, 'ready');
+  let m = team.memory('test', ses.id);
+  assert.deepEqual(m.facts.map(x => x.text)[0], 'Tests: node --test'); assert.doesNotMatch(m.facts[1].text, /sk-abcdef/);
+  assert.equal(m.summary, 'Đang sửa hello.txt'); assert.equal(m.log.length, 1); assert.match(m.log[0].text, /Update hello → ready/);
+  await team.merge(a.id, { confirm: (await team.mergeCheck(a.id)).code });
+  // Việc sau trong cùng phiên: Leader thấy ghi chú (kèm id ở bước tổng kết), tóm tắt phiên và việc trước; builder không thấy.
+  prompts.length = 0;
+  const b = await team.create({ project: 'test', goal: 'Check hello again', mode: 'full', sessionId: ses.id });
+  await settle(team, b.id, 'ready');
+  const plan = prompts.find(p => p.stage === 'plan').prompt, fin = prompts.find(p => p.stage === 'final').prompt, impl = prompts.find(p => p.stage === 'implement').prompt;
+  assert.match(plan, /Tests: node --test/); assert.match(plan, /Đang sửa hello.txt/); assert.match(plan, new RegExp(a.id));
+  assert.match(fin, /M\d+: Tests: node --test/); assert.match(fin, /"memory":\{"add"/);
+  assert.doesNotMatch(impl, /Tests: node --test/);
+  m = team.memory('test', ses.id);
+  assert(!m.facts.some(x => x.text === 'Tests: node --test')); assert.equal(m.summary, 'Xong hello.txt'); assert.equal(m.log.length, 2);
+  // Bạn sửa tay; sao lưu; xuất Markdown.
+  team.editMemory({ project: 'test', session: ses.id, add: 'Dùng tiếng Việt trong UI' });
+  assert(team.memory('test').facts.some(x => x.text === 'Dùng tiếng Việt trong UI'));
+  const file = team.backup('manual'); assert(readFileSync(file).length > 0); assert.equal(team.backups().length >= 1, true);
+  const md = await team.exportJob(b.id); assert.match(md, /^# Check hello again/); assert.match(md, /## Báo cáo/);
+  await team.control(b.id, 'cancel'); await team.control(b.id, 'delete');
+  assert(team.backups().some(x => /before-delete/.test(x.file)));
 });
