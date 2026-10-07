@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Team } from './team.js';
-import { Accounts } from './accounts.js';
+import { Accounts, accessList } from './accounts.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -78,6 +78,8 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && projectUpdate) return send(res, 200, accounts.updateProject(projectUpdate[1], await body(req)));
     const projectDirs = /^\/api\/projects\/([a-z0-9-]+)\/read-dirs$/.exec(url.pathname);
     if (req.method === 'POST' && projectDirs) return send(res, 200, accounts.setReadDirs(projectDirs[1], (await body(req)).readDirs));
+    const projectDirsList = /^\/api\/projects\/([a-z0-9-]+)\/dirs$/.exec(url.pathname);
+    if (req.method === 'GET' && projectDirsList) return send(res, 200, { dirs: team.repoDirs(projectDirsList[1]) });
     const projectAccess = /^\/api\/projects\/([a-z0-9-]+)\/access(\/propose)?$/.exec(url.pathname);
     if (req.method === 'POST' && projectAccess) { const input = await body(req); return send(res, 200, projectAccess[2] ? await team.proposeAccess(projectAccess[1], Array.isArray(input.candidates) ? input.candidates.slice(0, 20) : []) : accounts.setAccess(projectAccess[1], input)); }
     if (req.method === 'GET' && url.pathname === '/api/memory') return send(res, 200, team.memory(team.project(url.searchParams.get('project') || '').id, url.searchParams.get('session') || null));
@@ -111,6 +113,14 @@ const server = createServer(async (req, res) => {
     const sessionRename = /^\/api\/sessions\/([a-z0-9-]+)\/rename$/.exec(url.pathname);
     const sessionDelete = /^\/api\/sessions\/([a-z0-9-]+)\/delete$/.exec(url.pathname);
     if (req.method === 'POST' && sessionDelete) return send(res, 200, await team.deleteSession(sessionDelete[1]));
+    // Bộ quyền riêng của phiên (null = dùng quyền mặc định của dự án).
+    const sessionAccess = /^\/api\/sessions\/([a-z0-9-]+)\/access$/.exec(url.pathname);
+    if (req.method === 'POST' && sessionAccess) {
+      const input = await body(req), s = team.sessions().find(x => x.id === sessionAccess[1]);
+      if (!s) throw new Error(msg("srv.team.session_missing"));
+      return send(res, 200, team.setSessionAccess(s.id, input.access ? accessList(input.access, team.config.agents.map(a => a.id), team.config.projects.map(p => p.id), s.project) : null));
+    }
+    if (req.method === 'POST' && url.pathname === '/api/role-caps') return send(res, 200, accounts.setRoleCaps(await body(req)));
     if (req.method === 'POST' && sessionRename) return send(res, 200, team.renameSession(sessionRename[1], (await body(req)).name));
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }

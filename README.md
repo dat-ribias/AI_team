@@ -159,9 +159,17 @@ Mỗi project có `access` riêng trong `team.config.json` (sửa ở trang **Qu
 "access": {
   "folders": [{ "path": "D:\\w\\FE_NEW\\docs", "members": ["codex-1", "claude-x"], "why": "spec" }],
   "network": ["claude-x"],
-  "repos":   [{ "project": "fe-new", "members": ["codex-1"], "why": "API dùng chung" }]
+  "repos":   [{ "project": "fe-new", "members": ["codex-1"], "why": "API dùng chung" }],
+  "paths":   [{ "path": "src", "grant": { "*": "read", "codex-2": "delete", "codex-3": "edit" } },
+              { "path": "test", "grant": { "*": "read" } }],
+  "shell":   ["*"]
 }
 ```
+
+- `paths`: thư mục **trong repo**, mức quyền riêng từng AI: `read` (xem), `edit` (tạo/sửa, không xóa/đổi tên), `delete` (mọi thứ). Dòng cụ thể hơn thắng (`src/gen` thắng `src`); member cụ thể thắng `"*"`; thư mục không có dòng nào = theo vai trò. Sau mỗi lượt Builder, controller so mọi file đổi (kể cả commit, file mới, xóa) với quyền: file vi phạm bị **hoàn tác đúng file đó** và việc dừng (event `PERMISSION`). Áp dụng cho mọi CLI vì kiểm bằng git, không phụ thuộc sandbox.
+- `shell`: member được chạy lệnh. Claude/Gemini/agy gọi lệnh khi không được phép → dừng ngay; Codex đọc file bằng lệnh nên chỉ nhắc trong prompt. Reviewer/Verifier không được chạy lệnh thì không nhận lệnh check.
+- **Quyền theo phiên**: mỗi phiên có thể có bộ `access` riêng (lưu trong SQLite, chọn phiên ở ô "Mặc định của dự án / Phiên: …"); việc trong phiên đó dùng bộ riêng thay cho mặc định dự án. "Bỏ quyền riêng" để quay về mặc định.
+- **Trần theo vai trò** (`"roleCaps"`, bảng "Ai được làm gì"): tắt chạy lệnh / Internet cho Manager/Builder/Reviewer/Verifier, hoặc tắt xóa file cho Builder. Quyền thực tế = trần của vai trò ở bước đó ∧ quyền cấp cho AI. Commit, merge, push, đọc biến bí mật, ghi ngoài worktree là bất biến, không sửa được.
 
 - `folders`: thư mục ngoài repo, **chỉ đọc**, cấp theo từng member (`"*"` = mọi member). Claude bị chặn thật bằng quyền công cụ; Codex đọc được cả máy trong sandbox nên với Codex đây là chỉ dẫn trong prompt.
 - `network`: member được dùng Internet (Codex: sandbox mở mạng; Claude: WebSearch/WebFetch).

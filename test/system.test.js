@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots } from '../src/team.js';
@@ -787,16 +787,16 @@ test('per-project access: folders and Internet per member; Leader proposes a dra
   const pid = f.config.projects[0].id;
   // Cấu hình cũ (readDirs cho mọi người) vẫn hiểu được; sửa bằng ô cũ thì chuyển sang access mà giữ quyền riêng.
   accounts.updateProject(pid, { readDirs: spec, network: false });
-  assert.deepEqual(team.accessFor(pid, 'b2'), { readDirs: [spec], network: false });
+  assert.deepEqual(team.accessFor(pid, 'b2'), { readDirs: [spec], network: false, shell: true, delete: true, paths: [] });
   // Leader đề xuất: được đọc các thư mục ứng viên; bản nháp bỏ member/thư mục không có thật; chưa lưu gì.
   const r = await team.proposeAccess(pid, [docs]);
   assert.equal(seen.agent, 'lead'); assert(seen.readDirs.includes(docs)); assert.match(seen.prompt, /least privilege/);
-  assert.deepEqual(r.draft, { folders: [{ path: docs, members: ['b1'], why: 'API spec' }], network: ['b2'], repos: [] });
+  assert.deepEqual(r.draft, { folders: [{ path: docs, members: ['b1'], why: 'API spec' }], network: ['b2'], repos: [], paths: [], shell: ['*'] });
   assert.deepEqual(team.accessFor(pid, 'b1').readDirs, [spec]);
   // Bạn lưu: mỗi member chỉ thấy đúng thư mục/mạng được cấp.
   accounts.setAccess(pid, { folders: [...r.draft.folders, { path: spec, members: ['*'] }], network: r.draft.network });
-  assert.deepEqual(team.accessFor(pid, 'b1'), { readDirs: [docs, spec], network: false });
-  assert.deepEqual(team.accessFor(pid, 'b2'), { readDirs: [spec], network: true });
+  assert.deepEqual(team.accessFor(pid, 'b1').readDirs, [docs, spec]); assert.equal(team.accessFor(pid, 'b1').network, false);
+  assert.equal(team.accessFor(pid, 'b2').network, true);
   assert.throws(() => accounts.setAccess(pid, { folders: [{ path: docs, members: ['ghost'] }] }), /ghost/);
   assert.throws(() => accounts.setAccess(pid, { folders: [{ path: join(docs, 'missing'), members: ['*'] }] }));
   assert.deepEqual(team.state().projects.find(p => p.id === pid).access.network, ['b2']);
@@ -888,4 +888,60 @@ test('load balancing: an account with spare slots does not take every parallel t
   const job = await team.create({ project: 'test', goal: 'Balance' });
   await settle(team, job.id, 'ready');
   assert.notEqual(spans.find(s => s.n === 1).agent, spans.find(s => s.n === 2).agent);
+});
+
+test('per-folder permissions per AI: reviewer view-only, builder edits src but not tests; deletes need delete; session sets override the project; role ceilings and shell stop', async t => {
+  const f = await fixture();
+  const { mkdirSync, existsSync } = await import('node:fs');
+  mkdirSync(join(f.path, 'src')); mkdirSync(join(f.path, 'test'));
+  writeFileSync(join(f.path, 'src', 'a.js'), '1\n'); writeFileSync(join(f.path, 'test', 'a.test.js'), 't\n');
+  await run(['git'], ['-C', f.path, 'add', '.']); await run(['git'], ['-C', f.path, '-c', 'user.name=T', '-c', 'user.email=t@l', 'commit', '-m', 'dirs']);
+  const { levelFor, capsOf } = await import('../src/team.js');
+  const paths = [{ path: 'src', grant: { '*': 'read', 'codex-2': 'edit' } }, { path: 'src/gen', grant: { '*': 'read' } }, { path: 'test', grant: { '*': 'read' } }];
+  assert.equal(levelFor(paths, 'src/a.js', 'codex-2'), 'edit'); assert.equal(levelFor(paths, 'src/gen/x.js', 'codex-2'), 'read');
+  assert.equal(levelFor(paths, 'src/a.js', 'gemini'), 'read'); assert.equal(levelFor(paths, 'srcx/a.js', 'codex-2'), null);
+  assert.equal(capsOf({ roleCaps: { builder: { delete: false, merge: true } } }).builder.delete, false);
+  assert.equal(capsOf({ roleCaps: { builder: { merge: true } } }).builder.merge, undefined);
+  // Builder sửa hello + src (được phép) nhưng cũng sửa test (không được) → file test bị hoàn tác, việc dừng.
+  const make = (access, act, extra = {}) => {
+    const team = new Team({ ...f.config, ...extra, projects: [{ ...f.config.projects[0], access }] }, mkdtempSync(join(tmpdir(), 'ai-team-perm-')), { runAgent: async (agent, task, prompt, opts) => {
+      if (task.stage === 'implement') act(task, opts);
+      return runAgent(agent, task, prompt, opts);
+    } });
+    t.after(() => team.close()); team.start(); return team;
+  };
+  const base = { folders: [], network: [], repos: [], paths: [{ path: 'src', grant: { '*': 'edit' } }, { path: 'test', grant: { '*': 'read' } }] };
+  let team = make(base, task => { writeFileSync(join(task.worktree, 'src', 'a.js'), '2\n'); writeFileSync(join(task.worktree, 'test', 'a.test.js'), 'hacked\n'); });
+  let job = await team.create({ project: 'test', goal: 'Update hello and src' });
+  let blocked = await settle(team, job.id, 'blocked');
+  assert.match(blocked.error, /test\/a\.test\.js/); assert.doesNotMatch(blocked.error, /src\/a\.js/);
+  assert.equal(readFileSync(join(blocked.worktree, 'test', 'a.test.js'), 'utf8'), 't\n');
+  assert.equal(readFileSync(join(blocked.worktree, 'src', 'a.js'), 'utf8'), '2\n');
+  assert(team.events(job.id).some(e => e.type === 'PERMISSION'));
+  // Mức "edit" không cho xóa.
+  team = make(base, task => rmSync(join(task.worktree, 'src', 'a.js')));
+  job = await team.create({ project: 'test', goal: 'Remove src a' });
+  blocked = await settle(team, job.id, 'blocked');
+  assert.match(blocked.error, /src\/a\.js/); assert(existsSync(join(blocked.worktree, 'src', 'a.js')));
+  // Phiên có bộ quyền riêng: cho phép xóa trong src → qua được; dự án khác phiên vẫn giữ mặc định.
+  const { accessList } = await import('../src/accounts.js');
+  job = await team.create({ project: 'test', goal: 'Remove src a again' });
+  team.setSessionAccess(job.sessionId, accessList({ ...base, paths: [{ path: 'src', grant: { '*': 'delete' } }] }, f.config.agents.map(a => a.id), ['test'], 'test'));
+  assert.equal(team.accessFor('test', 'codex-2', job.sessionId, 'implement').paths[0].grant['*'], 'delete');
+  assert.equal(team.accessFor('test', 'codex-2', null, 'implement').paths[0].grant['*'], 'edit');
+  await settle(team, job.id, 'ready');
+  assert.throws(() => accessList({ paths: [{ path: '../x' }] }, ['codex-2'], ['test'], 'test'), /\.\./);
+  // Trần vai trò: builder không được xóa ở bất kỳ đâu.
+  team = make({ ...base, paths: [] }, task => rmSync(join(task.worktree, 'src', 'a.js')), { roleCaps: { builder: { delete: false } } });
+  job = await team.create({ project: 'test', goal: 'Remove src a with ceiling' });
+  blocked = await settle(team, job.id, 'blocked'); assert.match(blocked.error, /src\/a\.js/);
+  // Không được chạy lệnh: agent (không phải Codex) gọi shell → dừng ngay.
+  const agents = f.config.agents.map(a => a.id === 'codex-2' ? { ...a, provider: 'mock', label: 'claude-like' } : a);
+  const shellTeam = new Team({ ...f.config, agents, projects: [{ ...f.config.projects[0], access: { ...base, paths: [], shell: ['codex-1', 'gemini', 'codex-3'] } }] }, mkdtempSync(join(tmpdir(), 'ai-team-sh-')), { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'implement') { assert.match(prompt, /did not allow you to run shell/); opts.onEvent('ACTIVITY', { summary: 'npm i', details: { name: 'Bash', input: { command: 'npm i' } } }); await new Promise((r, j) => opts.signal.aborted ? j(opts.signal.reason) : opts.signal.addEventListener('abort', () => j(opts.signal.reason))); }
+    return runAgent(agent, task, prompt, opts);
+  } });
+  t.after(() => shellTeam.close()); shellTeam.start();
+  job = await shellTeam.create({ project: 'test', goal: 'Update hello with npm' });
+  blocked = await settle(shellTeam, job.id, 'blocked'); assert.match(blocked.error, /npm i/);
 });

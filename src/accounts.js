@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { executable, commandAvailable, childEnv, run, killTree, resolveCommand, commandFromPath } from './process.js';
 import { codexClient, codexRpc, listModels } from './providers.js';
-import { roster, validateConfig, redact, tiers, accessOf } from './team.js';
+import { roster, validateConfig, redact, tiers, accessOf, LEVELS, ROLE_CAPS } from './team.js';
 
 // Lệnh test: chuỗi nhiều dòng ("node --test x.js") hoặc mảng [executable, ...args]; mỗi phần tử là chuỗi không rỗng.
 export function testList(input) {
@@ -30,7 +30,22 @@ export function accessList(input, agentIds, projectIds = [], self = null) {
     if (pid === self || !projectIds.includes(pid)) throw new Error(msg("srv.accounts.access_repo", { 0: pid }));
     repos.push({ project: pid, members: members(r.members), ...(r.why ? { why: String(r.why).slice(0, 300) } : {}) });
   }
-  return { folders, network: members(input?.network), repos };
+  // Thư mục trong repo: đường dẫn tương đối (không "..", không ổ đĩa), mức quyền read | edit | delete cho "*" hoặc từng member.
+  const paths = [], seenPath = new Set();
+  for (const x of Array.isArray(input?.paths) ? input.paths : []) {
+    const path = String(x?.path ?? '').trim().replace(/\\/g, '/').replace(/^\.?\/+|\/+$/g, '').replace(/\/{2,}/g, '/') || '.';
+    if (/(^|\/)\.\.(\/|$)|^[a-z]:/i.test(path)) throw new Error(msg("srv.accounts.access_path", { 0: x?.path }));
+    if (seenPath.has(path.toLowerCase())) continue; seenPath.add(path.toLowerCase());
+    const grant = {};
+    for (const [m, level] of Object.entries(x?.grant || {})) {
+      if (m !== '*' && !agentIds.includes(m)) throw new Error(msg("srv.accounts.access_member", { 0: m }));
+      if (!LEVELS.includes(level)) throw new Error(msg("srv.accounts.access_path", { 0: `${path}: ${level}` }));
+      grant[m] = level;
+    }
+    paths.push({ path, grant, ...(x.why ? { why: String(x.why).slice(0, 300) } : {}) });
+  }
+  if (paths.length > 50) throw new Error(msg("srv.accounts.access_path", { 0: paths.length }));
+  return { folders, network: members(input?.network), repos, paths, shell: input?.shell === undefined ? ['*'] : members(input.shell) };
 }
 function readDirList(text) {
   const dirs = [...new Set(String(text ?? '').split(/\r?\n/).map(l => l.trim().replace(/^"|"$/g, '')).filter(Boolean).map(d => resolve(d)))];
@@ -219,6 +234,12 @@ export class Accounts {
     if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
     p.access = accessList(input, config.agents.map(a => a.id), config.projects.map(x => x.id), id); delete p.readDirs; delete p.network;
     this.persist(config); return { id, access: p.access };
+  }
+  // Trần quyền theo vai trò (chạy lệnh / Internet / xóa file). Chỉ các ô có trong ROLE_CAPS; bất biến an toàn không sửa được.
+  setRoleCaps(input) {
+    const config = structuredClone(this.team.config), caps = {};
+    for (const [role, keys] of Object.entries(ROLE_CAPS)) for (const k of Object.keys(keys)) if (typeof input?.[role]?.[k] === 'boolean') (caps[role] ||= {})[k] = input[role][k];
+    config.roleCaps = caps; this.persist(config); return { roleCaps: caps };
   }
   async removeProject(id, { cancelJobs = false } = {}) {
     const open = this.team.jobs().filter(j => j.project === id && !['merged', 'cancelled', 'done'].includes(j.status));

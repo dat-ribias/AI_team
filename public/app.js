@@ -933,64 +933,109 @@ function view(name) {
   $('overview').classList.toggle('active', name === 'work'); $('quota-nav').classList.toggle('active', name === 'members'); $('security-nav').classList.toggle('active', name === 'security');
   if (name === 'security') { drawSecurity(); drawAccess(); }
 }
-// Bảng quyền: mô tả đúng những gì code đang áp dụng (sandbox, công cụ, mạng, bí mật, merge).
+// Bảng quyền theo vai trò: ô ✓/✗ bấm được là trần quyền bạn đổi được (chạy lệnh, Internet, xóa file); ô còn lại là bất biến an toàn (🔒).
+let capsDraft = null;
 function drawSecurity() {
-  const cols = ['manager', 'builder', 'reviewer', 'verifier', 'controller', 'you'];
+  const cols = ['manager', 'builder', 'reviewer', 'verifier', 'controller', 'you'], caps = capsDraft || state.caps || {};
   const rows = [
-    ['read', 'Y Y Y Y Y Y'], ['edit', 'N Y N N N Y'], ['outside', 'N N N N N Y'], ['shell', 'P P P P Y Y'],
-    ['network', state.projects.some(p => p.network) ? 'P P P P N Y' : 'N N N N N Y'], ['commit', 'N N N N Y Y'],
+    ['read', 'Y Y Y Y Y Y'], ['edit', 'N Y N N N Y'], ['delete', 'N C N N N Y'], ['outside', 'N N N N N Y'], ['shell', 'C C C C Y Y'],
+    ['network', 'C C C C N Y'], ['commit', 'N N N N Y Y'],
     ['merge', 'N N N N N Y'], ['push', 'N N N N N Y'], ['mcp', 'P P P P N Y'], ['secrets', 'N N N N N Y'], ['accounts', 'P P P P N Y'],
   ];
   const mark = { Y: ['ok', '✓'], N: ['no', '✗'], P: ['part', '~'] };
+  const cell = (k, v, col) => {
+    if (v !== 'C') return `<td class="${mark[v][0]}" title="${esc(t('ui.sec.locked'))}">${mark[v][1]}</td>`;
+    const on = caps[col]?.[k] !== false;
+    return `<td class="${on ? 'ok' : 'no'}"><button class="cap-toggle" data-cap="${col}:${k}" aria-pressed="${on}" title="${esc(t('ui.sec.toggle'))}">${on ? '✓' : '✗'}</button></td>`;
+  };
   const head = cols.map(c => `<th>${esc(c === 'controller' ? 'Controller' : c === 'you' ? t('ui.who.user') : roleLabel(c))}</th>`).join('');
-  $('security-matrix').innerHTML = `<table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map(x => `<td class="${mark[x][0]}">${mark[x][1]}</td>`).join('')}<td class="how">${esc(t('ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table><p class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))}</p>`;
+  $('security-matrix').innerHTML = `<h3>${esc(t('ui.sec.rolesTitle'))}</h3><p class="muted">${esc(t('ui.sec.rolesIntro'))}</p>
+    <table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map((x, i) => cell(k, x, cols[i])).join('')}<td class="how">${esc(t('ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table>
+    <div class="access-bar"><button id="caps-save" class="primary" ${capsDraft ? '' : 'disabled'}>${esc(t('ui.access.save'))}</button><button id="caps-undo" ${capsDraft ? '' : 'disabled'}>${esc(t('ui.access.undo'))}</button>
+    <span class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))} · ${esc(t('ui.sec.legendToggle'))}</span></div>`;
+  document.querySelectorAll('[data-cap]').forEach(b => b.onclick = () => {
+    const [role, k] = b.dataset.cap.split(':'); capsDraft = structuredClone(capsDraft || state.caps || {});
+    capsDraft[role] = { ...capsDraft[role], [k]: capsDraft[role]?.[k] === false }; drawSecurity();
+  });
+  $('caps-undo').onclick = () => { capsDraft = null; drawSecurity(); };
+  $('caps-save').onclick = () => attempt(async () => { await api('role-caps', capsDraft); capsDraft = null; await refresh(); drawSecurity(); notice(t('ui.access.saved')); });
   $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOff'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
 }
-// Quyền theo dự án, riêng từng member: thư mục tham khảo (chỉ đọc) + Internet. Leader đề xuất, bạn sửa và Lưu.
-let acc = null;
+// Quyền theo dự án hoặc theo phiên, riêng từng AI: thư mục trong repo (Xem / Sửa / Sửa + Xóa), thư mục ngoài repo (chỉ đọc), repo sửa cùng, Internet, chạy lệnh.
+let acc = null; const repoDirs = {};
 function drawAccess(reset = false) {
   const projects = state.projects;
   if (!projects.length) { $('project-access').innerHTML = ''; return; }
   if (reset || !acc || !projects.some(p => p.id === acc.project)) {
     const p = projects.find(x => x.id === (acc?.project || curProject)) || projects[0];
-    acc = { project: p.id, folders: structuredClone(p.access.folders), network: [...p.access.network], repos: structuredClone(p.access.repos || []), dirty: false, proposal: null, busy: false };
+    const ses = acc?.project === p.id && acc.scope ? state.sessions.find(s => s.id === acc.scope) : null, src = ses?.access || p.access;
+    acc = { project: p.id, scope: ses ? ses.id : '', own: !!ses?.access, folders: structuredClone(src.folders), network: [...src.network], repos: structuredClone(src.repos || []),
+      paths: structuredClone(src.paths || []), shell: [...(src.shell || ['*'])], dirty: false, proposal: null, busy: false };
+    if (!repoDirs[p.id]) api(`projects/${p.id}/dirs`).then(r => { repoDirs[p.id] = r.dirs; if (acc?.project === p.id && $('acc-dirs')) $('acc-dirs').innerHTML = r.dirs.map(d => `<option value="${esc(d)}">`).join(''); }).catch(() => {});
   }
-  const members = state.agents.filter(a => a.enabled), on = (list, id) => list.includes('*') || list.includes(id);
+  const members = state.agents.filter(a => a.enabled), on = (list, id) => list.includes('*') || list.includes(id), span = members.length + 3;
   const cells = (list, key) => `<td><input type="checkbox" data-acc="${key}" data-m="*" ${list.includes('*') ? 'checked' : ''} aria-label="${esc(t('ui.access.all'))}"></td>` +
     members.map(a => `<td><input type="checkbox" data-acc="${key}" data-m="${esc(a.id)}" ${on(list, a.id) ? 'checked' : ''} ${list.includes('*') ? 'disabled' : ''} aria-label="${esc(a.label)}"></td>`).join('');
+  const lv = (key, val, inherit, label) => `<select class="lv lv-${val || 'inherit'}" data-lv="${key}" aria-label="${esc(label)}">${inherit ? `<option value="" ${val ? '' : 'selected'}>${esc(t('ui.access.lvInherit'))}</option>` : ''}${['read', 'edit', 'delete'].map(l => `<option value="${l}" ${val === l ? 'selected' : ''}>${esc(t('ui.access.lv.' + l))}</option>`).join('')}</select>`;
+  const builder = id => rolesOf(id).includes('builder');
   const others = projects.filter(p => p.id !== acc.project && !acc.folders.some(f => f.path === p.path));
-  const pr = acc.proposal;
+  const sessions = state.sessions.filter(s => s.project === acc.project), pr = acc.proposal, why = w => w ? `<br><small class="muted">${esc(w)}</small>` : '';
+  const head = (icon, title, hint) => `<tr class="sec-head"><th colspan="${span}">${icon} ${esc(t(title))} <small class="muted">${esc(t(hint))}</small></th></tr>`;
   $('project-access').innerHTML = `<h3>${esc(t('ui.access.title'))}</h3><p class="muted">${esc(t('ui.access.intro'))}</p>
     <div class="access-bar"><select id="acc-project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === acc.project ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select>
+      <select id="acc-scope"><option value="">${esc(t('ui.access.scopeProject'))}</option>${sessions.map(s => `<option value="${esc(s.id)}" ${s.id === acc.scope ? 'selected' : ''}>${esc(t('ui.access.scopeSession', { 0: s.name }))}${s.access ? ' ★' : ''}</option>`).join('')}</select>
       <button id="acc-propose" ${acc.busy ? 'disabled' : ''}>${esc(t(acc.busy ? 'ui.access.proposing' : 'ui.access.propose'))}</button>
-      <button id="acc-save" class="primary" ${acc.dirty ? '' : 'disabled'}>${esc(t('ui.access.save'))}</button><button id="acc-undo" ${acc.dirty ? '' : 'disabled'}>${esc(t('ui.access.undo'))}</button></div>
+      <button id="acc-save" class="primary" ${acc.dirty ? '' : 'disabled'}>${esc(t('ui.access.save'))}</button><button id="acc-undo" ${acc.dirty ? '' : 'disabled'}>${esc(t('ui.access.undo'))}</button>
+      ${acc.scope && acc.own ? `<button id="acc-inherit">${esc(t('ui.access.useProject'))}</button>` : ''}</div>
+    ${acc.scope && !acc.own ? `<div class="notice">${esc(t('ui.access.inherit'))}</div>` : ''}
     ${pr ? `<div class="notice">${esc(t('ui.access.proposed'))} ${esc(pr.summary)}${pr.networkWhy ? `\n🌐 ${esc(pr.networkWhy)}` : ''}${pr.notes.length ? '\n• ' + pr.notes.map(esc).join('\n• ') : ''}</div>` : ''}
     <div class="sec-wrap"><table class="sec-table access-table"><thead><tr><th>${esc(t('ui.access.folder'))}</th><th>${esc(t('ui.access.all'))}</th>${members.map(a => `<th title="${esc(rolesText(a.id))}">${esc(a.label)}<br><small>${esc(rolesText(a.id))}</small></th>`).join('')}<th></th></tr></thead><tbody>
-      ${acc.folders.map((f, i) => `<tr><th class="path">📁 ${esc(f.path)}${f.why ? `<br><small class="muted">${esc(f.why)}</small>` : ''}<br><small class="muted">${esc(t('ui.access.readOnly'))}</small></th>${cells(f.members, 'f' + i)}<td><button class="icon-btn" data-acc-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('') || `<tr><td colspan="${members.length + 3}" class="muted">${esc(t('ui.access.noFolders'))}</td></tr>`}
-      ${acc.repos.map((r, i) => `<tr class="repo-row"><th class="path">🔗 ${esc(r.project)} · ${esc(projects.find(p => p.id === r.project)?.path || '')}${r.why ? `<br><small class="muted">${esc(r.why)}</small>` : ''}<br><small class="warn">${esc(t('ui.access.editTogether'))}</small></th>${cells(r.members, 'r' + i)}<td><button class="icon-btn" data-acc-repo-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('')}
+      ${head('📂', 'ui.access.inRepo', 'ui.access.inRepoHint')}
+      ${acc.paths.map((x, i) => `<tr><th class="path">📂 ${esc(x.path === '.' ? t('ui.access.wholeRepo') : x.path)}${why(x.why)}</th><td>${lv(`${i}:*`, x.grant['*'] || 'read', false, t('ui.access.all'))}</td>${members.map(a => `<td class="${builder(a.id) ? '' : 'dim'}" title="${builder(a.id) ? '' : esc(t('ui.access.onlyBuilder'))}">${lv(`${i}:${a.id}`, x.grant[a.id], true, a.label)}</td>`).join('')}<td><button class="icon-btn" data-acc-path-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('') || `<tr><td colspan="${span}" class="muted">${esc(t('ui.access.noPaths'))}</td></tr>`}
+      ${head('📁', 'ui.access.outside', 'ui.access.readOnly')}
+      ${acc.folders.map((f, i) => `<tr><th class="path">📁 ${esc(f.path)}${why(f.why)}</th>${cells(f.members, 'f' + i)}<td><button class="icon-btn" data-acc-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('') || `<tr><td colspan="${span}" class="muted">${esc(t('ui.access.noFolders'))}</td></tr>`}
+      ${acc.repos.map((r, i) => `<tr class="repo-row"><th class="path">🔗 ${esc(r.project)} · ${esc(projects.find(p => p.id === r.project)?.path || '')}${why(r.why)}<br><small class="warn">${esc(t('ui.access.editTogether'))}</small></th>${cells(r.members, 'r' + i)}<td><button class="icon-btn" data-acc-repo-del="${i}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></td></tr>`).join('')}
+      ${head('⚙️', 'ui.access.actions', 'ui.access.actionsHint')}
+      <tr><th class="path">⌨️ ${esc(t('ui.access.shell'))}<br><small class="muted">${esc(t('ui.access.shellHint'))}</small></th>${cells(acc.shell, 'sh')}<td></td></tr>
       <tr><th class="path">🌐 ${esc(t('ui.access.network'))}</th>${cells(acc.network, 'net')}<td></td></tr></tbody></table></div>
+    <div class="access-bar"><input id="acc-rel" list="acc-dirs" placeholder="${esc(t('ui.access.relPlaceholder'))}"><datalist id="acc-dirs">${(repoDirs[acc.project] || []).map(d => `<option value="${esc(d)}">`).join('')}</datalist><button id="acc-add-rel">${esc(t('ui.access.addRel'))}</button></div>
     <div class="access-bar"><input id="acc-path" placeholder="D:\\other\\project\\docs"><button id="acc-pick">${esc(t('ui.project.pick'))}</button><button id="acc-add">${esc(t('ui.access.add'))}</button>
       ${projects.some(p => p.id !== acc.project && !acc.repos.some(r => r.project === p.id)) ? `<select id="acc-repo"><option value="">${esc(t('ui.access.addRepo'))}</option>${projects.filter(p => p.id !== acc.project && !acc.repos.some(r => r.project === p.id)).map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.path)}</option>`).join('')}</select>` : ''}
       ${others.length ? `<select id="acc-other"><option value="">${esc(t('ui.access.addProject'))}</option>${others.map(p => `<option value="${esc(p.path)}">${esc(p.id)} · ${esc(p.path)}</option>`).join('')}</select>` : ''}</div>`;
   const touch = () => { acc.dirty = true; drawAccess(); };
-  $('acc-project').onchange = () => { if (acc.dirty && !confirm(t('ui.access.discard'))) { $('acc-project').value = acc.project; return; } acc = { project: $('acc-project').value }; drawAccess(true); };
+  const leave = () => !acc.dirty || confirm(t('ui.access.discard'));
+  $('acc-project').onchange = () => { if (!leave()) { $('acc-project').value = acc.project; return; } acc = { project: $('acc-project').value }; drawAccess(true); };
+  $('acc-scope').onchange = () => { if (!leave()) { $('acc-scope').value = acc.scope; return; } acc = { project: acc.project, scope: $('acc-scope').value }; drawAccess(true); };
   document.querySelectorAll('[data-acc]').forEach(x => x.onchange = () => {
-    const key = x.dataset.acc, row = key === 'net' ? null : (key[0] === 'r' ? acc.repos : acc.folders)[+key.slice(1)], list = row ? row.members : acc.network, m = x.dataset.m;
+    const key = x.dataset.acc, list = key === 'net' ? acc.network : key === 'sh' ? acc.shell : (key[0] === 'r' ? acc.repos : acc.folders)[+key.slice(1)].members, m = x.dataset.m;
     const next = m === '*' ? (x.checked ? ['*'] : []) : x.checked ? [...new Set([...list.filter(v => v !== '*'), m])] : list.filter(v => v !== m);
-    if (row) row.members = next; else acc.network = next; touch();
+    if (key === 'net') acc.network = next; else if (key === 'sh') acc.shell = next; else (key[0] === 'r' ? acc.repos : acc.folders)[+key.slice(1)].members = next; touch();
   });
+  document.querySelectorAll('[data-lv]').forEach(x => x.onchange = () => { const [i, m] = x.dataset.lv.split(':'), g = acc.paths[+i].grant; if (x.value) g[m] = x.value; else delete g[m]; touch(); });
+  document.querySelectorAll('[data-acc-path-del]').forEach(x => x.onclick = () => { acc.paths.splice(+x.dataset.accPathDel, 1); touch(); });
   document.querySelectorAll('[data-acc-del]').forEach(x => x.onclick = () => { acc.folders.splice(+x.dataset.accDel, 1); touch(); });
   document.querySelectorAll('[data-acc-repo-del]').forEach(x => x.onclick = () => { acc.repos.splice(+x.dataset.accRepoDel, 1); touch(); });
   if ($('acc-repo')) $('acc-repo').onchange = () => { if ($('acc-repo').value) { acc.repos.push({ project: $('acc-repo').value, members: [] }); touch(); } };
+  $('acc-add-rel').onclick = () => {
+    const path = $('acc-rel').value.trim().replace(/\\/g, '/').replace(/^\.?\/+|\/+$/g, '') || '.';
+    if (/(^|\/)\.\.(\/|$)|^[a-z]:/i.test(path)) return notice(t('ui.access.relInvalid'));
+    if (!acc.paths.some(x => x.path.toLowerCase() === path.toLowerCase())) { acc.paths.push({ path, grant: { '*': 'read' } }); touch(); }
+  };
   const add = path => { path = path.trim().replace(/^"|"$/g, ''); if (!path || acc.folders.some(f => f.path === path)) return; acc.folders.push({ path, members: [] }); touch(); };
   $('acc-add').onclick = () => add($('acc-path').value);
   if ($('acc-other')) $('acc-other').onchange = () => add($('acc-other').value);
   $('acc-pick').onclick = () => attempt(async () => { const r = await api('projects/pick', {}); if (r.path) add(r.path); });
   $('acc-undo').onclick = () => drawAccess(true);
-  $('acc-save').onclick = () => attempt(async () => { const r = await api(`projects/${acc.project}/access`, { folders: acc.folders, network: acc.network, repos: acc.repos }); await refresh(); acc = { project: r.id }; drawAccess(true); notice(t('ui.access.saved')); });
+  const keep = () => { acc = { project: acc.project, scope: acc.scope }; };
+  $('acc-save').onclick = () => attempt(async () => {
+    const body = { folders: acc.folders, network: acc.network, repos: acc.repos, paths: acc.paths, shell: acc.shell };
+    if (acc.scope) await api(`sessions/${acc.scope}/access`, { access: body }); else await api(`projects/${acc.project}/access`, body);
+    keep(); await refresh(); drawAccess(true); notice(t('ui.access.saved'));
+  });
+  if ($('acc-inherit')) $('acc-inherit').onclick = () => attempt(async () => { await api(`sessions/${acc.scope}/access`, { access: null }); keep(); await refresh(); drawAccess(true); notice(t('ui.access.saved')); });
   $('acc-propose').onclick = () => attempt(async () => {
     acc.busy = true; drawAccess();
-    try { const r = await api(`projects/${acc.project}/access/propose`, { candidates: acc.folders.map(f => f.path) }); acc.folders = r.draft.folders; acc.network = r.draft.network; acc.repos = r.draft.repos || []; acc.proposal = r; acc.dirty = true; }
+    try { const r = await api(`projects/${acc.project}/access/propose`, { candidates: acc.folders.map(f => f.path) }); Object.assign(acc, { folders: r.draft.folders, network: r.draft.network, repos: r.draft.repos || [], paths: r.draft.paths || [], shell: r.draft.shell || ['*'], proposal: r, dirty: true }); }
     finally { acc.busy = false; drawAccess(); }
   });
 }

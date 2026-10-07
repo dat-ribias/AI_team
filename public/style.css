@@ -220,3 +220,8 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 #memory-dialog{width:min(820px,95vw)}#memory-dialog h3{font-size:14px;margin:16px 0 6px}.mem-list{list-style:none;padding:0;margin:0 0 8px;display:grid;gap:6px;max-height:40vh;overflow:auto}.mem-list li{display:flex;gap:8px;justify-content:space-between;align-items:flex-start;background:var(--c1c232c);border-radius:6px;padding:7px 9px;font-size:12px;overflow-wrap:anywhere}.mem-log{font-size:11px;color:var(--muted);padding-left:18px;max-height:30vh;overflow:auto}#memory-dialog textarea{margin-bottom:6px}
 .away-title{font-size:10px;margin:10px 4px 2px}.job-button.away{opacity:.85;border-style:dashed}
 #session-project.working{animation:glow 1.6s ease-in-out infinite;border-color:var(--mint)}
+.access-table tr.sec-head th{background:var(--c0e141b);text-align:left;font-size:12px;padding:7px 10px}.access-table td.dim{opacity:.55}
+.access-table select.lv{background:var(--c202731);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:3px 4px;font-size:11px;max-width:110px}
+.access-table select.lv-read{border-color:var(--line)}.access-table select.lv-edit{border-color:var(--amber);color:var(--amber)}.access-table select.lv-delete{border-color:var(--red);color:var(--red)}.access-table select.lv-inherit{color:var(--muted)}
+.cap-toggle{background:none;border:1px dashed currentColor;border-radius:6px;color:inherit;font-size:14px;padding:1px 9px;cursor:pointer}.cap-toggle:hover{background:var(--c202731)}
+#security-matrix h3{font-size:14px;margin:14px 0 4px}
