@@ -229,8 +229,10 @@ function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
     }
   }
   const style = size !== baseSize ? ` font-size="${size}"` : '';
-  const tl = useTextLength ? ` textLength="${maxW}" lengthAdjust="spacingAndGlyphs"` : '';
-  return `<text x="${x}" y="${y}" class="${cls}"${style}${tl}>${esc(str)}</text>`;
+  // Quá dài ngay cả ở cỡ nhỏ nhất: cắt bằng "…" (ép textLength làm chữ dồn thành vệt không đọc được); bản đầy đủ ở tooltip.
+  if (!useTextLength) return `<text x="${x}" y="${y}" class="${cls}"${style}>${esc(str)}</text>`;
+  const fit = Math.max(4, Math.floor(maxW / (size * 0.56)) - 1);
+  return `<text x="${x}" y="${y}" class="${cls}"${style}><title>${esc(str)}</title>${esc(str.slice(0, fit).trimEnd())}…</text>`;
 }
 
 // Các lượt đang chạy của một công việc (song song); dữ liệu cũ chỉ có job.current.

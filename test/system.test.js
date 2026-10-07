@@ -40,6 +40,8 @@ test('quota, structured reports, isolation, and shell-free prompts', async () =>
   assert.deepEqual(normalizeGoogleQuota({ response: 'You have 80% left' }), []);
   assert.throws(() => parseReport('complete!')); assert.equal(parseReport('```json\n{"summary":"ok"}\n```').summary, 'ok');
   assert(!redact('secret sk-12345678901234567890').includes('12345678901234567890'));
+  // redact chạy trên JSON đã stringify (scrub) không được làm hỏng JSON
+  for (const v of ['api_key="k1"', "get('Authorization:\"x\"')"]) { const out = JSON.parse(redact(JSON.stringify(v))); assert(!out.includes('k1') && !out.includes(':"x')); }
   const old = process.env.OPENAI_API_KEY; process.env.OPENAI_API_KEY = 'test-secret';
   assert.equal(childEnv({ home: 'isolated' }).CODEX_HOME, 'isolated'); assert.equal(childEnv().OPENAI_API_KEY, undefined);
   if (old === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = old;

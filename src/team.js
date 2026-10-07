@@ -12,7 +12,7 @@ import { scanSkills, skillRoots } from './skills.js';
 const now = () => new Date().toISOString();
 const terminal = new Set(['merged', 'cancelled', 'done']);
 const git = async (cwd, args) => (await run(['git'], ['-C', cwd, ...args], { timeoutMs: 60_000 })).stdout.trim();
-export const redact = text => String(text).replace(/\b(?:sk-[\w-]{12,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, '[REDACTED]').replace(/((?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token)\s*["']?\s*[:=]\s*["']?)([^\s,"'}]+)/gi, '$1[REDACTED]');
+export const redact = text => String(text).replace(/\b(?:sk-[\w-]{12,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, '[REDACTED]').replace(/((?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
 const scrub = value => JSON.parse(redact(JSON.stringify(value)));
 
 // Năng lực member = độ khó tối đa (1–5) mà controller cho phép giao.
