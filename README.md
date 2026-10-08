@@ -112,7 +112,7 @@ Controller quyết định thứ tự test/review/verify; manager quyết địn
 Agent có thể hỏi một thành viên khác trong roster của job khi một giả định cần người khác xác nhận. Trao đổi đi qua chính report JSON; không thêm framework, không chia sẻ phiên CLI. Tham khảo: [Claude Agent Teams](https://code.claude.com/docs/en/agent-teams) (experimental, theo tài liệu lúc viết chưa tạo teammate ở chế độ `-p`; kiểm lại khi nâng cấp CLI), [AutoGen Group Chat](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/design-patterns/group-chat.html).
 
 **Bật/tắt và phạm vi**
-- Mặc định bật; `"peerDialogue": false` để tắt.
+- Mặc định hỏi trực tiếp; `"peerDialogue": false` để tắt toàn đội. Khi giao việc, chọn `dialogueMode`: `direct`, `independent` hoặc `off`.
 - Stage được hỏi: `plan`, `implement`, `research`, `review`, `verify`, `challenge` (không có `final`).
 - Chỉ hỏi thành viên khác trong roster của job; không tự tạo agent, đổi task hay cấp quyền.
 
@@ -120,6 +120,7 @@ Agent có thể hỏi một thành viên khác trong roster của job khi một 
 1. A trả `status: "waiting_for_reply"` kèm `peerRequest` và checkpoint phần làm dở. CLI của A kết thúc, nhả slot.
 2. Controller lưu câu hỏi, chạy B ở stage `consult` trên một worktree tạm (snapshot gồm cả code A đang sửa dở và file mới). Worktree tạm bị xóa sau lượt, nên B có sửa gì cũng không ảnh hưởng tới A.
 3. Controller lưu câu trả lời rồi gọi lại A. A phải trả `dialogueDecision`; cần hỏi tiếp thì gửi `peerRequest` với cùng `thread`.
+4. Với `independent`, B phân tích task trên snapshot riêng ở bước `assess` **trước khi** nhận claim/câu hỏi/kết luận của A. B không nhận memory, report, transcript hay công cụ memory ở lượt này. Khi có câu hỏi, thêm một lượt CLI so với `direct`; phân tích đã lưu được dùng lại nếu nội dung nguồn chưa đổi. Đây là độc lập về ngữ cảnh trao đổi, cùng code/mục tiêu và model vẫn có thể gây lỗi tương quan.
 
 ```jsonc
 // A hỏi
@@ -132,7 +133,7 @@ Agent có thể hỏi một thành viên khác trong roster của job khi một 
 ```
 
 **Quyền và giới hạn**
-- Quyền của B = phần giao quyền thư mục tham chiếu, shell, network của A và B, trong trần của vai **Reviewer** (`roleCaps`).
+- Quyền của B = phần giao quyền thư mục tham chiếu, shell, network của A và B, trong trần vai trò hiện tại của mỗi bên (`roleCaps`); `assess` và `consult` đều chỉ đọc.
 - B được dặn chỉ đọc, không chạy test/build. Ràng buộc thật là prompt + worktree tạm + sandbox `read-only` của Codex. **Khi bật `"codexWindowsSandbox": "none"` (hoặc `"agyAutoApprove": true`), B vẫn chạy được lệnh và ghi được ngoài worktree** — xem hai mục cuối README.
 - Tối đa **2 lượt/vấn đề, 8 lượt/job**. Câu hỏi/trả lời tối đa 2.000 ký tự, evidence tối đa 6 mục × 500 ký tự; lọc secret như report thường.
 - Chưa giải quyết, hết lượt hoặc B không chạy được (kể cả hết quota) → lưu checkpoint, task giữ trạng thái chưa xong, job chuyển *chờ bạn trả lời*. Trả lời ở ô câu hỏi của job; A làm tiếp đúng bước đang dở.
@@ -140,8 +141,12 @@ Agent có thể hỏi một thành viên khác trong roster của job khi một 
 
 **Chi phí và đo lường**
 - Không có câu hỏi thì không thêm lượt CLI. Mỗi câu hỏi tốn **ít nhất 2 lượt** (B trả lời + gọi lại A); prompt các stage trên luôn kèm thêm hướng dẫn hỏi đồng đội.
-- Mỗi vấn đề lưu tác giả, người nhận, task/stage, snapshot, lập trường, bằng chứng và quyết định; xem ở chi tiết job/timeline hoặc nút Xuất. Chuyển máy giữ đối thoại làm dữ liệu tham khảo, không chạy lại câu hỏi cũ. Trao đổi không tự thành fact trong memory, không thay test/review/verify hay duyệt merge.
-- Metrics: số câu hỏi, trả lời, vấn đề đã giải quyết, số lần phải hỏi bạn; usage ghi thêm lượt/token. Chưa có benchmark với AI thật; sau khoảng 20 job, so lỗi còn sót, vòng sửa, thời gian và token với `peerDialogue: false`.
+- Mỗi vấn đề có mã `D`, nhận định `C`, tin nhắn `M`, bằng chứng `E`; `replyTo` nối câu trả lời với đúng tin nhắn, `claimIds` xác định nhận định được trả lời. Thiếu ID ở report cũ được quy về câu hỏi đang chờ; ID sai bị từ chối. `claims: [{statement}]` thêm tối đa 4 nhận định/lượt, 12/vấn đề; quyết định phải xử lý hết nhận định và `remaining` trước khi đóng.
+- `dialogueDecision` giữ `choice`, `reason`, `conditions`, `remaining` và `evidenceIds`. Điều kiện dạng văn bản để người/agent kiểm tra, không tự suy diễn thành điều kiện máy chạy. Citation do AI nêu không chứng minh controller đã chạy lệnh; kết quả lệnh test thật nằm trong `checkResults` và timeline.
+- Fingerprint tính nội dung file (kể cả file mới/xóa), giữ hiệu lực qua checkpoint/cherry-pick. `peerRequest.files` hoặc `task.files` là phạm vi, thiếu thì xét toàn repo; repo liên kết luôn được xét. File liên quan đổi làm evidence cũ mất hiệu lực và mở lại quyết định; không được hoàn tất/merge khi còn nghĩa vụ. `historical` chỉ cho quyết định plan/challenge độc lập với code. Trích dẫn web chưa có kiểm tra thay đổi tự động. Evidence/decision mới có thể kết luận lại sau khi kiểm chứng; không được viện dẫn E đã cũ.
+- Pause/restart và đổi builder giữ quyền sở hữu, câu hỏi đã lưu, lời đáp và nghĩa vụ. Chuyển máy xuất cả nghĩa vụ đang mở. Máy đích phải gán chúng vào task/người nhận hiện tại bằng **Gán / xem lại vấn đề**, hoặc ghi kết luận của bạn kèm bằng chứng. Manager lập kế hoạch rồi chờ gán; không chạy lại lệnh hay quyền từ máy cũ. Đối thoại không tự thành fact trong memory và vẫn qua các cổng test/review/verify/merge.
+- **So sánh cùng ngân sách** tạo ba job tạm dừng (`off`, `direct`, `independent`) với cùng base, mục tiêu, file đính kèm, thành viên/model/quyền và trần token/lượt gọi. Cần nhập cả hai trần. Chạy từng job bằng **Tiếp tục**; config đổi thì phải tạo bộ mới, ngân sách đối chiếu không tự mở rộng. API: `POST /api/comparisons` với đầu vào tạo job và `tokenBudget`, `callBudget`. Token được kiểm giữa các lượt CLI nên một lượt có thể vượt trần; so usage thật, không coi trần bằng nhau là số token thực tế bằng nhau. Kế hoạch do model tạo có thể khác giữa các job; đây là công cụ thu thập số liệu, chưa phải benchmark chứng minh chế độ nào tốt hơn.
+- **Chấm nhận định** tách đúng/sai khỏi chấp nhận/bác bỏ: bạn ghi lựa chọn trước/sau đúng, sai hoặc chưa đủ bằng chứng, kèm đối chứng. Bảng đối chiếu đếm riêng sai→đúng, đúng→sai và chưa chấm; không dùng confidence hay đồng thuận của AI làm nhãn đúng. Metrics vận hành vẫn giữ số câu hỏi/trả lời, issue đóng, lượt/token. Chưa có đánh giá chất lượng với AI thật.
 
 ## Điều khiển và giới hạn
 

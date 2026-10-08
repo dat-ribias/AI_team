@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots } from '../src/team.js';
@@ -9,6 +9,7 @@ import { run, childEnv } from '../src/process.js';
 import { parseReport, normalizeCodexQuota, normalizeGoogleQuota, runAgent } from '../src/providers.js';
 import { exportTransfer, importTransfer } from '../src/transfer.js';
 import { fileHash, MemoryStore } from '../src/memory.js';
+import { ledger, question, answer, decide, refreshLedger } from '../src/discussions.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
@@ -35,6 +36,80 @@ async function settle(team, id, expected, timeoutMs = 20000) {
   }
   assert.fail(`Timeout: ${JSON.stringify(team.get(id))}`);
 }
+
+test('discussion ledger rejects mismatched replies/stale evidence and keeps outstanding claims', () => {
+  const d = ledger({ id: 'D-test', from: 'a', topic: 'Contract', messages: [], status: 'pending' }), s = { fingerprint: 'v1' };
+  question(d, { question: 'Check both', claims: [{ statement: 'Second claim' }], claimIds: ['C1','C2'], evidence: ['hello.txt:1'] }, s, 'a');
+  assert.throws(() => answer(d, { replyTo: 'M99', answer: 'yes' }, s, 'b'), /pending message/);
+  assert.throws(() => answer(d, { claimIds: ['C1'], answer: 'yes' }, s, 'b'), /every requested/);
+  answer(d, { replyTo: 'M1', claimIds: ['C1','C2'], answer: 'Both checked', evidence: ['contract:1'] }, s, 'b');
+  assert.equal(d.messages[1].replyTo, 'M1'); assert.equal(d.messages[0].delivery, 'answered');
+  assert(!decide(d, { thread: d.id, outcome: 'accepted', reason: 'Partial', claimIds: ['C1'], evidenceIds: ['E1'] }, s, 'a'));
+  assert(!decide(d, { thread: d.id, outcome: 'accepted', reason: 'Conditional', claimIds: ['C2'], evidenceIds: ['E2'], remaining: ['Check Unicode'] }, s, 'a'));
+  assert.throws(() => decide(d, { thread: d.id, outcome: 'accepted', reason: 'Invalid obligations', remaining: 'Still needs Unicode' }, s, 'a'), /obligations must be arrays/);
+  refreshLedger(d, { fingerprint: 'v2' });
+  assert.throws(() => decide(d, { thread: d.id, outcome: 'rejected', reason: 'Old proof', evidenceIds: ['E2'] }, { fingerprint: 'v2' }, 'a'), /stale evidence/);
+  assert(decide(d, { thread: d.id, outcome: 'rejected', reason: 'Fresh proof', claimIds: ['C1','C2'], evidence: ['Current contract'], conditions: ['ASCII only'] }, { fingerprint: 'v2' }, 'a'));
+});
+
+test('independent dialogue, content freshness, ownership handover and separate quality judgments', async t => {
+  const f = await fixture(), seen = [], team = new Team(f.config, f.data); team.closed = true; t.after(async () => { team.runs.clear(); await team.close(); });
+  const job = await team.create({ project: 'test', goal: 'Update hello', dialogueMode: 'independent', paused: true });
+  await team.ensureExclude(job.worktree); mkdirSync(join(job.worktree, '.ai-team'), { recursive: true }); writeFileSync(join(job.worktree, '.ai-team', 'prompt.md'), 'UNIQUE_PEER_CLAIM');
+  job.tasks = [{ instruction: 'Check greeting', files: ['hello.txt'], difficulty: 2 }];
+  team.runs.set(job.id, { agents: new Set(), abort: new AbortController() });
+  let asked = false, quota = false;
+  team.agentRun = async (agent, task, prompt) => {
+    seen.push([agent.id, task.stage]);
+    if (task.stage === 'assess') { assert(!prompt.includes('UNIQUE_PEER_CLAIM')); assert(!prompt.includes('UNIQUE_PEER_QUESTION')); assert(!prompt.includes('"discussion"')); assert(!existsSync(join(task.worktree, '.ai-team', 'prompt.md'))); return { status: 'completed', summary: 'Own view', answer: 'The configured greeting', evidence: ['hello.txt:1'] }; }
+    if (task.stage === 'consult') return { status: 'completed', summary: 'Reply', replyTo: 'M1', claimIds: ['C1'], stance: 'answer', answer: 'Use the configured greeting', evidence: ['hello.txt:1'] };
+    if (!asked) { asked = true; return { status: 'waiting_for_reply', summary: 'Need contract', peerRequest: { to: 'gemini', topic: 'Greeting', claim: 'UNIQUE_PEER_CLAIM', question: 'UNIQUE_PEER_QUESTION', files: ['hello.txt'], evidence: ['hello.txt:1'] } }; }
+    if (agent.id === 'codex-2' && !quota) { quota = true; throw new Error('429 quota exhausted'); }
+    assert.equal(agent.id, 'codex-4'); assert(prompt.includes('Use the configured greeting'));
+    writeFileSync(join(task.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
+    return { status: 'completed', summary: 'Fixed', dialogueDecision: { thread: job.discussions[0].id, outcome: 'accepted', reason: 'Verified configured contract', choice: 'Use configured greeting', evidence: ['Updated hello.txt:1'], conditions: ['Greeting contract stays unchanged'] } };
+  };
+  await team.callWithHandover(job, job.tasks[0], 0, 'codex-2', 'implement', []);
+  const d = job.discussions[0]; assert.equal(d.owner, 'codex-4'); assert.deepEqual(d.owners, ['codex-2','codex-4']); assert.equal(d.status, 'resolved'); assert.equal(d.messages[1].replyTo, 'M1');
+  assert.deepEqual(seen.map(x => x[1]), ['implement','assess','consult','implement','implement']);
+  assert.equal(d.evidence[0].status, 'stale'); assert.equal(d.evidence.at(-1).status, 'current');
+  await team.commitAll(job); await team.checkDiscussions(job);
+  writeFileSync(join(job.worktree, 'unrelated.txt'), 'Other work\n'); await team.commitAll(job); await team.checkDiscussions(job);
+  team.runs.clear(); team.save(job);
+  await team.control(job.id, 'score-claim', { thread: d.id, claim: 'C1', before: false, after: true, evidence: ['Configured greeting test'] });
+  assert.equal(team.get(job.id).discussions[0].claims[0].judgment.transition, 'wrongToRight');
+  await team.control(job.id, 'score-claim', { thread: d.id, claim: 'C1', before: true, after: false, evidence: ['Counterexample'] });
+  assert.equal(team.get(job.id).discussions[0].claims[0].judgment.transition, 'rightToWrong');
+  await assert.rejects(team.control(job.id, 'score-claim', { thread: d.id, claim: 'C1', before: 'true', after: false, evidence: ['Invalid label'] }), /Scoring/);
+  writeFileSync(join(job.worktree, 'hello.txt'), 'Changed contract\n');
+  await assert.rejects(team.checkDiscussions(job), e => e.peerWait && /obligations/.test(e.message));
+  assert.equal(d.status, 'reopened'); assert.equal(d.history.length, 1); assert.equal(d.claims[0].status, 'open');
+  await team.control(job.id, 'revisit-discussion', { thread: d.id, task: 0, recipient: 'gemini' });
+  assert.equal(team.get(job.id).stage, 'implement'); assert.equal(team.get(job.id).tasks[0].done, false);
+});
+
+test('comparison uses identical inputs and fixed budgets without automatically running AI', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  const result = await team.createComparison({ project: 'test', goal: 'Compare greeting', tokenBudget: 1000, callBudget: 5 });
+  assert.deepEqual(result.jobs.map(j => j.dialogueMode), ['off','direct','independent']);
+  assert(result.jobs.every(j => j.status === 'paused' && !j.usage && j.tokenBudget === 1000 && j.callBudget === 5 && j.base === result.jobs[0].base && j.comparison.input === result.jobs[0].comparison.input));
+  const job = result.jobs[0]; job.usage = { calls: 5, tokens: 0 }; team.save(job);
+  await assert.rejects(team.control(job.id, 'resume'), /budget exhausted/);
+  await assert.rejects(team.invoke(job, 'codex-1', 'plan', 'Over budget', undefined, [], {}, team.agent('codex-1'), new AbortController().signal), /Call budget/);
+  assert.equal(team.get(job.id).callBudget, 5);
+  const next = result.jobs[1]; team.config.agents[0].model = 'changed';
+  await assert.rejects(team.control(next.id, 'resume'), /models, roles, tools or permissions changed/);
+  await assert.rejects(team.createComparison({ project: 'test', goal: 'Missing budgets' }), /positive/);
+  await team.remember(next, { add: ['Comparison answer must stay private'], session: 'Do not leak this answer' });
+  assert(!team.memory('test').facts.some(r => r.text.includes('Comparison answer')));
+  assert.equal(team.sessions().find(s => s.id === next.sessionId).notes, '');
+  team.config.maxTokensPerJob = 1000;
+  const ordinary = await team.create({ project: 'test', goal: 'Legacy resume budget', paused: true });
+  for (const used of [1000, 2000]) {
+    ordinary.status = 'paused'; ordinary.usage = { calls: 1, tokens: used }; team.save(ordinary); team.event(ordinary.id, 'codex-2', 'controller', 'USAGE', 'Actual usage', { total_tokens: 1000 });
+    const resumed = await team.control(ordinary.id, 'resume'); assert.equal(resumed.tokenBudget, used + 1000); Object.assign(ordinary, resumed);
+  }
+});
 
 test('quota, structured reports, isolation, and shell-free prompts', async () => {
   const quota = normalizeCodexQuota({ rateLimits: { primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: 1800000000 } }, rateLimitsByLimitId: { fast: { primary: { usedPercent: 60 }, secondary: { usedPercent: null } } } });
@@ -588,17 +663,18 @@ test('skill library: lead attaches skills per task, controller copies them for t
   const f = await fixture();
   const lib = mkdtempSync(join(tmpdir(), 'skills-')); const { mkdirSync } = await import('node:fs');
   mkdirSync(join(lib, 'demo-skill')); writeFileSync(join(lib, 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: Keep it minimal\n---\nDo less.');
+  mkdirSync(join(lib, 'ns')); writeFileSync(join(lib, 'ns', 'SKILL.md'), '---\nname: ckm:demo\ndescription: Namespaced\n---\nColon name.');
   f.config.skillDirs = [lib];
   const { runAgent } = await import('../src/providers.js');
   const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
-    if (task.stage === 'plan') { assert.match(prompt, /demo-skill/); return { summary: 'p', kind: 'code', rigor: 'standard', risk: 'low', reviewSkills: ['demo-skill'], tasks: [{ agent: 'codex-2', difficulty: 2, skills: ['demo-skill', 'nope'], instruction: 'Update hello.txt' }] }; }
-    if (task.stage === 'implement') { assert.match(prompt, /\.ai-team\/skills\/demo-skill\/SKILL\.md/); assert.equal(readFileSync(join(task.worktree, '.ai-team/skills/demo-skill/SKILL.md'), 'utf8').includes('Do less'), true); }
+    if (task.stage === 'plan') { assert.match(prompt, /demo-skill/); return { summary: 'p', kind: 'code', rigor: 'standard', risk: 'low', reviewSkills: ['demo-skill'], tasks: [{ agent: 'codex-2', difficulty: 2, skills: ['demo-skill', 'ckm:demo', 'nope'], instruction: 'Update hello.txt' }] }; }
+    if (task.stage === 'implement') { assert.match(prompt, /\.ai-team\/skills\/demo-skill\/SKILL\.md/); assert.equal(readFileSync(join(task.worktree, '.ai-team/skills/demo-skill/SKILL.md'), 'utf8').includes('Do less'), true); assert.match(prompt, /ckm:demo: \.ai-team\/skills\/ckm-demo\/SKILL\.md/); assert(readFileSync(join(task.worktree, '.ai-team/skills/ckm-demo/SKILL.md'), 'utf8').includes('Colon')); }
     return runAgent(agent, task, prompt, opts);
   } });
   t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello' });
   const ready = await settle(team, job.id, 'ready');
-  assert.deepEqual(ready.tasks[0].skills, ['demo-skill']); assert.deepEqual(ready.reviewSkills, ['demo-skill']);
+  assert.deepEqual(ready.tasks[0].skills, ['demo-skill', 'ckm:demo']); assert.deepEqual(ready.reviewSkills, ['demo-skill']);
   assert(!(await run(['git'], ['-C', ready.worktree, 'ls-tree', '-r', '--name-only', 'HEAD'])).stdout.includes('.ai-team'));
   assert(team.events(job.id).some(e => e.details?.stage === 'review' && e.details.skills?.includes('demo-skill')));
 });
@@ -1142,6 +1218,7 @@ test('work transfer preserves binary/new/deleted files and checkpoints but impor
   assert.throws(() => readFileSync(join(imported.worktree, 'remove.txt')), /ENOENT/);
   assert.equal(imported.transfer.tasks[0].checkpoint.next, 'Run tests'); assert.deepEqual(imported.tasks, []);
   assert.equal(imported.transfer.discussions[0].id, 'D-history'); assert.equal(imported.discussions, undefined);
+  assert.equal(imported.obligations[0].id, 'D-history'); assert.equal(imported.obligations[0].status, 'unmapped');
   assert.equal(JSON.parse(readFileSync(join(imported.worktree, imported.transferFile), 'utf8')).tasks[0].checkpoint.next, 'Run tests');
   let planPrompt;
   target.agentRun = async (agent, task, prompt, opts) => { planPrompt = prompt; return runAgent(agent, task, prompt, opts); };
@@ -1151,6 +1228,15 @@ test('work transfer preserves binary/new/deleted files and checkpoints but impor
   await assert.rejects(target.invoke(imported, 'codex-1', 'plan', 'Read only', undefined, [], {}, target.agent('codex-1'), new AbortController().signal), /chỉ đọc/);
   writeFileSync(join(imported.worktree, 'binary.dat'), Buffer.from([0, 255, 1, 200]));
   assert.equal((await exportTransfer(target, imported.id)).work.tasks[0].checkpoint.next, 'Run tests');
+  imported.tasks = [{ instruction: 'Recheck transferred issue', files: ['hello.txt'], agent: 'codex-2' }]; target.save(imported);
+  await assert.rejects(target.control(imported.id, 'adopt-discussion', { thread: 'D-history', task: 0, recipient: 'old-peer' }), /current member/);
+  const adopted = await target.control(imported.id, 'adopt-discussion', { thread: 'D-history', task: 0, recipient: 'gemini' });
+  assert.equal(adopted.obligations[0].status, 'adopted'); assert.equal(adopted.discussions[0].to, 'gemini'); assert.equal(adopted.discussions[0].status, 'reopened'); assert.equal(adopted.discussions[0].requestReport, undefined);
+  assert.equal(adopted.tested, null); assert.equal(adopted.discussions[0].source.thread, 'D-history');
+  const reexported = await exportTransfer(target, imported.id);
+  assert(reexported.work.obligations.every(o => o.id !== 'D-history'));
+  const reimported = await importTransfer(target, 'test', reexported);
+  assert.equal(reimported.job.obligations.length, 1); assert.equal(reimported.job.obligations[0].id, adopted.discussions[0].id);
   assert(target.memory('test').facts.some(r => r.scope === 'job' && r.job === imported.id));
   assert.equal(readFileSync(join(copy, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n'), 'Hello!\n');
   const unsafe = structuredClone(pack); unsafe.code.files[0].path = '../escape';

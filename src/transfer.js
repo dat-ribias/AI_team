@@ -3,6 +3,7 @@ import { join, resolve, dirname, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { run } from './process.js';
 import { hash } from './memory.js';
+import { obligations } from './discussions.js';
 
 const git = async (cwd, args) => (await run(['git'], ['-C', cwd, ...args], { timeoutMs: 120000 })).stdout.trim();
 const secret = path => /(^|\/)(\.env(?:\..*)?|auth\.json|controller\.token|id_(?:rsa|ed25519).*|[^/]*\.(?:pem|key|pfx))$/i.test(path);
@@ -48,6 +49,7 @@ export async function exportTransfer(team, id) {
       code: { base: job.base, commit, branch: job.branch, bundle: data.toString('base64'), sha256: hash(data), files },
       work: { id: job.id, goal: job.goal, kind: job.kind || 'code', stage: job.stage, tasks: (job.tasks.length ? job.tasks : job.transfer?.tasks || []).map(t => pick(t, ['instruction','kind','difficulty','files','context','dependsOn','done','checkpoint','contextGaps'])), reports: [...(job.transfer?.reports || []), ...job.reports].map(r => pick(r, ['agent','stage','task','summary','status','verdict','findings','tests','checkpoint','sources','conclusion'])), messages: [...(job.transfer?.messages || []), ...job.messages], discussions: [...(job.transfer?.discussions || []), ...(job.discussions || [])] },
       memory: team.memoryStore.export(job.project) };
+    payload.work.obligations = [...(job.obligations || []).filter(o => o.status === 'unmapped'), ...obligations(job.discussions)];
     // Redact text records, never alter the Git bundle or binary file data.
     payload.work = JSON.parse(team.memoryStore.redact(JSON.stringify(payload.work)));
     return payload;
@@ -59,6 +61,12 @@ export async function importTransfer(team, project, pack) {
   if (pack?.format !== 'ai-team-transfer' || pack.version !== 1 || !pack.code || !pack.work || typeof pack.work.goal !== 'string' || !pack.work.goal.trim() || pack.work.goal.length > 20000 || !['code','research'].includes(pack.work.kind) || !Array.isArray(pack.work.tasks) || pack.work.tasks.length > 100 || !Array.isArray(pack.work.reports) || pack.work.reports.length > 1000 || !Array.isArray(pack.work.messages) || !Array.isArray(pack.code.files) || pack.code.files.length > 10000) throw new Error('Invalid work transfer');
   const { code, work } = pack;
   if (work.discussions !== undefined && (!Array.isArray(work.discussions) || work.discussions.length > 1000)) throw new Error('Invalid discussion history');
+  if (work.obligations !== undefined && (!Array.isArray(work.obligations) || work.obligations.length > 1000 || work.obligations.some(o => !o || typeof o.id !== 'string' || o.id.length > 100))) throw new Error('Invalid discussion obligations');
+  const pending = (work.obligations ?? obligations(work.discussions)).map(o => {
+    if (!o || typeof o.id !== 'string' || !o.id || o.id.length > 100) throw new Error('Invalid obligation ID');
+    const text = (v, max = 2000) => typeof v === 'string' ? v.slice(0, max) : '';
+    return { id: o.id, topic: text(o.topic, 200), reason: text(o.reason), status: 'unmapped', claims: (Array.isArray(o.claims) ? o.claims : []).slice(0, 12).map(c => ({ id: text(c?.id, 20), statement: text(c?.statement) })), pending: (Array.isArray(o.pending) ? o.pending : []).slice(0, 4).map(m => ({ id: text(m?.id, 50), text: text(m?.text), claimIds: (Array.isArray(m?.claimIds) ? m.claimIds : []).slice(0, 8).map(id => text(id, 20)) })), remaining: (Array.isArray(o.remaining) ? o.remaining : []).slice(0, 6).map(s => text(s, 500)) };
+  });
   if (typeof work.id !== 'string' || !/^[a-z0-9-]{1,100}$/.test(work.id)) throw new Error('Invalid source job');
   team.memoryStore.import(project, pack.memory, { [work.id]: 'validation' }, true);
   if (!/^[a-f0-9]{40,64}$/.test(code.base) || !/^[a-f0-9]{40,64}$/.test(code.commit) || !/^ai-team\/[a-z0-9-]+$/.test(code.branch) || typeof code.bundle !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(code.bundle)) throw new Error('Invalid repository bundle');
@@ -93,6 +101,8 @@ export async function importTransfer(team, project, pack) {
     }
     job.revision = code.commit; job.kind = work.kind; job.status = 'paused'; job.stage = 'plan';
     job.transfer = JSON.parse(team.memoryStore.redact(JSON.stringify(work)));
+    // Restore obligations as data; current task/recipient mappings need an explicit human action.
+    job.obligations = JSON.parse(team.memoryStore.redact(JSON.stringify(pending.filter((o, i, all) => all.findIndex(x => x.id === o.id) === i))));
     job.transferFile = `.ai-team/transfer-${job.id}.json`;
     mkdirSync(join(job.worktree, '.ai-team'), { recursive: true });
     writeFileSync(join(job.worktree, job.transferFile), JSON.stringify(job.transfer, null, 2), { flag: 'wx' });

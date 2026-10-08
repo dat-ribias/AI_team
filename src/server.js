@@ -133,6 +133,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/role-caps') return send(res, 200, accounts.setRoleCaps(await body(req)));
     if (req.method === 'POST' && sessionRename) return send(res, 200, team.renameSession(sessionRename[1], (await body(req)).name));
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
+    if (req.method === 'POST' && url.pathname === '/api/comparisons') return send(res, 201, await team.createComparison(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
     const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer))?$/.exec(url.pathname);

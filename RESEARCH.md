@@ -27,3 +27,9 @@ Không clone/fork cả orchestrator khác: nhu cầu hiện tại là bốn iden
 Một worker slot toàn hệ thống để giảm tải. Một worktree cho mỗi job, các builder sửa tuần tự; Google review có detached snapshot riêng. Test/review/verify gắn commit SHA. Tất cả giao việc, kết quả và quyết định điều phối được lưu trong SQLite; SSE đẩy thông báo cập nhật tới browser. Cổng mặc định 3333 cho live, 3334 cho demo. UI chỉ bind 127.0.0.1, kiểm tra Host/Origin và yêu cầu session + custom header cho mutation.
 
 MCP là một đầu vào tùy chọn cho manager bên ngoài. Workflow mặc định không cần manager giữ process sống hoặc polling CLI liên tục. Quota được đọc mỗi 5 phút và lưu history; không ước tính quota subscription từ lượng token của task.
+
+## Bổ sung về đối thoại và trí nhớ — 2026-10-08
+
+[Debate or Vote](https://arxiv.org/abs/2508.17536) tách lợi ích của lấy nhiều câu trả lời khỏi lợi ích trao đổi trong các benchmark NLP. [Free-MAD](https://aclanthology.org/2026.findings-acl.1600/) khảo sát quyết định không buộc đồng thuận. [Demystifying Multi-Agent Debate](https://aclanthology.org/2026.findings-acl.1694/) nghiên cứu cập nhật lập trường và hiệu chỉnh confidence. Các kết quả này không xác nhận hiệu quả trong pipeline sửa code tại đây; đặc biệt không lấy confidence tự báo làm trọng số đúng/sai. [MAST](https://github.com/multi-agent-systems-failure-taxonomy/MAST) cung cấp phân loại lỗi để xem xét các failure giữa agent.
+
+Áp dụng ở mức cơ chế: phân tích độc lập trước trao đổi là lựa chọn; claim/message/evidence có ID; quyết định kèm nghĩa vụ/điều kiện; fingerprint nội dung làm cũ bằng chứng; ownership và nghĩa vụ được bàn giao. Dùng lại JSON job trong SQLite, không thêm framework/database. So sánh tạo ba job cùng đầu vào/trần ngân sách, ghi usage thật và nhãn sai→đúng/đúng→sai do người đánh giá kèm bằng chứng. Kiểm thử mô phỏng chứng minh luồng vận hành, chưa chứng minh chất lượng AI thật tăng.
