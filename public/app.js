@@ -619,11 +619,14 @@ function drawInspector() {
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
   const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${runningOf(job).some(r => r.task === i) ? 'current' : ''} ${x.done ? 'done' : ''}"><b>${x.done ? '✓ ' : ''}T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}${x.estMinutes ? ' · ~' + esc(duration(x.estMinutes)) : ''}${x.dependsOn?.length ? ' · ' + esc(t('ui.inspector.after', { list: x.dependsOn.map(d => 'T' + (d + 1)).join(', ') })) : ''}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}${x.skills?.length ? `<br><span class="skill-tags">${x.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</span>` : ''}${x.contextGaps?.length ? `<details><summary class="muted">${esc(t('ui.inspector.contextGaps', { n: x.contextGaps.length }))}</summary><ul>${x.contextGaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></details>` : ''}</li>`).join('')}</ul>` : '';
+  const openDiscussions = new Set([...$('inspector').querySelectorAll('details[data-discussion][open]')].map(d => d.dataset.discussion));
+  const discussions = (job.discussions || []).map(d => `<details data-discussion="${esc(d.id)}" ${openDiscussions.has(d.id) ? 'open' : ''}><summary>${esc(d.topic)} · ${esc(t('ui.peer.' + d.status))} (${d.rounds}/2)</summary><p class="muted">${esc(names[d.from] || d.from)} → ${esc(names[d.to] || d.to)} · ${esc(d.stage)}${d.task != null ? ' / T' + (d.task + 1) : ''}</p><p>${esc(d.claim)}</p>${d.messages.map(m => `<p><b>${esc(names[m.by] || m.by)} · ${esc(t('ui.peer.' + m.type))}</b><br>${esc(m.text)}</p>${m.evidence.length ? `<ul>${m.evidence.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}<small class="muted">${esc(t('ui.peer.snapshot'))}: ${esc(m.snapshot?.commit?.slice(0, 12) || '—')} / ${esc(m.snapshot?.dirtyHash?.slice(0, 12) || '—')}</small>`).join('')}${d.decision ? `<p><b>${esc(t('ui.peer.' + d.decision.outcome))}</b><br>${esc(d.decision.reason)}</p><ul>${d.decision.evidence.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}</details>`).join('');
   const risk = job.risk ? `<p class="muted">${esc(t('ui.inspector.risk'))} <b class="${job.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + job.risk))}</b>${job.riskReasons?.length ? ' · ' + esc(job.riskReasons.join('; ')) : ''}</p>` : '';
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
   $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  if (discussions) $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.title'))}</h3>${discussions}`);
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => {
     if (b.dataset.action === 'cancel' && !confirm(t('ui.inspector.confirmCancel'))) return;
     if (b.dataset.action === 'delete' && !confirm(t('ui.inspector.confirmDelete'))) return;
@@ -632,6 +635,15 @@ function drawInspector() {
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
   $('export-job').onclick = () => { location.href = `/api/jobs/${encodeURIComponent(selected)}/export`; };
+  const transfer = document.createElement('button'); transfer.textContent = t('ui.mem.transfer');
+  transfer.disabled = ['running', 'queued', 'merging'].includes(job.status); transfer.title = t('ui.mem.transferTitle');
+  transfer.onclick = () => { location.href = `/api/jobs/${encodeURIComponent(selected)}/transfer`; };
+  $('export-job').after(transfer);
+  $('inspector').querySelectorAll('.task-list > li').forEach((li, i) => {
+    const task = job.tasks[i], point = task.checkpoint;
+    if (point) li.insertAdjacentHTML('beforeend', `<details><summary>${esc(t('ui.mem.checkpoint'))}</summary><p>${esc(point.done)}</p><p>${esc(point.remaining)}</p><p>${esc(point.next)}</p><pre>${esc(point.tests)}</pre>${point.failedAttempts?.length ? `<ul>${point.failedAttempts.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</details>`);
+    if (task.memoryIds?.length) li.insertAdjacentHTML('beforeend', `<small class="muted">${esc(t('ui.mem.used'))}: ${esc(task.memoryIds.join(', '))}</small>`);
+  });
   if ($('merge')) $('merge').onclick = () => attempt(openMerge);
   if ($('send-answer')) $('send-answer').onclick = () => attempt(async () => { const v = $('answer').value.trim(); if (!v) return; await api(`jobs/${selected}/control`, { action: 'message', message: v }); await refresh(); });
 }
@@ -685,7 +697,7 @@ async function recheckMembers(ids) {
 }
 // Khung trao đổi kiểu chat nhóm: mọi thành viên trong luồng, tin của Bạn bên phải, hoạt động kỹ thuật thu gọn ở giữa.
 const SYSTEM_TYPES = ['ACTIVITY', 'DIAGNOSTIC', 'TEST_OUTPUT', 'TEST_START', 'USAGE', 'RATE_LIMIT'];
-const DECISION_TYPES = ['QUESTION', 'CONCLUSION', 'DECISION', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'CONFLICT', 'WARNING'];
+const DECISION_TYPES = ['QUESTION', 'CONCLUSION', 'DECISION', 'PEER_QUESTION', 'PEER_REPLY', 'PEER_DECISION', 'PEER_UNRESOLVED', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'CONFLICT', 'WARNING'];
 const hueClass = id => 'hue-' + [...String(id)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 8, 3);
 const evLabel = type => dict['ui.ev.' + type] || fallback['ui.ev.' + type] || type;
 function avatar(id) {
@@ -1042,12 +1054,17 @@ function drawAccess(reset = false) {
   });
 }
 // Bộ nhớ của dự án/phiên + sao lưu: bạn thấy đúng thứ AI được nhắc lại, sửa/xóa được.
+let memoryQuery = '', memoryHistory = false;
 async function drawMemory() {
-  const [m, b] = await Promise.all([api(`memory?project=${encodeURIComponent(curProject)}&session=${encodeURIComponent(curSession)}`), api('backups')]);
+  const [m, b] = await Promise.all([api(`memory?project=${encodeURIComponent(curProject)}&session=${encodeURIComponent(curSession)}${memoryHistory ? '&history=1' : ''}`), api('backups')]);
+  if (memoryQuery.trim()) m.facts = (await api(`memory/search?project=${encodeURIComponent(curProject)}&query=${encodeURIComponent(memoryQuery)}`)).results;
   const ses = state.sessions.find(x => x.id === curSession);
   $('memory-body').innerHTML = `<p class="muted">${esc(t('ui.mem.intro'))}</p>
+    <div class="row-input"><input id="mem-query" value="${esc(memoryQuery)}" placeholder="${esc(t('ui.mem.search'))}" aria-label="${esc(t('ui.mem.search'))}"><button id="mem-search">${esc(t('ui.mem.search'))}</button></div>
+    <label><input type="checkbox" id="mem-history" ${memoryHistory ? 'checked' : ''}> ${esc(t('ui.mem.history'))}</label>
+    <div class="row-input"><button id="mem-export">${esc(t('ui.mem.exportMemory'))}</button><label>${esc(t('ui.mem.import'))}<input type="file" id="mem-import" accept=".json,application/json"></label></div><p id="mem-result" role="status"></p>
     <h3>${esc(t('ui.mem.facts', { project: curProject, n: m.facts.length }))}</h3>
-    <ul class="mem-list">${m.facts.map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${f.id} · ${esc(f.job || '')} · ${esc(clock(f.at))}</small></span><button class="icon-btn" data-mem-del="${f.id}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button></li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
+    <ul class="mem-list">${m.facts.filter(f => f.kind === 'fact').map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${f.id} · ${esc(f.source)} · ${esc(t('ui.mem.' + f.scope))} · ${esc(t('ui.mem.' + f.status))} · ${esc(f.commitSha?.slice(0, 8) || '')} · ${esc(clock(f.at))}</small></span>${f.status === 'active' ? `<button class="icon-btn" data-mem-del="${f.id}" data-mem-revision="${f.revision}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button>` : ''}</li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
     <div class="row-input"><input id="mem-add" maxlength="300" placeholder="${esc(t('ui.mem.addPlaceholder'))}"><button id="mem-add-btn">${esc(t('ui.mem.add'))}</button></div>
     <h3>${esc(t('ui.mem.session', { name: ses?.name || '—' }))}</h3>
     <textarea id="mem-summary" rows="4" maxlength="1500">${esc(m.summary)}</textarea><button id="mem-summary-save">${esc(t('ui.mem.saveSummary'))}</button>
@@ -1056,7 +1073,21 @@ async function drawMemory() {
     <ul class="mem-log">${b.list.slice(0, 5).map(x => `<li>${esc(x.file.split(/[\\/]/).pop())} · ${esc(clock(x.at))} · ${Math.round(x.bytes / 1024)} KB</li>`).join('') || `<li class="muted">${esc(t('ui.mem.noBackup'))}</li>`}</ul>
     <button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>`;
   const edit = body => attempt(async () => { await api('memory', { project: curProject, session: curSession, ...body }); await drawMemory(); });
-  document.querySelectorAll('[data-mem-del]').forEach(x => x.onclick = () => edit({ remove: x.dataset.memDel }));
+  document.querySelectorAll('[data-mem-del]').forEach(x => x.onclick = () => edit({ remove: x.dataset.memDel, revision: Number(x.dataset.memRevision) }));
+  $('mem-search').onclick = () => attempt(async () => { memoryQuery = $('mem-query').value; await drawMemory(); });
+  $('mem-query').onkeydown = e => { if (e.key === 'Enter') $('mem-search').click(); };
+  $('mem-history').onchange = () => attempt(async () => { memoryHistory = $('mem-history').checked; memoryQuery = ''; await drawMemory(); });
+  $('mem-export').onclick = () => { location.href = `/api/memory/export?project=${encodeURIComponent(curProject)}`; };
+  $('mem-import').onchange = () => attempt(async () => {
+    const file = $('mem-import').files[0]; if (!file) return;
+    if (file.size > 160e6) throw new Error(t('ui.mem.tooLarge'));
+    const pack = JSON.parse(await file.text()), transfer = pack.format === 'ai-team-transfer';
+    const result = await api(transfer ? 'transfer/import' : 'memory/import', { project: curProject, package: pack });
+    if (transfer) { selected = result.job.id; curSession = result.job.sessionId; }
+    await refresh(); await drawMemory();
+    const counts = transfer ? result.memory : result;
+    $('mem-result').textContent = t('ui.mem.imported', { n: counts.added, conflicts: counts.conflicts }) + (transfer ? ' ' + t('ui.mem.importPaused') : '');
+  });
   $('mem-add-btn').onclick = () => $('mem-add').value.trim() && edit({ add: $('mem-add').value });
   $('mem-summary-save').onclick = () => edit({ summary: $('mem-summary').value });
   $('backup-now').onclick = () => attempt(async () => { $('backup-now').disabled = true; await api('backup', {}); await drawMemory(); });

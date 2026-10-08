@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Team } from './team.js';
 import { Accounts, accessList } from './accounts.js';
+import { exportTransfer, importTransfer } from './transfer.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -58,6 +59,11 @@ const server = createServer(async (req, res) => {
       const [name, type] = assets[url.pathname]; res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` }); res.end(readFileSync(join(root, 'public', name))); return;
     }
     const bearer = req.headers.authorization?.replace(/^Bearer /, '');
+    const memoryReader = bearer && team.memoryReaders.get(bearer);
+    if (memoryReader) {
+      if (req.method !== 'GET' || url.pathname !== '/api/memory/search') return send(res, 403, { error: 'Memory connection is read-only and task-scoped' });
+      return send(res, 200, await team.searchMemory({ ...memoryReader, query: url.searchParams.get('query') || '', limit: url.searchParams.get('limit'), memoryId: url.searchParams.get('memoryId') }, memoryReader.worktree));
+    }
     const cookie = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(cookieName + '='))?.slice(cookieName.length + 1);
     if (!equal(bearer) && !equal(cookie)) return send(res, 401, { error: msg("srv.server.mo_dashboard_de_tao_phien_dang") });
     if (req.method === 'POST' && req.headers['x-team-request'] !== '1') return send(res, 403, { error: msg("srv.server.thieu_csrf_header") });
@@ -82,7 +88,11 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && projectDirsList) return send(res, 200, { dirs: team.repoDirs(projectDirsList[1]) });
     const projectAccess = /^\/api\/projects\/([a-z0-9-]+)\/access(\/propose)?$/.exec(url.pathname);
     if (req.method === 'POST' && projectAccess) { const input = await body(req); return send(res, 200, projectAccess[2] ? await team.proposeAccess(projectAccess[1], Array.isArray(input.candidates) ? input.candidates.slice(0, 20) : []) : accounts.setAccess(projectAccess[1], input)); }
-    if (req.method === 'GET' && url.pathname === '/api/memory') return send(res, 200, team.memory(team.project(url.searchParams.get('project') || '').id, url.searchParams.get('session') || null));
+    if (req.method === 'GET' && url.pathname === '/api/memory/search') return send(res, 200, await team.searchMemory(Object.fromEntries(url.searchParams)));
+    if (req.method === 'GET' && url.pathname === '/api/memory') return send(res, 200, team.memory(team.project(url.searchParams.get('project') || '').id, url.searchParams.get('session') || null, url.searchParams.has('history')));
+    if (req.method === 'GET' && url.pathname === '/api/memory/export') { const project = team.project(url.searchParams.get('project') || '').id; res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-memory-${project}.json"` }); res.end(JSON.stringify(team.memoryStore.export(project), null, 2)); return; }
+    if (req.method === 'POST' && url.pathname === '/api/memory/import') { const input = await body(req, 160e6); team.project(input.project); const result = team.memoryStore.import(input.project, input.package); team.emit('change'); return send(res, 200, result); }
+    if (req.method === 'POST' && url.pathname === '/api/transfer/import') { const input = await body(req, 160e6); return send(res, 201, await importTransfer(team, input.project, input.package)); }
     if (req.method === 'POST' && url.pathname === '/api/memory') return send(res, 200, team.editMemory(await body(req)));
     if (req.method === 'GET' && url.pathname === '/api/backups') return send(res, 200, { dir: team.backupDir(), list: team.backups() });
     if (req.method === 'POST' && url.pathname === '/api/backup') return send(res, 200, { file: team.backup('manual'), list: team.backups() });
@@ -125,7 +135,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
-    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export))?$/.exec(url.pathname);
+    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer))?$/.exec(url.pathname);
     if (match) {
       const [, id, action] = match;
       if (req.method === 'GET' && !action) return send(res, 200, team.get(id));
@@ -133,6 +143,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'GET' && action === 'diff') return send(res, 200, await team.diff(id));
       if (req.method === 'POST' && action === 'control') { const input = await body(req, 160e6); return send(res, 200, await team.control(id, input.action, input)); }
       if (req.method === 'GET' && action === 'export') { const md = await team.exportJob(id); res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-${id}.md"` }); res.end(md); return; }
+      if (req.method === 'GET' && action === 'transfer') { const pack = await exportTransfer(team, id); res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-transfer-${id}.json"` }); res.end(JSON.stringify(pack)); return; }
       if (req.method === 'GET' && action === 'merge-check') return send(res, 200, await team.mergeCheck(id));
       if (req.method === 'POST' && action === 'merge') return send(res, 200, await team.merge(id, await body(req)));
     }

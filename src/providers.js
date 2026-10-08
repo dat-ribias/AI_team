@@ -230,6 +230,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     // Repo liên kết được cấp quyền sửa: thêm làm thư mục ghi được của sandbox.
     for (const d of task.addDirs || []) args.push('--add-dir', d);
     for (const [name, s] of Object.entries(agent.mcp || {})) args.push('-c', `mcp_servers.${name}=${toml({ command: s.command, args: s.args || [], ...(s.env ? { env: s.env } : {}) })}`);
+    if (task.sessionId) args.push('resume', task.sessionId);
     args.push('-');
   } else if (agent.provider === 'claude') {
     args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
@@ -265,6 +266,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
       let event; try { event = JSON.parse(line); } catch { onEvent('DIAGNOSTIC', { summary: line.slice(0, 4000) }); return; }
       // Deliberately expose actions and messages, not reasoning items.
       const item = event.item;
+      if (event.type === 'thread.started' && typeof event.thread_id === 'string') onEvent('SESSION', { summary: 'Codex session', details: { id: event.thread_id, resumed: !!task.sessionId } });
       if (event.type === 'item.completed' && item?.type === 'agent_message') final = item.text;
       if (item && ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'].includes(item.type) || event.type === 'item.completed' && item?.type === 'agent_message') onEvent('ACTIVITY', { summary: item.command || (item.text ? item.text.slice(0, 200) : item.type), details: item });
       if (event.type === 'turn.completed') onEvent('USAGE', { summary: 'Token usage', details: event.usage });

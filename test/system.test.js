@@ -7,10 +7,14 @@ import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots }
 import { testList } from '../src/accounts.js';
 import { run, childEnv } from '../src/process.js';
 import { parseReport, normalizeCodexQuota, normalizeGoogleQuota, runAgent } from '../src/providers.js';
+import { exportTransfer, importTransfer } from '../src/transfer.js';
+import { fileHash, MemoryStore } from '../src/memory.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
   await run(['git'], ['init', '-b', 'main', path]);
+  // Fixture expectations use LF regardless of the machine's global Git setting.
+  await run(['git'], ['-C', path, 'config', 'core.autocrlf', 'false']);
   writeFileSync(join(path, 'hello.txt'), 'Hello!\n');
   await run(['git'], ['-C', path, 'add', '.']);
   await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial']);
@@ -21,8 +25,8 @@ async function fixture() {
   };
   return { config, path, data: mkdtempSync(join(tmpdir(), 'ai-team-state-')) };
 }
-async function settle(team, id, expected) {
-  const timeout = Date.now() + 20000;
+async function settle(team, id, expected, timeoutMs = 20000) {
+  const timeout = Date.now() + timeoutMs;
   while (Date.now() < timeout) {
     const job = team.get(id);
     if (job.status === expected && !team.active) return job;
@@ -376,12 +380,13 @@ test('maxJobsPerAccount lets one account run several jobs at once, each in its o
   const f = await fixture(); f.config.demo = false; f.config.maxJobsPerAccount = 2; f.config.resources = { reserveGB: 0, ramPerAgentGB: 0.01, maxAgents: 4, hardStopRamPercent: 100 };
   f.config.agents = f.config.agents.map(a => ({ ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
   f.config.pipeline.builders = ['codex-2'];
-  let now = 0, peak = 0; const slots = new Set(), held = new Set(), plans = [];
+  let now = 0, peak = 0, release; const slots = new Set(), held = new Set(), plans = [], together = new Promise(r => { release = r; });
   const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
     if (task.stage === 'plan') plans.push(prompt);
     if (task.stage === 'implement') {
       assert(!held.has(task.slot), 'hai việc cùng giữ một slot'); held.add(task.slot); slots.add(task.slot);
-      peak = Math.max(peak, ++now); await new Promise(r => setTimeout(r, 400)); now--; held.delete(task.slot);
+      peak = Math.max(peak, ++now); if (now === 2) release();
+      const timeout = setTimeout(release, 10000); await together; clearTimeout(timeout); now--; held.delete(task.slot);
     }
     return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
   }, readQuota: async () => ({ buckets: [] }) });
@@ -532,7 +537,10 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
       const r = await runAgent(agent, task, prompt, opts);
       calls.push({ stage: task.stage, agent: agent.id, prompt });
       if (task.stage === 'plan' && plans++ === 0) { r.tasks = structuredClone(graph); r.flow = { steps: ['verify'] }; }
-      if (task.stage === 'implement') { const m = /write (\w+\.txt)/.exec(prompt); if (m) writeFileSync(join(task.worktree, m[1]), m[1] + Date.now() + '\n'); }
+      if (task.stage === 'implement') {
+        const entry = task.running.find(e => e.agent === agent.id && e.slot === task.slot), file = task.tasks[entry.task].files[0];
+        if (file) writeFileSync(join(task.worktree, file), file + Date.now() + '\n');
+      }
       if (task.stage === 'review' && /Review ONLY this part/.test(prompt)) { const v = reviewVerdict(nodeReviews++); if (v !== 'approved') return { ...r, verdict: v, findings: [{ claim: 'thiếu kiểm tra', impact: 'high' }] }; }
       return r;
     } });
@@ -546,6 +554,7 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     assert.equal(nodeRev.length, 2);
     for (const [k, idx] of [[0, 2], [1, 3]]) {
       const node = ready.tasks[idx], dep = ready.tasks[idx - 2];
+      assert(node && dep, JSON.stringify(ready.tasks));
       assert(node.done && node.verdict === 'approved'); assert.notEqual(node.ranBy, dep.ranBy);
       assert(nodeRev.some(c => c.prompt.includes(`${dep.base}..${dep.commit}`)), 'review đúng commit của task');
     }
@@ -557,7 +566,7 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     assert.equal(ready.tasks[fix.fixOf].attempts, 1); assert(ready.tasks[fix.fixOf].done);
     assert(team.events(job.id).some(e => e.type === 'FIX_TASK')); }
   // (c) luôn fail → sau 2 lần sửa thì về Leader lập kế hoạch lại (kế hoạch 2 không có node review)
-  { const { team, job, calls } = await go(() => 'changes_requested'); await settle(team, job.id, 'ready');
+  { const { team, job, calls } = await go(() => 'changes_requested'); await settle(team, job.id, 'ready', 40000);
     assert.equal(calls.filter(c => c.stage === 'plan').length, 2);
     assert(team.events(job.id).some(e => e.type === 'REWORK_REQUEST')); }
 });
@@ -849,7 +858,7 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
     prompts.push({ stage: task.stage, prompt });
     const r = await runAgent(agent, task, prompt, opts);
-    if (task.stage === 'final') return { ...r, memory: round++ === 0 ? { add: ['Tests: node --test', 'token sk-abcdefghijklmnopqrstuvwxyz123456 leaked'], session: 'Đang sửa hello.txt' } : { remove: [`M${team.memory('test').facts[0].id}`], session: 'Xong hello.txt' } };
+    if (task.stage === 'final') return { ...r, memory: round++ === 0 ? { add: ['hello.txt Tests: node --test', 'token sk-abcdefghijklmnopqrstuvwxyz123456 leaked'], session: 'Đang sửa hello.txt' } : { remove: [`M${team.memory('test').facts[0].id}`], session: 'Xong hello.txt' } };
     return r;
   } });
   t.after(() => team.close());
@@ -858,26 +867,347 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   const a = await team.create({ project: 'test', goal: 'Update hello', mode: 'full', sessionId: ses.id });
   await settle(team, a.id, 'ready');
   let m = team.memory('test', ses.id);
-  assert.deepEqual(m.facts.map(x => x.text)[0], 'Tests: node --test'); assert.doesNotMatch(m.facts[1].text, /sk-abcdef/);
+  assert.deepEqual(m.facts.map(x => x.text)[0], 'hello.txt Tests: node --test'); assert.doesNotMatch(m.facts[1].text, /sk-abcdef/);
+  assert.equal(m.facts[0].scope, 'job');
+  const firstMemoryId = `M${m.facts[0].id}`;
+  assert.equal((await team.searchMemory({ project: 'test', query: 'hello' })).results.length, 0);
   assert.equal(m.summary, 'Đang sửa hello.txt'); assert.equal(m.log.length, 1); assert.match(m.log[0].text, /Update hello → ready/);
   await team.merge(a.id, { confirm: (await team.mergeCheck(a.id)).code });
-  // Việc sau trong cùng phiên: Leader thấy ghi chú (kèm id ở bước tổng kết), tóm tắt phiên và việc trước; builder không thấy.
+  // Việc sau nhận ghi chú liên quan trực tiếp; chỉ phần tóm tắt phiên dành cho Leader.
   prompts.length = 0;
   const b = await team.create({ project: 'test', goal: 'Check hello again', mode: 'full', sessionId: ses.id });
   await settle(team, b.id, 'ready');
   const plan = prompts.find(p => p.stage === 'plan').prompt, fin = prompts.find(p => p.stage === 'final').prompt, impl = prompts.find(p => p.stage === 'implement').prompt;
   assert.match(plan, /Tests: node --test/); assert.match(plan, /Đang sửa hello.txt/); assert.match(plan, new RegExp(a.id));
-  assert.match(fin, /M\d+: Tests: node --test/); assert.match(fin, /"memory":\{"add"/);
-  assert.doesNotMatch(impl, /Tests: node --test/);
+  assert.match(fin, /M\d+: hello.txt Tests: node --test/); assert.match(fin, /"memory":\{"add"/);
+  assert.match(impl, /Tests: node --test/);
+  assert.equal((await team.searchMemory({ project: 'test', job: b.id, memoryId: firstMemoryId })).results.length, 0);
+  assert(team.memory('test').facts.some(x => x.text === 'hello.txt Tests: node --test'));
+  await team.merge(b.id, { confirm: (await team.mergeCheck(b.id)).code });
   m = team.memory('test', ses.id);
-  assert(!m.facts.some(x => x.text === 'Tests: node --test')); assert.equal(m.summary, 'Xong hello.txt'); assert.equal(m.log.length, 2);
+  assert(!m.facts.some(x => x.text === 'hello.txt Tests: node --test')); assert.equal(m.summary, 'Xong hello.txt'); assert.equal(m.log.length, 2);
+  assert(team.memory('test', ses.id, true).facts.some(x => x.text === 'hello.txt Tests: node --test' && x.status === 'superseded'));
   // Bạn sửa tay; sao lưu; xuất Markdown.
   team.editMemory({ project: 'test', session: ses.id, add: 'Dùng tiếng Việt trong UI' });
   assert(team.memory('test').facts.some(x => x.text === 'Dùng tiếng Việt trong UI'));
   const file = team.backup('manual'); assert(readFileSync(file).length > 0); assert.equal(team.backups().length >= 1, true);
   const md = await team.exportJob(b.id); assert.match(md, /^# Check hello again/); assert.match(md, /## Báo cáo/);
-  await team.control(b.id, 'cancel'); await team.control(b.id, 'delete');
+  await team.control(b.id, 'delete');
   assert(team.backups().some(x => /before-delete/.test(x.file)));
+});
+
+test('memory retrieval retains old facts, respects branch and file snapshots, and imports without overwriting conflicts', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  team.editMemory({ project: 'test', add: 'quota UNKNOWN không được coi là 100%' });
+  for (let i = 0; i < 70; i++) team.editMemory({ project: 'test', add: `Unrelated note ${i}` });
+  const a = await team.create({ project: 'test', goal: 'Memory check', paused: true });
+  await team.remember(a, null);
+  assert.equal(team.memory('test').facts.length, 71);
+  assert.equal((await team.searchMemory({ project: 'test', query: 'quota UNKNOWN' })).results[0].text, 'quota UNKNOWN không được coi là 100%');
+  const oldest = team.memory('test').facts[0];
+  assert.equal((await team.searchMemory({ project: 'test', memoryId: `M${oldest.id}` })).results[0].id, oldest.id);
+  await assert.rejects(team.searchMemory({ project: 'test', memoryId: 'Minvalid' }), /Invalid memory id/);
+  team.editMemory({ project: 'test', add: 'Quyết định dùng SQLite' });
+  assert.equal((await team.searchMemory({ project: 'test', query: 'quyet dinh' })).results.length, 1);
+  team.editMemory({ project: 'test', add: '日本語の設計を維持' });
+  assert.equal((await team.searchMemory({ project: 'test', query: '日本語' })).results.length, 1);
+  const dependent = team.memoryStore.add({ project: 'test', text: 'hello file observation', commitSha: a.base, files: { 'hello.txt': fileHash(a.worktree, 'hello.txt') } });
+  assert.equal((await team.searchMemory({ project: 'test', job: a.id, memoryId: `M${dependent}` })).results.length, 1);
+  writeFileSync(join(a.worktree, 'hello.txt'), 'changed without committing');
+  assert.equal((await team.searchMemory({ project: 'test', job: a.id, memoryId: `M${dependent}` })).results.length, 0);
+  assert.equal((await team.searchMemory({ project: 'test', memoryId: `M${dependent}` })).results.length, 1);
+  await team.remember(a, { add: ['branchOnlyMarker'], remove: [`M${oldest.id}`] });
+  const b = await team.create({ project: 'test', goal: 'Other branch', paused: true });
+  assert.equal((await team.searchMemory({ project: 'test', job: b.id, query: 'branchOnlyMarker' })).results.length, 0);
+  assert.equal((await team.searchMemory({ project: 'test', job: a.id, query: 'branchOnlyMarker' })).results.length, 1);
+  assert.equal((await team.searchMemory({ project: 'test', job: a.id, memoryId: `M${oldest.id}` })).results.length, 0);
+  assert.equal((await team.searchMemory({ project: 'test', job: b.id, memoryId: `M${oldest.id}` })).results.length, 1);
+  const pack = team.memoryStore.export('test'), before = team.memory('test', null, true).facts.length;
+  assert.equal(team.memoryStore.import('test', pack).added, 0);
+  const conflict = structuredClone(pack); conflict.records[0].text = 'An incompatible update';
+  assert(team.memoryStore.import('test', conflict).conflicts >= 1);
+  assert.equal(team.memory('test', null, true).facts.length, before);
+  assert.equal(team.memory('test').facts[0].text, oldest.text);
+  const invalid = structuredClone(pack); invalid.records[1].files = { '../escape': null };
+  assert.throws(() => team.memoryStore.import('test', invalid), /fingerprint/);
+  assert.equal(team.memory('test', null, true).facts.length, before);
+  team.editMemory({ project: 'test', remove: oldest.id, revision: oldest.revision });
+  assert.throws(() => team.editMemory({ project: 'test', remove: oldest.id, revision: oldest.revision }), /reload/);
+});
+
+test('legacy memory migration preserves ids and isolates notes from unmerged jobs', async () => {
+  const { DatabaseSync } = await import('node:sqlite'), db = new DatabaseSync(':memory:');
+  try {
+    db.exec(`CREATE TABLE jobs(id TEXT PRIMARY KEY,body TEXT); CREATE TABLE memory(id INTEGER PRIMARY KEY,project TEXT,session TEXT,kind TEXT,text TEXT,job TEXT,at TEXT);`);
+    db.prepare('INSERT INTO jobs VALUES(?,?)').run('old-job', JSON.stringify({ kind: 'code', status: 'ready' }));
+    db.prepare('INSERT INTO memory(id,project,kind,text,job,at) VALUES(1,?,?,?,?,?)').run('old-project', 'fact', 'legacy shared convention', 'user', new Date().toISOString());
+    db.prepare('INSERT INTO memory(id,project,kind,text,job,at) VALUES(2,?,?,?,?,?)').run('old-project', 'fact', 'unmerged branch observation', 'old-job', new Date().toISOString());
+    const store = new MemoryStore(db, redact), before = store.rows('old-project');
+    assert.equal(before.length, 2); assert.equal(before[0].id, 1); assert.equal(before[1].scope, 'job');
+    assert.equal(store.candidates('old-project', null, '').length, 1);
+    assert.equal(store.candidates('old-project', 'old-job', '').length, 2);
+    assert.deepEqual(new MemoryStore(db, redact).rows('old-project').map(r => r.uid), before.map(r => r.uid));
+  } finally { db.close(); }
+});
+
+test('peer dialogue releases the only slot, carries unfinished code, and keeps independent review gates', async t => {
+  const f = await fixture(), seen = [];
+  f.config.projects[0].access = { folders: [{ path: f.path, members: ['codex-2', 'codex-4'] }, { path: f.data, members: ['codex-4'] }], network: ['codex-4'], shell: ['*'] };
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    seen.push([agent.id, task.stage]); assert.equal(team.slotKeys().length, 1);
+    const discussion = task.discussions?.at(-1);
+    if (task.stage === 'implement') {
+      if (!discussion) {
+        writeFileSync(join(task.worktree, 'hello.txt'), 'incorrect assumption\n');
+        writeFileSync(join(task.worktree, 'partial.txt'), 'unfinished evidence\n');
+        return { summary: 'Need the expected greeting', status: 'waiting_for_reply', peerRequest: { to: 'codex-4', topic: 'Greeting contract', claim: 'Use an arbitrary greeting', question: 'What exact greeting does the test require?', evidence: ['hello.txt:1'] }, checkpoint: { done: 'Drafted greeting', remaining: 'Confirm contract', next: 'Ask codex-4' } };
+      }
+      assert(prompt.includes('The assertion requires Hello from AI Team demo!'));
+      assert(prompt.includes('Drafted greeting')); assert(!task.tasks[0].done);
+      writeFileSync(join(task.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
+      return { summary: 'Corrected the assumption', status: 'completed', dialogueDecision: { thread: discussion.id, outcome: 'accepted', reason: 'Used the assertion as the contract', evidence: ['configured test assertion'] } };
+    }
+    if (task.stage === 'consult') {
+      assert.equal(task.network, false); assert.equal(task.researchWeb, false); assert.deepEqual(task.checks, []);
+      assert(!task.readDirs.includes(f.data)); assert.notEqual(task.worktree, task.tasks[0]?.worktree || team.get(task.id).worktree);
+      if (discussion.stage === 'implement') {
+        assert.equal(agent.id, 'codex-4'); assert(prompt.includes('What exact greeting does the test require?'));
+        assert.equal(readFileSync(join(task.worktree, 'partial.txt'), 'utf8'), 'unfinished evidence\n');
+        assert.equal(readFileSync(join(task.worktree, 'hello.txt'), 'utf8'), 'incorrect assumption\n');
+        return { summary: 'Contract evidence', status: 'completed', stance: 'disagree', answer: 'The assertion requires Hello from AI Team demo!', evidence: ['configured test assertion'] };
+      }
+      assert.equal(agent.id, 'codex-2'); assert(prompt.includes('Explain why the greeting changed'));
+      return { summary: 'Author explanation', status: 'completed', stance: 'answer', answer: 'Changed it to satisfy the configured assertion', evidence: ['hello.txt:1'] };
+    }
+    if (task.stage === 'review') {
+      if (discussion?.stage !== 'review') return { summary: 'Ask the author', status: 'waiting_for_reply', peerRequest: { to: 'codex-2', topic: 'Author explanation', claim: 'Greeting change is necessary', question: 'Explain why the greeting changed', evidence: ['hello.txt:1'] } };
+      assert(prompt.includes('Changed it to satisfy the configured assertion'));
+      assert.equal(task.tested, task.revision);
+      const report = await runAgent(agent, task, prompt, opts);
+      return { ...report, dialogueDecision: { thread: discussion.id, outcome: 'accepted', reason: 'Reviewed the diff and test evidence independently', evidence: ['hello.txt:1'] } };
+    }
+    return runAgent(agent, task, prompt, opts);
+  } });
+  team.capacity = () => ({ start: team.runs.size ? 0 : 1, hardStop: false }); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello with a peer question' });
+  const ready = await settle(team, job.id, 'ready', 40000);
+  assert.equal(ready.discussions.length, 2); assert(ready.discussions.every(d => d.status === 'resolved' && d.messages.length === 2));
+  assert.equal(ready.tasks[0].done, true); assert.equal(ready.reviewed, ready.revision); assert.equal(ready.tested, ready.revision);
+  assert.equal(ready.metrics.peerQuestions, 2); assert.equal(ready.metrics.peerReplies, 2); assert.equal(ready.metrics.peerResolved, 2);
+  assert.equal(seen.filter(([, s]) => s === 'plan').length, 1); assert.equal(seen.filter(([, s]) => s === 'consult').length, 2);
+  assert.equal(team.useOf('codex-2'), 0); assert.equal(team.memoryReaders.size, 0);
+  assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8'), 'Hello!\n');
+  const md = await team.exportJob(job.id); assert(md.includes('## Đối thoại theo vấn đề')); assert(md.includes('What exact greeting does the test require?'));
+  assert(!team.memory('test').facts.some(m => m.text.includes('What exact greeting')));
+  await team.merge(job.id); assert.equal(team.get(job.id).status, 'merged');
+});
+
+test('peer dialogue limit preserves parallel partial work and resumes the same stage with human guidance', async t => {
+  const f = await fixture(); let consults = 0, plans = 0;
+  const agentRun = async (agent, task, prompt, opts) => {
+    const d = task.discussions?.findLast(d => d.stage === 'implement' && d.task === 0);
+    if (task.stage === 'plan') { plans++; return { summary: 'Two independent tasks', kind: 'code', rigor: 'standard', risk: 'low', tasks: [{ agent: 'codex-2', difficulty: 2, instruction: 'Uncertain greeting', files: ['hello.txt', 'partial.txt'], dependsOn: [] }, { agent: 'codex-4', difficulty: 2, instruction: 'Independent file', files: ['other.txt'], dependsOn: [] }] }; }
+    if (task.stage === 'consult') { consults++; return { summary: 'Still uncertain', status: 'completed', stance: 'disagree', answer: 'The assumption remains unsupported', evidence: ['hello.txt:1'] }; }
+    if (task.stage === 'implement' && task.tasks[task.running.find(r => r.agent === agent.id && r.stage === 'implement').task].instruction === 'Independent file') { writeFileSync(join(task.worktree, 'other.txt'), 'completed parallel work\n'); return { summary: 'Independent task complete', status: 'completed' }; }
+    if (task.stage === 'implement') {
+      if (task.messages.some(m => m.text === 'Use the configured greeting')) {
+        assert.equal(readFileSync(join(task.worktree, 'partial.txt'), 'utf8'), 'keep partial work\n'); assert(prompt.includes('The assumption remains unsupported'));
+        writeFileSync(join(task.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
+        return { summary: 'Followed human guidance', status: 'completed', dialogueDecision: { thread: d.id, outcome: 'accepted', reason: 'Human chose the configured contract', evidence: ['human message'] } };
+      }
+      writeFileSync(join(task.worktree, 'partial.txt'), 'keep partial work\n'); writeFileSync(join(task.worktree, 'hello.txt'), 'partial greeting\n');
+      return { summary: 'Need a decision', status: 'waiting_for_reply', peerRequest: { to: 'codex-3', ...(d ? { thread: d.id } : {}), topic: 'Uncertain greeting', claim: 'Current draft is sufficient', question: 'Can you confirm the contract?', evidence: ['hello.txt:1'] }, checkpoint: { done: 'Partial greeting saved', remaining: 'Contract decision', next: 'Resolve uncertainty' } };
+    }
+    return runAgent(agent, task, prompt, opts);
+  };
+  const team = new Team(f.config, f.data, { runAgent: agentRun }); t.after(() => team.close());
+  team.capacity = () => ({ start: Math.max(0, 2 - team.runs.size - team.extra), hardStop: false });
+  const job = await team.create({ project: 'test', goal: 'Update greeting and another file' });
+  const waiting = await settle(team, job.id, 'waiting', 40000);
+  assert.equal(consults, 2); assert.equal(waiting.stage, 'implement'); assert.equal(waiting.tasks[0].done, false); assert.equal(waiting.tasks[1].done, true);
+  assert.equal(waiting.discussions[0].rounds, 2); assert.equal(waiting.discussions[0].status, 'unresolved'); assert.equal(waiting.tested, null);
+  assert.equal(readFileSync(join(waiting.worktree, 'hello.txt'), 'utf8'), 'partial greeting\n');
+  assert.equal(readFileSync(join(waiting.worktree, 'other.txt'), 'utf8'), 'completed parallel work\n');
+  assert.equal((await run(['git'], ['-C', waiting.worktree, 'status', '--porcelain'])).stdout.trim(), '');
+  await assert.rejects(team.merge(job.id)); await team.close();
+  const reopened = new Team(f.config, f.data, { runAgent: agentRun }); t.after(() => reopened.close());
+  reopened.capacity = () => ({ start: reopened.runs.size ? 0 : 1, hardStop: false });
+  await reopened.control(job.id, 'message', { message: 'Use the configured greeting' });
+  assert.equal(reopened.get(job.id).stage, 'implement');
+  const ready = await settle(reopened, job.id, 'ready', 40000);
+  assert.equal(plans, 1); assert.equal(consults, 2); assert(ready.tasks.every(t => t.done)); assert.equal(ready.discussions[0].status, 'resolved');
+  assert.equal(ready.tested, ready.revision); assert.equal(ready.reviewed, ready.revision);
+});
+
+test('pausing a consultation preserves its parallel child checkpoint before releasing the worktree', async t => {
+  const f = await fixture(); let paused = false, questions = 0;
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'plan') return { summary: 'Parallel tasks', kind: 'code', rigor: 'standard', risk: 'low', tasks: [{ agent: 'codex-2', difficulty: 2, instruction: 'Ask a peer', files: ['hello.txt'], dependsOn: [] }, { agent: 'codex-4', difficulty: 2, instruction: 'Other file', files: ['other.txt'], dependsOn: [] }] };
+    if (task.stage === 'consult') {
+      assert.equal(readFileSync(join(task.worktree, 'hello.txt'), 'utf8'), 'checkpoint before pause\n');
+      return { summary: 'Reply after resume', status: 'completed', stance: 'answer', answer: 'Use the configured greeting', evidence: ['hello.txt:1'] };
+    }
+    if (task.stage === 'implement') {
+      const i = task.running.find(r => r.agent === agent.id && r.stage === 'implement').task;
+      if (i === 1) { writeFileSync(join(task.worktree, 'other.txt'), 'parallel sibling\n'); return { summary: 'Other file saved', status: 'completed' }; }
+      const d = task.discussions?.at(-1);
+      if (!d) { questions++; writeFileSync(join(task.worktree, 'hello.txt'), 'checkpoint before pause\n'); return { summary: 'Need contract', status: 'waiting_for_reply', peerRequest: { to: 'codex-3', topic: 'Contract', question: 'Which greeting?' } }; }
+      assert(prompt.includes('Use the configured greeting')); writeFileSync(join(task.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
+      return { summary: 'Resolved after resume', status: 'completed', dialogueDecision: { thread: d.id, outcome: 'accepted', reason: 'Checked the contract' } };
+    }
+    return runAgent(agent, task, prompt, opts);
+  } }); t.after(() => team.close());
+  const callOnce = team.callOnce.bind(team);
+  team.callOnce = async (...args) => {
+    const report = await callOnce(...args);
+    if (args[2] === 'consult' && !paused) { paused = true; await team.control(args[0].id, 'pause'); }
+    return report;
+  };
+  team.capacity = () => ({ start: Math.max(0, 2 - team.runs.size - team.extra), hardStop: false });
+  const job = await team.create({ project: 'test', goal: 'Update hello and another file' });
+  const stopped = await settle(team, job.id, 'paused', 40000);
+  assert.equal(stopped.discussions[0].status, 'pending'); assert(!stopped.tasks[0].done);
+  assert.equal(readFileSync(join(stopped.worktree, 'hello.txt'), 'utf8'), 'checkpoint before pause\n');
+  assert.equal((await run(['git'], ['-C', stopped.worktree, 'rev-parse', 'HEAD'])).stdout.trim(), stopped.revision);
+  assert.equal(team.slotKeys().length, 0);
+  await team.control(job.id, 'resume'); const ready = await settle(team, job.id, 'ready', 40000);
+  assert.equal(questions, 1); assert.equal(ready.discussions[0].rounds, 1); assert.equal(ready.discussions[0].status, 'resolved');
+});
+
+test('pending peer questions survive pause without duplication; invalid recipients and edits are rejected', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(async () => { team.runs.clear(); await team.close(); });
+  const job = await team.create({ project: 'test', goal: 'Peer recovery', paused: true });
+  job.tasks = [{ instruction: 'Ask about hello', difficulty: 2, done: false }]; team.save(job);
+  const opts = { task: job.tasks[0], taskIndex: 0 }, state = { agents: new Set(), abort: new AbortController() }; team.runs.set(job.id, state);
+  t.after(() => team.runs.clear());
+  for (const to of ['codex-2', 'outside']) {
+    team.agentRun = async () => ({ summary: 'Invalid recipient', status: 'waiting_for_reply', peerRequest: { to, topic: 'Contract', question: 'Confirm it?' } });
+    await assert.rejects(team.call(job, 'codex-2', 'implement', 'Ask about hello', undefined, [], opts), /Invalid peerRequest/);
+  }
+  let sourceCalls = 0;
+  team.agentRun = async (agent, task) => {
+    if (task.stage === 'consult') { state.abort.abort(new DOMException('Paused', 'AbortError')); throw state.abort.signal.reason; }
+    sourceCalls++; writeFileSync(join(task.worktree, 'hello.txt'), 'saved draft\n');
+    return { summary: 'Ask contract', status: 'waiting_for_reply', peerRequest: { to: 'codex-4', topic: 'Contract', question: 'Confirm exact greeting?' }, checkpoint: { done: 'Saved draft', next: 'Resolve contract' } };
+  };
+  await assert.rejects(team.call(job, 'codex-2', 'implement', 'Ask about hello', undefined, [], opts), /Paused/);
+  assert.equal(team.slotKeys().length, 0); assert.equal(team.get(job.id).discussions[0].status, 'pending');
+  const persisted = team.get(job.id); team.runs.clear(); await team.close();
+  const reopened = new Team(f.config, f.data); reopened.closed = true; t.after(async () => { reopened.runs.clear(); await reopened.close(); });
+  reopened.runs.set(job.id, { agents: new Set(), abort: new AbortController() }); t.after(() => reopened.runs.clear());
+  reopened.agentRun = async (agent, task, prompt) => {
+    if (task.stage === 'consult') {
+      assert.equal(readFileSync(join(task.worktree, 'hello.txt'), 'utf8'), 'saved draft\n');
+      await reopened.control(job.id, 'message', { message: 'Human guidance during consultation' });
+      return { summary: 'Recovered reply', status: 'completed', stance: 'answer', answer: 'Use the configured contract', evidence: ['hello.txt:1'] };
+    }
+    sourceCalls++; assert(prompt.includes('Use the configured contract')); assert(prompt.includes('Human guidance during consultation'));
+    return { summary: 'Resolved', status: 'completed', dialogueDecision: { thread: persisted.discussions[0].id, outcome: 'accepted', reason: 'Examined the evidence' } };
+  };
+  await reopened.call(persisted, 'codex-2', 'implement', 'Ask about hello', undefined, [], { task: persisted.tasks[0], taskIndex: 0 });
+  assert.equal(sourceCalls, 2); assert.equal(persisted.discussions[0].messages.length, 2); assert.equal(persisted.discussions[0].rounds, 1);
+  assert.equal(reopened.get(job.id).messages.at(-1).text, 'Human guidance during consultation');
+  reopened.agentRun = async (agent, task) => task.stage === 'consult'
+    ? (writeFileSync(join(task.worktree, 'hello.txt'), 'unauthorized edit\n'), { summary: 'Bad reply', status: 'completed', stance: 'agree', answer: 'Edited the file' })
+    : { summary: 'New question', status: 'waiting_for_reply', peerRequest: { to: 'codex-4', topic: 'Another issue', question: 'Examine current draft?' } };
+  await assert.rejects(reopened.call(persisted, 'codex-2', 'implement', 'Another issue', undefined, [], { task: persisted.tasks[0], taskIndex: 0 }), e => e.peerWait && /chỉ đọc/.test(e.message));
+  assert.equal(readFileSync(join(persisted.worktree, 'hello.txt'), 'utf8'), 'saved draft\n');
+  assert.equal(reopened.slotKeys().length, 0);
+  assert.throws(() => validateConfig({ ...f.config, peerDialogue: 'yes' }), /boolean/);
+});
+
+test('work transfer preserves binary/new/deleted files and checkpoints but imports paused without approvals or credentials', async t => {
+  const f = await fixture(), source = new Team(f.config, f.data); source.closed = true; t.after(() => source.close());
+  writeFileSync(join(f.path, 'remove.txt'), 'Remove this file');
+  await run(['git'], ['-C', f.path, 'add', '.']);
+  await run(['git'], ['-C', f.path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'deletion fixture']);
+  const job = await source.create({ project: 'test', goal: 'Continue imported hello', paused: true });
+  job.tasks = [{ instruction: 'Finish hello', done: false, checkpoint: { done: 'Started hello', remaining: 'Verify the result', next: 'Run tests' } }]; source.save(job);
+  job.discussions = [{ id: 'D-history', status: 'pending', from: 'old-member', to: 'old-peer', messages: [{ text: 'Old question is source data' }], rounds: 1 }]; source.save(job);
+  source.editMemory({ project: 'test', add: 'Shared project convention' });
+  await source.remember(job, { add: ['Pending job observation'] });
+  writeFileSync(join(job.worktree, 'hello.txt'), 'unfinished hello');
+  writeFileSync(join(job.worktree, 'binary.dat'), Buffer.from([0, 255, 1, 200]));
+  rmSync(join(job.worktree, 'remove.txt'));
+  const pack = await exportTransfer(source, job.id);
+  assert.equal(pack.format, 'ai-team-transfer'); assert.equal(pack.work.tasks[0].checkpoint.remaining, 'Verify the result');
+  const copy = mkdtempSync(join(tmpdir(), 'ai-team-import-'));
+  await run(['git'], ['clone', f.path, copy]);
+  const config = structuredClone(f.config); config.projects[0].path = copy;
+  const target = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-import-state-'))); target.closed = true; t.after(() => target.close());
+  const result = await importTransfer(target, 'test', pack), imported = result.job;
+  assert.equal(imported.status, 'paused'); assert.equal(imported.stage, 'plan'); assert.equal(imported.tested, null); assert.equal(imported.reviewed, null); assert.equal(imported.verified, null);
+  assert.equal(readFileSync(join(imported.worktree, 'hello.txt'), 'utf8'), 'unfinished hello');
+  assert.deepEqual(readFileSync(join(imported.worktree, 'binary.dat')), Buffer.from([0, 255, 1, 200]));
+  assert.throws(() => readFileSync(join(imported.worktree, 'remove.txt')), /ENOENT/);
+  assert.equal(imported.transfer.tasks[0].checkpoint.next, 'Run tests'); assert.deepEqual(imported.tasks, []);
+  assert.equal(imported.transfer.discussions[0].id, 'D-history'); assert.equal(imported.discussions, undefined);
+  assert.equal(JSON.parse(readFileSync(join(imported.worktree, imported.transferFile), 'utf8')).tasks[0].checkpoint.next, 'Run tests');
+  let planPrompt;
+  target.agentRun = async (agent, task, prompt, opts) => { planPrompt = prompt; return runAgent(agent, task, prompt, opts); };
+  await target.invoke(imported, 'codex-1', 'plan', 'Inspect imported work', undefined, [], {}, target.agent('codex-1'), new AbortController().signal);
+  assert(planPrompt.includes(imported.transferFile)); assert(!planPrompt.includes('Run tests'));
+  target.agentRun = async () => { writeFileSync(join(imported.worktree, 'binary.dat'), Buffer.from([0, 255, 2, 200])); return { summary: 'changed a pending file', status: 'planned' }; };
+  await assert.rejects(target.invoke(imported, 'codex-1', 'plan', 'Read only', undefined, [], {}, target.agent('codex-1'), new AbortController().signal), /chỉ đọc/);
+  writeFileSync(join(imported.worktree, 'binary.dat'), Buffer.from([0, 255, 1, 200]));
+  assert.equal((await exportTransfer(target, imported.id)).work.tasks[0].checkpoint.next, 'Run tests');
+  assert(target.memory('test').facts.some(r => r.scope === 'job' && r.job === imported.id));
+  assert.equal(readFileSync(join(copy, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n'), 'Hello!\n');
+  const unsafe = structuredClone(pack); unsafe.code.files[0].path = '../escape';
+  const count = target.jobs().length;
+  await assert.rejects(importTransfer(target, 'test', unsafe), /Unsafe/); assert.equal(target.jobs().length, count);
+  const corrupt = structuredClone(pack); corrupt.code.sha256 = '0'.repeat(64);
+  await assert.rejects(importTransfer(target, 'test', corrupt), /checksum/); assert.equal(target.jobs().length, count);
+  writeFileSync(join(job.worktree, '.env'), 'PRIVATE_KEY=must not transfer');
+  await run(['git'], ['-C', job.worktree, 'add', '-f', '.env']);
+  await assert.rejects(exportTransfer(source, job.id), /Unsafe/);
+  assert.equal(source.runs.size, 0);
+});
+
+test('Codex task resume reuses only the same profile/worktree/permissions, checkpoints survive a blocker, and memory credentials expire', async t => {
+  const f = await fixture(); f.config.resumeCodexTasks = true;
+  f.config.agents.find(a => a.id === 'codex-2').provider = 'codex';
+  f.config.agents.find(a => a.id === 'codex-2').home = mkdtempSync(join(tmpdir(), 'ai-team-resume-home-'));
+  const calls = []; let team;
+  team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    if (task.stage === 'implement') {
+      const token = agent.mcp.team_memory.env.TEAM_MEMORY_TOKEN;
+      assert.equal(team.memoryReaders.get(token).job, task.id);
+      calls.push({ sessionId: task.sessionId, token });
+      opts.onEvent('SESSION', { summary: 'session', details: { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' } });
+      if (calls.length === 1) return { summary: 'Needs another step', status: 'blocked', checkpoint: { done: 'Located hello', remaining: 'Update hello', next: 'Continue implementation' } };
+    }
+    return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
+  } });
+  t.after(() => team.close()); team.start();
+  const job = await team.create({ project: 'test', goal: 'Update hello', mode: 'full' });
+  const blocked = await settle(team, job.id, 'blocked');
+  assert.equal(blocked.tasks[0].checkpoint.next, 'Continue implementation'); assert.equal(team.memoryReaders.size, 0);
+  await team.control(job.id, 'resume');
+  const ready = await settle(team, job.id, 'ready');
+  assert.equal(calls[0].sessionId, undefined); assert.equal(calls[1].sessionId, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  assert.equal(team.memoryReaders.size, 0); assert.equal(ready.tasks[0].checkpoint.done.includes('DEMO'), true);
+  // A permission change invalidates the saved conversation, even for the same member and task.
+  ready.tasks[0].done = false; ready.status = 'paused'; ready.stage = 'implement'; team.save(ready); team.config.roleCaps = { builder: { network: false } };
+  f.config.projects[0].access = { network: ['codex-2'] }; team.config.projects[0].access = f.config.projects[0].access;
+  // The first context had no network grant; make an effective permission change here.
+  team.config.roleCaps.builder.network = true;
+  await team.control(job.id, 'resume'); await settle(team, job.id, 'ready');
+  assert.equal(calls[2].sessionId, undefined);
+});
+
+test('Codex CLI resume passes the session explicitly and reads the new prompt through stdin', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'ai-team-cli-check-')), cli = join(home, 'fake.cjs');
+  writeFileSync(join(home, 'auth.json'), '{}');
+  writeFileSync(cli, `let input=''; process.stdin.setEncoding('utf8'); process.stdin.on('data', chunk=>input+=chunk); process.stdin.on('end',()=>{
+    console.log(JSON.stringify({type:'thread.started',thread_id:'test-session'}));
+    console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:JSON.stringify({summary:'ok',status:'completed',args:process.argv.slice(2),input})}}));
+  });`);
+  const events = [], prompt = 'Continue the task: $(literal) & keep this text';
+  const report = await runAgent({ id: 'cli', provider: 'codex', home, command: [process.execPath, cli], model: 'test-model' }, { stage: 'implement', worktree: home, sessionId: 'test-session' }, prompt, { onEvent: (type, data) => events.push({ type, data }) });
+  assert.deepEqual(report.args.slice(-3), ['resume', 'test-session', '-']);
+  assert.equal(report.args[0], 'exec'); assert.equal(report.input, prompt);
+  assert(events.some(e => e.type === 'SESSION' && e.data.details.id === 'test-session' && e.data.details.resumed));
 });
 
 test('load balancing: an account with spare slots does not take every parallel task while other builders are idle', async t => {

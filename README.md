@@ -1,14 +1,13 @@
 # AI Team Control Room
 
-Dashboard local cho 3 Codex profile + 1 Google reviewer. Chạy Node.js 24, SQLite có sẵn trong Node và SDK MCP chính thức. Giao diện không cần build, Docker, React hay dịch vụ cloud riêng.
+Dashboard local điều phối một đội AI CLI (Codex, Claude Code, Antigravity/Gemini) trên repo của bạn: Manager lập kế hoạch, Builder làm, Reviewer/Verifier kiểm tra, bạn duyệt merge. Chạy Node.js 24, SQLite có sẵn trong Node và SDK MCP chính thức. Giao diện không cần build, Docker, React hay dịch vụ cloud riêng.
 
-## Trạng thái bàn giao
+## Trạng thái
 
-- Đã triển khai hàng đợi, manager phân chia việc bằng JSON, worker theo từng bước, Git worktree, checkpoint, kiểm thử thực, vòng review/sửa có giới hạn, verifier, báo cáo và merge có duyệt.
-- Có timeline, lọc theo agent, hoạt động CLI, quyết định, blocker, diff, tạm dừng/hủy/tiếp tục, đổi builder, gửi chỉ dẫn, dashboard quota và lịch sử quota.
-- Có adapter `codex exec`, Codex app-server quota, Antigravity headless/quota và Gemini CLI cho tài khoản phù hợp; chưa kiểm chứng end-to-end với tài khoản thật của bạn.
-- Demo sử dụng agent giả được ghi rõ. Repo, Git, SQLite, kiểm thử và điều kiện merge trong demo là thật. Không suy diễn quota từ token.
-- Cần hoàn tất: đăng nhập ba profile, chọn Google CLI đúng loại tài khoản, đăng ký repo mục tiêu và lệnh kiểm thử.
+- Đã có: hàng đợi, Manager chia việc bằng JSON, task song song trên Git worktree, checkpoint, test thật, review/sửa có giới hạn, verifier, hỏi đồng đội, báo cáo và merge có duyệt; timeline, diff, tạm dừng/hủy/tiếp tục, đổi builder, gửi chỉ dẫn, quota và lịch sử quota.
+- Adapter: `codex exec` (+ quota qua app-server), Claude Code, Antigravity `agy` (+ quota), Gemini CLI. Đã chạy job thật với tài khoản thật (code và research); chưa có benchmark chất lượng.
+- Demo dùng agent giả được ghi rõ; repo, Git, SQLite, test và điều kiện merge trong demo là thật. Không suy diễn quota từ token.
+- Máy mới cần: đăng nhập từng thành viên, đăng ký repo và lệnh test (xem bên dưới).
 
 ## Chạy
 
@@ -19,7 +18,7 @@ npm run setup
 npm start
 ```
 
-Mở <http://127.0.0.1:3333>. Chỉ bind loopback; dùng địa chỉ này, không dùng `localhost`. Ctrl+C để dừng nếu chạy trong terminal. Server đang chạy nền lưu PID trong `.team/state/controller.lock` và log tại `.team/server.log`; có thể dừng đúng PID đó trong Task Manager.
+Mở <http://127.0.0.1:3333>. Chỉ bind loopback; dùng địa chỉ này, không dùng `localhost`. Ctrl+C để dừng nếu chạy trong terminal. Server lưu PID trong `<dataDir>/controller.lock` (mặc định `.team/state/`); khi chạy nền có thể dừng đúng PID đó trong Task Manager. Server ghi log ra stdout/stderr; muốn có file log thì tự chuyển hướng, ví dụ `npm start > .team/server.log 2>&1`.
 
 ```powershell
 npm run demo
@@ -28,9 +27,23 @@ node src/server.js --config .team/demo.config.json
 
 Demo ở <http://127.0.0.1:3334>, database/repo tách riêng. Nút “Giao việc mới” tạo chu trình mô phỏng trên `hello.txt`. Không dùng demo để đánh giá chất lượng AI thật.
 
-## Đăng nhập 3 Codex
+## Đội hình và vai trò
 
-`npm run setup` tạo ba thư mục dưới `%USERPROFILE%\.ai-team\accounts`, mỗi thư mục có `cli_auth_credentials_store = "file"`. Không sao chép token từ tài khoản đang dùng của desktop.
+Mỗi thành viên là một mục trong `agents` (`provider`: `codex` | `claude` | `antigravity` | `gemini`; `home` riêng; `tier`: `strong`/`normal`/`weak`). Vai trò do `pipeline` quyết định:
+
+```json
+"pipeline": { "manager": "claude-1", "reviewer": "gemini", "verifier": "codex-2", "builders": ["codex-2", "codex-3", "codex-1"] }
+```
+
+Không có `pipeline` thì controller tìm theo trường `kind` của agent, cuối cùng mới dùng mặc định cũ (codex-1 Manager, gemini Reviewer, codex-3 Verifier). Đổi vai trò, thêm/tắt thành viên ở màn **Quota & tài khoản** (＋ Thêm thành viên) — dashboard tự ghi lại `pipeline`. `team.config.example.json` là đội hình mẫu đầy đủ (Claude làm Manager).
+
+`npm run setup` chỉ tạo cấu hình khởi đầu kiểu cũ (3 Codex + Antigravity) khi chưa có `team.config.json`; không ghi đè file đã có. Muốn đội hình như file mẫu thì chép `team.config.example.json` thành `team.config.json` và sửa đường dẫn.
+
+## Đăng nhập
+
+Cách chung: màn **Quota & tài khoản** → **Tài khoản / đăng nhập lại** → **Đăng nhập** trên thẻ từng thành viên (Codex, Claude, Gemini/Antigravity). Mỗi thành viên lưu đăng nhập trong `home` riêng; Antigravity dùng phiên `agy` chung của máy.
+
+Codex cũng có thể đăng nhập bằng script. `npm run setup` tạo thư mục dưới `%USERPROFILE%\.ai-team\accounts`, mỗi thư mục có `cli_auth_credentials_store = "file"`. Không sao chép token từ tài khoản đang dùng của desktop.
 
 ```powershell
 .\scripts\login.ps1 codex-1
@@ -42,7 +55,7 @@ Mỗi lần chọn đúng tài khoản/workspace trong trình duyệt. Script ch
 
 ## Google reviewer
 
-Google AI Pro/Ultra cá nhân sử dụng [Antigravity CLI chính thức](https://github.com/google-antigravity/antigravity-cli). Gemini CLI đã cài trên máy là 0.36.0; chưa có `agy` trong PATH lúc kiểm tra. Không tự thay cài đặt Google hoặc đăng nhập thay bạn.
+Google AI Pro/Ultra cá nhân sử dụng [Antigravity CLI chính thức](https://github.com/google-antigravity/antigravity-cli). Controller không tự cài hay đăng nhập Google thay bạn.
 
 Sau khi cài và đăng nhập `agy`, kiểm tra bản CLI hỗ trợ `agy -p /usage --output-format json` bằng [changelog chính thức](https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md). Sau đó đặt `quotaPrintSupported: true` cho agent `gemini` trong `team.config.json`. Cờ này ngăn CLI cũ hiểu `/usage` thành một yêu cầu gọi model.
 
@@ -52,7 +65,7 @@ Nếu bạn dùng Gemini Code Assist doanh nghiệp hoặc API, đổi provider 
 
 ## Đăng ký repo
 
-Sửa `projects` trong `team.config.json`, rồi khởi động lại server. Ví dụ:
+Dùng **＋ Thêm dự án** trên dashboard, hoặc sửa `projects` trong `team.config.json` rồi khởi động lại server. Ví dụ:
 
 ```json
 {
@@ -71,12 +84,14 @@ Chỉnh lệnh test đúng dự án; ví dụ trên chỉ phù hợp nếu test 
 ## Luồng hoạt động
 
 1. Người dùng gửi mục tiêu; controller tạo branch và worktree từ HEAD.
-2. Codex 01 đọc repo, trả danh sách việc và chỉ định Codex 02/03.
-3. Controller giao từng việc, thu hoạt động/report rồi checkpoint bằng Git.
-4. Controller chạy các lệnh `tests`. Nếu thất bại, trả bằng chứng cho manager lập việc sửa.
-5. Google reviewer đánh giá commit; findings được đưa vào lần lập kế hoạch tiếp theo.
-6. Codex 03 xác minh; Codex 01 tổng hợp báo cáo. Tối đa 3 vòng sửa mặc định.
+2. Manager đọc repo, trả danh sách việc và chỉ định Builder (xem "Hồ sơ thành viên" bên dưới).
+3. Controller giao việc (song song nếu không phụ thuộc), thu hoạt động/report rồi checkpoint bằng Git.
+4. Controller chạy các lệnh `tests`. Nếu thất bại, trả bằng chứng cho Manager lập việc sửa.
+5. Reviewer đánh giá commit; findings được đưa vào lần lập kế hoạch tiếp theo.
+6. Verifier xác minh; Manager tổng hợp báo cáo. Tối đa `maxReworkRounds` vòng sửa (mặc định 3).
 7. Khi test, review và verify cùng commit, task chuyển READY. Nút merge thực hiện fast-forward local sau khi kiểm tra source branch vẫn ở base ban đầu. Không push remote.
+
+Việc `research` (điều tra, đánh giá, không sửa code) đi cùng luồng nhưng kết thúc bằng kết luận thay vì merge.
 
 Controller quyết định thứ tự test/review/verify; manager quyết định các task implementation. Timeline ghi đúng nguồn: lệnh do controller sinh được ghi là Controller, nội dung task từ manager được ghi là Manager. Đây là phối hợp qua prompt/report từng lượt; không phải bốn phiên chat thường trực hay hiển thị suy luận nội bộ.
 
@@ -89,12 +104,49 @@ Controller quyết định thứ tự test/review/verify; manager quyết địn
 - **Flow do Manager đề xuất, Controller chốt**: plan có thể gửi `flow: {reviewer, verifier, steps}`. Không gửi `steps` = quy trình mặc định; `steps: []` = Manager muốn bỏ hết bước AI (test vẫn chạy). Bước Manager bỏ nhưng chốt cố định cần (strict, cổng rủi ro, tranh chấp) bị ép chạy lại → sự kiện OVERRIDE, sơ đồ ghi “bị ép: lý do”. Member Manager chọn không hợp lệ/tắt/hết quota → dùng mặc định và cảnh báo; kiểm lại lúc thực thi chứ không tin giá trị lưu từ lúc lập kế hoạch.
 - **Đồ thị công việc do Leader lập**: task có `kind`: `implement` (mặc định) hoặc `review`. Node review xem đúng commit của các task nó phụ thuộc (`base..commit` ghi lại khi task xong), người review độc lập với tác giả các task đó. Review chưa đạt → controller tự tạo task sửa (ưu tiên tác giả cũ, kèm findings) và review lại node đó, tối đa 2 lần; quá 2 lần mới trả về Leader. Ví dụ 4 task → 4 review → test → 1 verify = 4 node implement + 4 node review + `flow.steps: ["verify"]`. Test tích hợp cuối job luôn chạy. Sơ đồ dashboard vẽ theo cột phụ thuộc khi job có node review. Leader không dùng `kind` → quy trình như cũ.
 - **Kiểm tra độc lập**: reviewer/verifier trùng người đã viết code trong việc → tự đổi sang member khác (ưu tiên khác loại CLI với builder), sự kiện REROUTE. Không còn ai mới giữ người cũ và bắt gõ mã khi merge như trước.
-- **Giới hạn độ dài**: tóm tắt kế hoạch ≤ 2 câu, review ≤ 5 finding, báo cáo cuối khoảng 200–400 từ.
+- **Giới hạn độ dài**: tóm tắt kế hoạch ≤ 2 câu, phản biện ≤ 3 phản đối; prompt yêu cầu báo cáo ngắn gọn.
 - **Đo hiệu quả**: mỗi việc ghi `metrics` (phản đối kế hoạch, finding, bị bác bỏ, verifier giữ/lật), hiện ở bảng chi tiết task. Sau khoảng 20 việc thật, so sánh với cách chạy 1 builder để biết phản biện có đáng chi phí không.
+
+## Hỏi đồng đội theo vấn đề
+
+Agent có thể hỏi một thành viên khác trong roster của job khi một giả định cần người khác xác nhận. Trao đổi đi qua chính report JSON; không thêm framework, không chia sẻ phiên CLI. Tham khảo: [Claude Agent Teams](https://code.claude.com/docs/en/agent-teams) (experimental, theo tài liệu lúc viết chưa tạo teammate ở chế độ `-p`; kiểm lại khi nâng cấp CLI), [AutoGen Group Chat](https://microsoft.github.io/autogen/stable/user-guide/core-user-guide/design-patterns/group-chat.html).
+
+**Bật/tắt và phạm vi**
+- Mặc định bật; `"peerDialogue": false` để tắt.
+- Stage được hỏi: `plan`, `implement`, `research`, `review`, `verify`, `challenge` (không có `final`).
+- Chỉ hỏi thành viên khác trong roster của job; không tự tạo agent, đổi task hay cấp quyền.
+
+**Luồng**
+1. A trả `status: "waiting_for_reply"` kèm `peerRequest` và checkpoint phần làm dở. CLI của A kết thúc, nhả slot.
+2. Controller lưu câu hỏi, chạy B ở stage `consult` trên một worktree tạm (snapshot gồm cả code A đang sửa dở và file mới). Worktree tạm bị xóa sau lượt, nên B có sửa gì cũng không ảnh hưởng tới A.
+3. Controller lưu câu trả lời rồi gọi lại A. A phải trả `dialogueDecision`; cần hỏi tiếp thì gửi `peerRequest` với cùng `thread`.
+
+```jsonc
+// A hỏi
+{ "status": "waiting_for_reply",
+  "peerRequest": { "to": "codex-3", "thread": "D-xxxx /* chỉ khi hỏi tiếp */", "topic": "...", "claim": "...", "question": "...", "evidence": ["file:dòng"] } }
+// B trả lời — "disagree" bắt buộc có evidence
+{ "status": "completed", "stance": "answer|agree|disagree|unresolved", "answer": "...", "evidence": ["..."] }
+// A quyết định — "rejected" bắt buộc có evidence
+{ "dialogueDecision": { "thread": "D-xxxx", "outcome": "accepted|rejected|unresolved", "reason": "...", "evidence": ["..."] } }
+```
+
+**Quyền và giới hạn**
+- Quyền của B = phần giao quyền thư mục tham chiếu, shell, network của A và B, trong trần của vai **Reviewer** (`roleCaps`).
+- B được dặn chỉ đọc, không chạy test/build. Ràng buộc thật là prompt + worktree tạm + sandbox `read-only` của Codex. **Khi bật `"codexWindowsSandbox": "none"` (hoặc `"agyAutoApprove": true`), B vẫn chạy được lệnh và ghi được ngoài worktree** — xem hai mục cuối README.
+- Tối đa **2 lượt/vấn đề, 8 lượt/job**. Câu hỏi/trả lời tối đa 2.000 ký tự, evidence tối đa 6 mục × 500 ký tự; lọc secret như report thường.
+- Chưa giải quyết, hết lượt hoặc B không chạy được (kể cả hết quota) → lưu checkpoint, task giữ trạng thái chưa xong, job chuyển *chờ bạn trả lời*. Trả lời ở ô câu hỏi của job; A làm tiếp đúng bước đang dở.
+- Pause/restart giữ câu hỏi/trả lời đã lưu; lượt CLI đang chạy dở có thể bị chạy lại.
+
+**Chi phí và đo lường**
+- Không có câu hỏi thì không thêm lượt CLI. Mỗi câu hỏi tốn **ít nhất 2 lượt** (B trả lời + gọi lại A); prompt các stage trên luôn kèm thêm hướng dẫn hỏi đồng đội.
+- Mỗi vấn đề lưu tác giả, người nhận, task/stage, snapshot, lập trường, bằng chứng và quyết định; xem ở chi tiết job/timeline hoặc nút Xuất. Chuyển máy giữ đối thoại làm dữ liệu tham khảo, không chạy lại câu hỏi cũ. Trao đổi không tự thành fact trong memory, không thay test/review/verify hay duyệt merge.
+- Metrics: số câu hỏi, trả lời, vấn đề đã giải quyết, số lần phải hỏi bạn; usage ghi thêm lượt/token. Chưa có benchmark với AI thật; sau khoảng 20 job, so lỗi còn sót, vòng sửa, thời gian và token với `peerDialogue: false`.
 
 ## Điều khiển và giới hạn
 
-- Mặc định một tiến trình agent/test tại một thời điểm cho toàn controller. Tạm hoãn lượt mới khi RAM >85% hoặc CPU >90%. Đây là ngưỡng khởi chạy, không phải giới hạn cứng CPU/RAM của lệnh con; một build đơn lẻ vẫn có thể nặng.
+- Controller giới hạn các lượt agent theo `resources.maxAgents` (mặc định 3) và RAM còn trống; task độc lập có thể chạy song song. Tạm hoãn lượt mới khi CPU > `maxCpuPercent` (90) hoặc chạm ngưỡng RAM (`resources.hardStopRamPercent`, mặc định 90; `maxRamPercent` cũ chỉ còn tác dụng nếu > 90). Đây là ngưỡng khởi chạy, không phải giới hạn cứng CPU/RAM của lệnh con; một build đơn lẻ vẫn có thể nặng.
+- `maxTokensPerJob` (không đặt = không giới hạn): job dùng hết ngân sách token thì dừng chờ bạn; bấm tiếp tục để cấp thêm một lần ngân sách.
 - Pause kết thúc cây tiến trình. Resume gọi lại bước hiện tại với dữ liệu đã lưu, không tiếp tục nội bộ cùng một CLI session. Thay đổi trong worktree được giữ; nên xem diff sau khi dừng giữa chừng.
 - Chỉ dẫn mới được nhận ở lần gọi tiếp theo; nếu được gửi giữa một lượt đang chạy, manager sẽ lập lại kế hoạch. Chỉ dẫn sau READY làm mất điều kiện merge cho tới khi kiểm tra lại.
 - Sau restart, task đang chạy/queued/merging chuyển PAUSED để người dùng xem lại. Không tự chạy lại thao tác dở dang.
@@ -116,16 +168,6 @@ args = ["D:/work_team/src/mcp.js"]
 ```
 
 Tools: `team_status`, `delegate_task`, `get_agent_status`, `read_messages`, `send_message`, `control_task`. Không có tool merge: duyệt merge ở dashboard. Chưa tự sửa cấu hình MCP của Codex Desktop hoặc các profile. Không gắn MCP này vào worker đang được controller quản lý để tránh gọi lồng vòng điều phối.
-
-## Kiểm tra
-
-```powershell
-npm test
-```
-
-Kiểm tra parser/quota, argv không qua shell, timeout tiến trình, pipeline Git thật, chặn thay đổi sau approval, merge có điều kiện, persistence, pause/resume/reassign, test failure và config không hợp lệ. Chưa có bằng chứng chạy AI thật cho tới khi nối tài khoản.
-
-Nghiên cứu và nguồn: [RESEARCH.md](RESEARCH.md).
 
 ## Hồ sơ thành viên, giao việc theo độ khó, merge an toàn
 
@@ -179,18 +221,25 @@ Mỗi project có `access` riêng trong `team.config.json` (sửa ở trang **Qu
 
 ## Bộ nhớ AI, sao lưu, xuất
 
-Mỗi lượt gọi CLI là phiên mới (không `--resume`), nên "trí nhớ" của đội nằm trong `team.sqlite`, không phụ thuộc lịch sử của CLI/tài khoản. Có 3 tầng, đều có giới hạn để không phình prompt:
+Trí nhớ dùng chung nằm trong `team.sqlite`. Kho giữ lịch sử đầy đủ; controller tìm bằng SQLite FTS5 theo nhiệm vụ và chỉ cấp phần liên quan vào prompt. Không cần thêm database hay embedding model.
 
 | Tầng | Ai ghi | Ai đọc | Giới hạn |
 |---|---|---|---|
-| Ghi chú dự án (fact) | Leader ở bước tổng kết: `memory.add` (≤5/lần), `memory.remove` theo id `M<n>` | Leader khi lập kế hoạch/tổng kết; builder chỉ ở đường nhanh | 60 fact/dự án (`maxMemoryFacts`), ~4.000 ký tự vào prompt |
+| Ghi chú dự án (fact) | Leader ở bước tổng kết: `memory.add` (≤5/lần), `memory.remove` theo id `M<n>`; bạn cũng sửa được | Mỗi vai nhận phần liên quan đến task | `maxMemoryFacts` (mặc định 60) và ~4.000 ký tự vào prompt; không xóa fact cũ để giữ giới hạn này |
 | Tóm tắt phiên | Leader viết lại mỗi lần tổng kết (`memory.session`) | Leader | 1.500 ký tự |
-| Nhật ký phiên | Controller, 1 dòng/việc, không tốn AI | Leader (8 dòng gần nhất) | 200 dòng/phiên |
+| Nhật ký phiên | Controller, 1 dòng/việc, không tốn AI | Leader (8 dòng gần nhất) | ~1.500 ký tự vào prompt; giữ lịch sử trong kho |
+| Checkpoint task | Worker báo đã làm, còn thiếu, thử thất bại, bước tiếp theo; controller lưu snapshot Git và tests | Worker khi tiếp tục; Manager khi nhận gói chuyển công việc | Giới hạn kích thước từng trường |
 
-Bộ nhớ được đánh dấu là dữ liệu (không phải chỉ dẫn) và có thể đã cũ: AI phải đối chiếu code. Builder nhận phần liên quan qua `context` của task do Leader soạn. Xem/sửa/xóa ở nút 🧠 trên thanh phiên.
+Bộ nhớ là dữ liệu, AI vẫn phải đối chiếu nguồn với code. Fact do một job code tạo chỉ dùng trong job đó; sau khi merge mới chia sẻ toàn dự án. Fact mới từ job có nguồn, commit, fingerprint các file đã đổi/được task khai báo, trạng thái và revision. Tìm kiếm loại fact từ commit không thuộc lịch sử worktree hoặc file nguồn đã đổi, kể cả sửa chưa commit. Ghi chú cũ được giữ lại với nguồn `legacy`; quyết định bạn nhập tay không phụ thuộc commit. Xóa ghi chú chuyển nó sang `superseded`, giữ lịch sử; sửa đồng thời phải tải lại revision mới.
+
+Codex và Claude có thêm hai công cụ MCP `team_memory.memory_search` / `memory_get` để lấy thêm ghi chú. Kết nối chỉ đọc, gắn với project/job/worktree của lượt gọi và hết hạn khi lượt kết thúc. Các CLI khác nhận gói ngữ cảnh đã chọn. Xem nguồn, tìm, thêm, bỏ ghi chú hoặc bật lịch sử ở nút 🧠 trên thanh phiên.
+
+Mặc định CLI vẫn mở phiên mới. Có thể thử `"resumeCodexTasks": true` trong cấu hình: Codex dùng `exec resume` khi tiếp tục cùng task implement, cùng tài khoản/profile, worktree, slot và quyền. Đổi các điều kiện đó sẽ mở phiên mới; review/verify luôn có ngữ cảnh riêng. Đây là tối ưu thử nghiệm, không chuyển phiên CLI giữa máy hoặc tài khoản.
 
 - **Sao lưu**: `VACUUM INTO` vào `backupDir` (mặc định `<dataDir>/backups`), tự động mỗi ngày và trước khi xóa việc/phiên, giữ `backupKeep` bản (14). Tắt bằng `"backup": false`. Khôi phục: dừng server, chép bản sao lưu đè lên `team.sqlite`.
 - **Xuất**: nút "Xuất" ở việc → file Markdown (mục tiêu, kế hoạch, báo cáo, trao đổi, diff).
+- **Xuất/nhập memory**: trong 🧠, tải JSON chứa các fact và lịch sử, rồi nhập vào dự án trên máy khác. UID giúp tránh trùng; xung đột được đếm và giữ bản hiện có. Ghi chú riêng của job thiếu job tương ứng được đánh dấu `stale`. Gói này không chứa lịch sử CLI, tóm tắt phiên hoặc cấu hình tài khoản.
+- **Chuyển việc đang làm**: tạm dừng việc, bấm "Chuyển máy" để xuất JSON gồm Git bundle, file sửa dở (cả binary/file mới/xóa), checkpoint, báo cáo và memory. Máy đích cần repo ở đúng base commit; nhập JSON qua 🧠. Job mới được tạo ở trạng thái tạm dừng, Manager kiểm tra code và lập kế hoạch tiếp; tests/review/duyệt cũ không được dùng để merge. Bundle và file sửa dở mỗi loại tối đa 50 MiB; hiện hỗ trợ một repo. Gói không xuất đăng nhập/quyền/phiên CLI; các đường dẫn credential thông dụng bị từ chối cả trong lịch sử Git. Gói vẫn chứa code và lịch sử repo, nên chỉ chia sẻ với nơi được phép nhận code đó.
 
 ### Codex trên Windows không sandbox (`"codexWindowsSandbox": "none"`)
 
@@ -199,3 +248,13 @@ Chế độ `elevated` bắt Codex chạy `codex-windows-sandbox-setup` (UAC) m�
 ### Antigravity tự duyệt quyền (`"agyAutoApprove": true`)
 
 agy headless kết thúc phiên ngay khi một lệnh bị từ chối (không có report). Bật tùy chọn này để chạy agy với `--dangerously-skip-permissions`: không còn bị chặn lệnh, đổi lại agy có toàn quyền như Codex `"none"`. Tắt thì agy chỉ chạy được lệnh trong `permissions.allow` của `~/.gemini/antigravity-cli/settings.json` và được dặn chỉ dùng công cụ đọc file.
+
+## Kiểm tra
+
+```powershell
+npm test
+```
+
+Kiểm tra parser/quota, argv không qua shell, timeout tiến trình, pipeline Git thật, chặn thay đổi sau approval, merge có điều kiện, persistence, pause/resume/reassign, test failure và config không hợp lệ. Test dùng agent giả; chất lượng AI thật chỉ đánh giá được qua job thật.
+
+Nghiên cứu và nguồn: [RESEARCH.md](RESEARCH.md).

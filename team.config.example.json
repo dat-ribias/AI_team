@@ -6,6 +6,8 @@
   "maxCpuPercent": 90,
   "minRemainingPercent": 15,
   "maxReworkRounds": 3,
+  "resumeCodexTasks": false,
+  "peerDialogue": true,
   "codexWindowsSandbox": "unelevated",
   "agents": [
     {
