@@ -158,7 +158,8 @@ Agent có thể hỏi một thành viên khác trong roster của job khi một 
 - Worker Codex chạy `workspace-write`, các bước phân tích chạy `read-only`; không dùng cờ bỏ sandbox. Google review dùng detached worktree riêng, mặc định CLI policy. Git worktree không phải sandbox bảo mật; chỉ chạy repo tin cậy và cấu hình permission phù hợp trong CLI.
 - Không thể ép các shell tool bên trong CLI chỉ sinh một tiến trình; controller chỉ tuần tự hóa các lượt do nó khởi chạy.
 - Quota hết hoặc dưới ngưỡng 15% ngăn giao việc cho tài khoản đó. UNKNOWN không được coi là còn 100%; Builder chạm giới hạn quota giữa chừng → controller tự bàn giao task cho builder khác đủ năng lực còn quota (sự kiện HANDOVER), kèm diff phần đã làm dở và 20 bước cuối của người trước; builder mới làm tiếp, không làm lại. Không còn ai phù hợp, hoặc lỗi không phải quota → BLOCKED. Không chuyển được ngữ cảnh hội thoại của CLI, chỉ chuyển trạng thái công việc. Vẫn có thể tạm dừng và đổi builder bằng dashboard.
-- Không tự rebase khi base repo đã thay đổi, không tự xóa worktree. Việc này giữ thay đổi để kiểm tra và xử lý xung đột thủ công.
+- Không tự rebase khi base repo đã thay đổi. Worktree/branch của việc chưa xong được giữ để kiểm tra và xử lý xung đột thủ công.
+- Dọn rác Git: worktree tạm của review/consult bị gỡ ngay sau lượt. Merge xong, controller gỡ worktree và xóa branch `ai-team/<id>*` của việc (code đã nằm ở branch đích; diff vẫn xem được). Mỗi lần khởi động, controller dọn việc đã merge/nghiên cứu xong và worktree review sót lại. Việc bị hủy hoặc đang chờ thì giữ nguyên tới khi bạn bấm Xóa việc. Không bao giờ đụng branch/worktree bạn tự tạo.
 - Nhật ký dùng allowlist sự kiện CLI để bỏ reasoning, có che một số dạng credential phổ biến. Đây không phải DLP hoàn chỉnh; prompt và nội dung source trong log vẫn là dữ liệu riêng tư, không đưa `.team` lên Git.
 - Parser quota Google chỉ nhận trường provider xác định được (`remaining_fraction`, `reset_time`). Nếu schema khác, giữ raw response và hiển thị UNKNOWN; cần điều chỉnh theo response thực sau login.
 
@@ -201,7 +202,7 @@ Merge không bao giờ tự động. Nút **Duyệt merge** mở bảng kiểm v
 - rủi ro cao (Manager đánh giá cao, đụng file nhạy cảm, xóa file, diff > `largeDiffLines` = 300 dòng, hoặc task do người thiếu năng lực làm) → phải gõ mã commit để xác nhận;
 - đích là ancestor của commit job → fast-forward: nếu đang checkout ở repo chính, yêu cầu sạch và dùng `git merge --ff-only`; nếu không checkout, dùng `git update-ref` với tip cũ (compare-and-swap/CAS), từ chối khi tip đã đổi. Đích đang checkout ở worktree khác bị từ chối;
 - đích đã phân kỳ → tạo worktree tạm từ đích, chạy `git merge --no-ff`, rồi chạy lại test của project trên commit merge. Owner xem test và diff, duyệt lần hai đúng commit đó trước khi cập nhật đích. Test fail thì không cập nhật đích; xung đột thì abort, báo file và gỡ worktree tạm, không đổi branch đích;
-- job có repo liên kết chỉ hỗ trợ đích là branch gốc. Ghi nhận branch/commit đã merge trong `mergedInto`; không push remote, không tự xóa worktree của job.
+- job có repo liên kết chỉ hỗ trợ đích là branch gốc. Ghi nhận branch/commit đã merge trong `mergedInto`; không push remote. Merge xong thì worktree và branch `ai-team/<id>` của job được gỡ.
 
 Tùy chỉnh trong `team.config.json`: `sensitivePaths` (regex), `largeDiffLines`.
 

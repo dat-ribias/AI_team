@@ -263,6 +263,7 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello' });
   const ready = await settle(team, job.id, 'ready');
+  assert(!(await run(['git'], ['-C', f.path, 'worktree', 'list'])).stdout.includes('-review-'), 'review worktree removed after its run');
   assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8'), 'Hello!\n');
   assert.equal(ready.tested, ready.revision); assert.equal(ready.reviewed, ready.revision); assert.equal(ready.verified, null); assert(ready.skipped.includes('verify'));
   const events = team.events(job.id);
@@ -272,6 +273,10 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   writeFileSync(join(ready.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
   await team.merge(job.id);
   assert.equal(team.get(job.id).status, 'merged'); assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n'), 'Hello from AI Team demo!\n');
+  // Merge xong: không còn worktree (kể cả review) hay branch ai-team/* của việc; diff vẫn xem được từ branch đích.
+  assert(!(await run(['git'], ['-C', f.path, 'worktree', 'list'])).stdout.includes(f.data), 'controller worktrees removed');
+  assert.equal((await run(['git'], ['-C', f.path, 'branch', '--list', 'ai-team/*'])).stdout.trim(), '');
+  assert.match((await team.diff(job.id)).diff, /Hello from AI Team demo/);
   await assert.rejects(team.merge(job.id), /chưa sẵn sàng/);
   await team.close();
   const reopened = new Team(f.config, f.data); assert.equal(reopened.get(job.id).status, 'merged'); assert(reopened.events(job.id).length > events.length); await reopened.close();
@@ -314,6 +319,17 @@ test('local branches, alternate job base and non-checkout base merge leave main 
   assert.equal(await branchTip(f, 'release'), job.revision); assert.equal(await branchTip(f), main);
   assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8'), 'Hello!\n');
   await run(['git'], ['-C', f.path, 'checkout', '--detach']); assert.equal((await team.branches('test')).current, null);
+});
+
+test('startup sweep removes stray review worktrees and everything left by finished jobs', async t => {
+  const { f, team, job } = await branchReady(t);
+  const trees = async () => (await run(['git'], ['-C', f.path, 'worktree', 'list'])).stdout;
+  await run(['git'], ['-C', f.path, 'worktree', 'add', '--detach', join(f.data, 'worktrees', `${job.id}-review-0123abcd`), job.revision]);
+  await team.sweepGit();
+  assert(!(await trees()).includes('-review-')); assert((await trees()).includes(job.worktree), 'a ready job keeps its worktree');
+  team.save({ ...team.get(job.id), status: 'merged' }); await team.sweepGit();
+  assert(!(await trees()).includes(f.data)); assert.equal((await run(['git'], ['-C', f.path, 'branch', '--list', 'ai-team/*'])).stdout.trim(), '');
+  assert.equal(team.get(job.id).released, true);
 });
 
 test('branch inputs reject options, traversal, internal branches, revision expressions and missing refs', async t => {
@@ -465,6 +481,26 @@ test('linked repositories reject another base and non-base merge targets', async
     await assert.rejects(team.merge(job.id, { target }), /not supported/);
   }
   assert.equal(await branchTip(f), job.base);
+});
+
+test('assign on the diagram changes only this job, survives role sync and stale saves, and the pinned builder is used', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello', paused: true });
+  team.save({ ...team.get(job.id), stage: 'implement', tasks: [{ agent: 'codex-2', difficulty: 5, instruction: 'a' }, { agent: 'codex-2', difficulty: 1, instruction: 'b' }] });
+  const stale = team.get(job.id);
+  await team.control(job.id, 'assign', { task: 0, agent: 'codex-3' });
+  await team.control(job.id, 'assign', { role: 'reviewer', agent: 'codex-1' });
+  await assert.rejects(team.control(job.id, 'assign', { task: 0, agent: 'nobody' }));
+  team.save(stale); team.syncRoster(); // bản cũ lưu đè + đổi vai trò chung: lựa chọn riêng vẫn còn
+  const now = team.get(job.id);
+  assert.deepEqual([now.tasks[0].agent, now.tasks[0].pinned, now.tasks[1].agent], ['codex-3', true, 'codex-2']);
+  assert(now.roster.builders.includes('codex-3')); assert.equal(now.roster.reviewer, 'codex-1');
+  assert(!team.config.pipeline.builders.includes('codex-3'), 'team roles unchanged');
+  assert.equal(team.pickBuilder(now, now.tasks[0]), 'codex-3', 'pinned beats difficulty routing');
+  assert.equal(team.pickBuilder(now, now.tasks[0], new Set(['codex-3'])), null, 'waits for the pinned member');
+  assert.equal(team.checker(now, 'reviewer', now.roster, [], undefined, false), 'codex-1');
+  await team.control(job.id, 'assign', { role: 'builder', from: 'codex-2', agent: 'codex-4' });
+  assert.equal(team.get(job.id).tasks[1].agent, 'codex-4'); assert(!team.get(job.id).roster.builders.includes('codex-2'));
 });
 
 test('pause cancels process; resume retains work; new guidance invalidates ready approval', async t => {

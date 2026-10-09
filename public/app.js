@@ -258,7 +258,7 @@ function drawState() {
   drawJobsDialog();
   drawFlow();
   if ($('slot-dialog').open && slot?.current) refreshSlotLive();
-  document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => openSlot(b.dataset.slot, b.dataset.agent || null));
+  document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => openSlot(b.dataset.slot, b.dataset.agent || null, b.dataset.task, b.closest('#flow') ? selected : null));
   document.querySelectorAll('[data-bench]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.bench)));
   $('running-label').textContent = t('ui.team.running', { n: state.resources.active });
   const taskProject = $('task-dialog').open ? $('project').value : null;
@@ -474,8 +474,10 @@ function refreshSlotLive() {
   el.querySelectorAll('details').forEach(x => { if (opened.size) x.open = opened.has(x.dataset.seq); });
   const nlog = el.querySelector('.live-log'); if (nlog) nlog.scrollTop = atEnd ? nlog.scrollHeight : top;
 }
-function openSlot(kind, current) {
-  slot = { kind, current };
+// Bấm ô trên sơ đồ của một việc → chỉ đổi người cho việc đó (task hoặc vai trò); ngoài sơ đồ việc → đổi vai trò chung của đội.
+function openSlot(kind, current, task, jobId) {
+  const job = jobId && state.jobs.find(j => j.id === jobId && !['merged', 'cancelled', 'done'].includes(j.status));
+  slot = { kind, current, task: job && task != null ? +task : null, job: job?.id || null };
   $('slot-live').innerHTML = slotLive(current); const lg = $('slot-live').querySelector('.live-log'); if (lg) lg.scrollTop = lg.scrollHeight;
   $('slot-title').textContent = t(current || kind !== 'builder' ? 'ui.slot.title' : 'ui.slot.addBuilderTitle', { role: roleLabel(kind) });
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
@@ -483,17 +485,19 @@ function openSlot(kind, current) {
     const healthText = h ? ` · ${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : '';
     return `<option value="${esc(a.id)}" ${a.id === current ? 'selected' : ''} ${kind === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}>${esc(a.label)} · ${esc(a.provider)} · ${esc(tierLabel(a.tier))}${healthText}</option>`;
   }).join('');
-  $('slot-remove').hidden = !current; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
+  if (slot.job) $('slot-title').textContent = slot.task != null ? t('ui.slot.taskTitle', { n: slot.task + 1 }) : t('ui.slot.jobTitle', { role: roleLabel(kind) });
+  $('slot-remove').hidden = !current || !!slot.job; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
   slotMember(); $('slot-dialog').showModal();
 }
 function slotMember() {
   const a = state.agents.find(x => x.id === $('slot-member').value);
   $('slot-prompt').value = a?.systemPrompt || ''; $('slot-prompt').disabled = !a;
-  $('slot-info').textContent = a ? t('ui.slot.info', { roles: rolesText(a.id), model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ' · ' + effortLabel(a.effort) : '') }) : '';
+  $('slot-info').textContent = (slot?.job ? t('ui.slot.jobNote') + ' ' : '') + (a ? t('ui.slot.info', { roles: rolesText(a.id), model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ' · ' + effortLabel(a.effort) : '') }) : '');
 }
 async function saveSlot() {
   const { kind, current } = slot, next = $('slot-member').value;
-  if (next && next !== current) {
+  if (slot.job) { if (next && next !== current) await api(`jobs/${slot.job}/control`, { action: 'assign', agent: next, ...(slot.task != null ? { task: slot.task } : { role: kind, from: current }) }); }
+  else if (next && next !== current) {
     if (kind === 'builder' && current) await api(`members/${current}/role`, { kind, on: false });
     await api(`members/${next}/role`, { kind, on: true });
   }
@@ -512,7 +516,7 @@ function drawFlow() {
   gtasks.forEach((x, i) => lv(i));
   const cols = graph ? Math.max(...level) + 1 : 1, colW = 190, shift = (cols - 1) * colW;
   const perCol = Array.from({ length: cols }, (_, c) => level.filter(l => l === c).length);
-  const builders = graph ? [] : r.builders.filter(id => byId[id]), rowH = 68, top = 34;
+  const builders = graph ? [] : r.builders.filter(id => byId[id]), rowH = 68, top = graph ? 46 : 34;
   const H = Math.max(140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, W = 1260 + shift, nodes = {};
   const place = (key, x, y, w = 172) => nodes[key] = { x, y, w };
   place('user', 10, cy, 90);
@@ -536,7 +540,7 @@ function drawFlow() {
     const h = agentHealth(a);
     return `${tierLabel(a.tier)} · ${h ? `${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : ((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''))}`;
   };
-  const box = (key, title, subtitle, agentId, slot) => {
+  const box = (key, title, subtitle, agentId, slot, task) => {
     const n = nodes[key], a = agentId && byId[agentId];
     const h = a ? agentHealth(a) : null;
     const cls = [
@@ -553,7 +557,7 @@ function drawFlow() {
     const subW = n.w - 16;
     const titleEl = svgText({ text: title, x: 10, y: 19, cls: 't', maxW: titleW, baseSize: 12, minSize: 9.5 });
     const subEl = svgText({ text: subtitle, x: 10, y: 37, cls: 's', maxW: subW, baseSize: 10.5, minSize: 7.8 });
-    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}</title><rect width="${n.w}" height="48" rx="8"/><rect class="ring" width="${n.w}" height="48" rx="8" pathLength="100"/>${healthDot}${titleEl}${subEl}</g>`;
+    return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} ${task != null ? `data-task="${task}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}</title><rect width="${n.w}" height="48" rx="8"/><rect class="ring" width="${n.w}" height="48" rx="8" pathLength="100"/>${healthDot}${titleEl}${subEl}</g>`;
   };
   const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step) || ['review', 'verify', 'final'].includes(step) && !!job?.flow?.requested?.steps && !job.flow.requested.steps.includes(step) && !job.flow.overrides?.some(o => o.step === step); // Manager đã bỏ (chưa bị ép lại)
   let edges = edge('user', 'manager', 'used');
@@ -572,16 +576,18 @@ function drawFlow() {
   edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
   edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active.has('rework') ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round, max: state.limits?.rounds ?? 3 }) : t('ui.flow.rework'))}</text>`;
   // Người review/verify thực tế của job: đã chạy → Manager chọn (flow) → mặc định đội. Bước bị controller ép thêm ghi "bị ép".
-  const rvId = job?.checkers?.reviewer || job?.flow?.reviewer || r.reviewer, vfId = job?.checkers?.verifier || job?.flow?.verifier || r.verifier;
+  const rvId = job?.checkers?.reviewer || job?.override?.reviewer || job?.flow?.reviewer || r.reviewer, vfId = job?.checkers?.verifier || job?.override?.verifier || job?.flow?.verifier || r.verifier;
   const forced = step => { const o = job?.flow?.overrides?.find(x => x.step === step); return o ? t('ui.flow.forced', { why: o.reasons.join('; ') }) : ''; };
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
-    + gtasks.map((x, i) => { const who = x.ranBy || x.agent; return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review' : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
-      x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40), who || null, x.kind === 'review' ? 'reviewer' : 'builder'); }).join('')
+    + gtasks.map((x, i) => { const who = x.ranBy || x.agent, wait = depsOf(x, i).filter(d => gtasks[d] && !gtasks[d].done).map(d => 'T' + (d + 1)); return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review ' + depsOf(x, i).map(d => 'T' + (d + 1)).join(',') : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
+      (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
     + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', rvId), skipped('review') ? t('ui.flow.skipped') : forced('review') || sub(rvId), rvId || null, 'reviewer')
     + box('verifier', named('Verify', vfId), skipped('verify') ? t('ui.flow.skipped') : forced('verify') || sub(vfId), vfId || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
-  $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
+  // Mỗi cột là một đợt: task cùng cột chạy song song, cột sau chờ cột trước theo mũi tên.
+  const waves = graph ? perCol.map((n, c) => `<text class="edge-label wave" x="${365 + c * colW + 86}" y="${top + 4}" text-anchor="middle">${esc(t(n > 1 ? 'ui.flow.waveParallel' : 'ui.flow.wave', { n: c + 1 }))}</text>`).join('') : '';
+  $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
   // CSP cấm style="" trong markup; đặt qua CSSOM để vòng sáng không giật lại từ đầu mỗi lần vẽ lại.
   const phase = `-${(Date.now() % 2000) / 1000}s`; $('flow').querySelectorAll('rect.ring').forEach(x => { x.style.animationDelay = phase; });
   const inRoster = new Set([r.manager, r.reviewer, r.verifier, ...r.builders]);
