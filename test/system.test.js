@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots } from '../src/team.js';
@@ -10,6 +10,7 @@ import { parseReport, normalizeCodexQuota, normalizeGoogleQuota, runAgent } from
 import { exportTransfer, importTransfer } from '../src/transfer.js';
 import { fileHash, MemoryStore } from '../src/memory.js';
 import { ledger, question, answer, decide, refreshLedger } from '../src/discussions.js';
+import { collect, kind, safeRel } from '../src/evidence.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
@@ -36,6 +37,120 @@ async function settle(team, id, expected, timeoutMs = 20000) {
   }
   assert.fail(`Timeout: ${JSON.stringify(team.get(id))}`);
 }
+
+test('evidence collection preserves paths, filters credentials and Git, and enforces the byte budget', async t => {
+  const f = await fixture(), dest = join(f.data, 'archive');
+  mkdirSync(join(f.path, '.ai-team/evidence'), { recursive: true });
+  writeFileSync(join(f.path, '.ai-team/evidence/check.log'), 'passed');
+  writeFileSync(join(f.path, '.ai-team/evidence/view.png'), Buffer.from([137, 80, 78, 71]));
+  for (const name of ['.env', 'auth.json', 'controller.token', 'id_ed25519', 'test.key', 'credentials.json', 'my-secret.log']) writeFileSync(join(f.path, '.ai-team/evidence', name), 'dummy');
+  const paths = ['.ai-team/evidence', '.git', '../outside', '..\\outside', f.path, 'C:relative', 'bad\0path'];
+  const result = collect({ worktree: f.path, paths, dest, maxBytes: 100 });
+  assert.equal(result.bytes, 10);
+  assert.deepEqual(result.files.map(f => [f.path, f.type]), [['.ai-team/evidence/check.log', 'text'], ['.ai-team/evidence/view.png', 'image']]);
+  assert.equal(readFileSync(join(dest, '.ai-team/evidence/check.log'), 'utf8'), 'passed');
+  assert.equal(result.skipped.filter(f => f.reason === 'Credential file').length, 7);
+  assert(result.skipped.some(f => f.reason === 'Git metadata'));
+  assert.equal(result.skipped.filter(f => f.reason === 'Unsafe evidence path').length, 5);
+  const limited = collect({ worktree: f.path, paths: ['.ai-team/evidence/check.log'], dest: join(f.data, 'limited'), maxBytes: 10, usedBytes: 5 });
+  assert.equal(limited.bytes, 0); assert.equal(limited.files.length, 0); assert.match(limited.skipped[0].reason, /size limit/);
+  for (const ext of ['png', 'JPG', 'jpeg', 'gif', 'webp']) assert.equal(kind(`f.${ext}`), 'image');
+  for (const ext of ['log', 'txt', 'md', 'json', 'xml', 'csv']) assert.equal(kind(`f.${ext}`), 'text');
+  assert.equal(kind('f.htm'), 'html'); assert.equal(kind('f.svg'), 'other');
+  assert.equal(safeRel('checks\\view.png'), 'checks/view.png');
+});
+
+test('evidence collection skips outside symlinks and ancestor junctions', async t => {
+  const f = await fixture(), outside = join(f.data, 'outside');
+  mkdirSync(outside); writeFileSync(join(outside, 'check.log'), 'outside');
+  try { symlinkSync(outside, join(f.path, 'linked'), process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (e) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes(e.code)) return t.skip(`Symlinks unavailable: ${e.code}`); throw e; }
+  const result = collect({ worktree: f.path, paths: ['linked', 'linked/check.log'], dest: join(f.data, 'archive'), maxBytes: 100 });
+  assert.equal(result.files.length, 0); assert.equal(result.skipped.length, 2);
+  assert(result.skipped.every(f => /Symlink|junction|outside the worktree/.test(f.reason)));
+});
+
+test('controller archives implement and verify evidence under the checkpoint revision', async t => {
+  const f = await fixture(); f.config.projects[0].evidence = ['.ai-team/custom'];
+  const stages = [], team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    const report = await runAgent(agent, task, prompt, opts);
+    if (task.stage === 'plan') report.rigor = 'strict';
+    if (['implement', 'verify'].includes(task.stage)) {
+      stages.push([task.stage, task.worktree]);
+      assert(prompt.includes('Save evidence of your checks'));
+      mkdirSync(join(task.worktree, '.ai-team/evidence'), { recursive: true });
+      writeFileSync(join(task.worktree, '.ai-team/evidence', `${task.stage}.png`), Buffer.from([137, 80, 78, 71]));
+      mkdirSync(join(task.worktree, '.ai-team/custom'), { recursive: true });
+      writeFileSync(join(task.worktree, '.ai-team/custom', `${task.stage}.log`), 'checked');
+    }
+    return report;
+  } }); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' }), ready = await settle(team, job.id, 'ready');
+  assert.deepEqual(stages.map(s => s[0]), ['implement', 'verify']); assert.notEqual(stages[0][1], stages[1][1]);
+  const items = team.evidence(job.id).items;
+  const tracked = await run(['git'], ['-C', ready.worktree, 'ls-tree', '-r', '--name-only', ready.revision]);
+  assert(!tracked.stdout.includes('.ai-team/'), 'evidence must remain git-ignored');
+  for (const stage of ['implement', 'verify']) {
+    const entry = items.find(e => e.stage === stage);
+    assert.equal(entry.revision, ready.revision); assert(entry.dir.startsWith(ready.revision + '/'));
+    assert(entry.files.some(f => f.path === `.ai-team/evidence/${stage}.png`));
+    assert(entry.files.some(f => f.path === `.ai-team/custom/${stage}.log`));
+    const file = team.evidenceFile(job.id, `${entry.dir}/.ai-team/evidence/${stage}.png`);
+    assert.equal(file.type, 'image'); assert.equal(readFileSync(file.file).length, 4);
+  }
+  for (const rel of ['../outside', '..\\outside', f.path, 'C:relative', 'bad\0path']) assert.throws(() => team.evidenceFile(job.id, rel), /Unsafe evidence path/);
+  const md = await team.exportJob(job.id); assert(md.includes('## Hồ sơ kiểm tra')); assert(md.includes('implement.png')); assert(md.includes('Controller chạy'));
+});
+
+test('evidenceMaxMB skips oversized artifacts without failing the job', async t => {
+  const f = await fixture(); f.config.evidenceMaxMB = 0.00001;
+  f.config.projects[0].tests[0][2] += "; console.log('controller test completed')";
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    const report = await runAgent(agent, task, prompt, opts);
+    if (task.stage === 'implement') {
+      mkdirSync(join(task.worktree, '.ai-team/evidence'), { recursive: true });
+      writeFileSync(join(task.worktree, '.ai-team/evidence/large.log'), 'x'.repeat(100));
+    }
+    return report;
+  } }); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' }), ready = await settle(team, job.id, 'ready');
+  assert(ready.evidence.some(e => e.skipped.some(s => /size limit/.test(s.reason))));
+  assert(ready.evidenceBytes <= f.config.evidenceMaxMB * 2 ** 20);
+  assert.equal(ready.checkResults.at(-1).log, null);
+});
+
+test('evidenceFile rejects symlinked archive directories and files', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Archive paths', paused: true });
+  const root = join(f.data, 'evidence', job.id), outside = join(f.data, 'outside');
+  mkdirSync(root, { recursive: true }); mkdirSync(outside); writeFileSync(join(outside, 'check.log'), 'outside');
+  try { symlinkSync(outside, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (e) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes(e.code)) return t.skip(`Symlinks unavailable: ${e.code}`); throw e; }
+  assert.throws(() => team.evidenceFile(job.id, 'linked/check.log'), /symlinks/);
+  assert.throws(() => team.evidenceFile(job.id, 'linked'), /symlinks/);
+  await t.test('file symlink', t => {
+    try { symlinkSync(join(outside, 'check.log'), join(root, 'file.log'), 'file'); }
+    catch (e) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes(e.code)) return t.skip(`Symlinks unavailable: ${e.code}`); throw e; }
+    assert.throws(() => team.evidenceFile(job.id, 'file.log'), /symlinks/);
+  });
+});
+
+test('runTests archives complete redacted logs and records duration for the supplied revision', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Logs', paused: true });
+  const revision = 'a'.repeat(40), command = [process.execPath, '-e', "console.error('BEGIN api_key=dummy-private-value'); for(let i=0;i<700;i++) console.error('line '+i+' '+'x'.repeat(100)); console.log('END')"];
+  assert(await team.runTests(job, job.worktree, revision, [command])); team.save(job);
+  const check = team.evidence(job.id).checkResults.at(-1);
+  assert.equal(check.revision, revision); assert.equal(check.code, 0); assert(check.ms >= 0); assert(check.log.startsWith(revision + '/test-controller/'));
+  const full = readFileSync(team.evidenceFile(job.id, check.log).file, 'utf8');
+  assert(full.includes('BEGIN api_key=[REDACTED]')); assert(!full.includes('dummy-private-value'));
+  assert(full.includes('line 0 ')); assert(full.includes('line 699 ')); assert(full.includes('END'));
+  assert(full.length > 70000); assert(check.output.length < 5000);
+  assert.equal(job.evidenceBytes, Buffer.byteLength(full));
+  const md = await team.exportJob(job.id); assert(md.includes(check.log)); assert(md.includes(revision));
+  assert(!await team.runTests(job, job.worktree, revision, [[process.execPath, '-e', "console.error('FAILED'); process.exit(7)"]]));
+  assert.equal(job.checkResults.at(-1).code, 7); assert(job.checkResults.at(-1).log);
+});
 
 test('discussion ledger rejects mismatched replies/stale evidence and keeps outstanding claims', () => {
   const d = ledger({ id: 'D-test', from: 'a', topic: 'Contract', messages: [], status: 'pending' }), s = { fingerprint: 'v1' };
@@ -775,6 +890,30 @@ async function parallelTeam(t, plan, kind = 'code') {
   return { team, spans, prompts, f };
 }
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+
+test('parallel child evidence is archived before task worktrees are removed', async t => {
+  const { team } = await parallelTeam(t, [
+    { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [] },
+    { agent: 'codex-4', difficulty: 2, instruction: 'T2 edit', files: ['t2.txt'], dependsOn: [] },
+  ]);
+  const agentRun = team.agentRun, worktrees = [];
+  team.agentRun = async (agent, task, prompt, opts) => {
+    const report = await agentRun(agent, task, prompt, opts);
+    if (task.stage === 'implement') {
+      worktrees.push(task.worktree); mkdirSync(join(task.worktree, '.ai-team/evidence'), { recursive: true });
+      writeFileSync(join(task.worktree, '.ai-team/evidence/check.log'), agent.id);
+    }
+    return report;
+  };
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Parallel evidence' }), ready = await settle(team, job.id, 'ready');
+  assert.equal(worktrees.length, 2); assert(worktrees.every(w => !existsSync(w)));
+  const entries = ready.evidence.filter(e => e.stage === 'implement'); assert.equal(entries.length, 2);
+  for (const entry of entries) {
+    assert.equal(entry.revision, ready.revision);
+    assert.equal(readFileSync(team.evidenceFile(job.id, `${entry.dir}/.ai-team/evidence/check.log`).file, 'utf8'), entry.agent);
+  }
+});
 
 test('independent tasks run in parallel; dependsOn waits; code tasks merge from child worktrees', async t => {
   const { team, spans, prompts, f } = await parallelTeam(t, [

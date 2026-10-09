@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { msg, setLanguage, getLanguage, languages } from './i18n.js';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, openSync, closeSync, unlinkSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Team } from './team.js';
@@ -136,12 +136,21 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/comparisons') return send(res, 201, await team.createComparison(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
-    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer))?$/.exec(url.pathname);
+    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer|evidence|evidence-file))?$/.exec(url.pathname);
     if (match) {
       const [, id, action] = match;
       if (req.method === 'GET' && !action) return send(res, 200, team.get(id));
       if (req.method === 'GET' && action === 'events') return send(res, 200, team.events(id, Math.max(0, Number(url.searchParams.get('after')) || 0)));
       if (req.method === 'GET' && action === 'diff') return send(res, 200, await team.diff(id));
+      if (req.method === 'GET' && action === 'evidence') return send(res, 200, team.evidence(id));
+      if (req.method === 'GET' && action === 'evidence-file') {
+        const { file, type } = team.evidenceFile(id, url.searchParams.get('path'));
+        const images = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+        if (type === 'html') res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+        res.setHeader('Content-Disposition', type === 'other' ? 'attachment' : 'inline');
+        res.writeHead(200, { 'Content-Type': type === 'image' ? images[extname(file).toLowerCase()] : type === 'html' ? 'text/html' : type === 'text' ? 'text/plain; charset=utf-8' : 'application/octet-stream' });
+        res.end(readFileSync(file)); return;
+      }
       if (req.method === 'POST' && action === 'control') { const input = await body(req, 160e6); return send(res, 200, await team.control(id, input.action, input)); }
       if (req.method === 'GET' && action === 'export') { const md = await team.exportJob(id); res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-${id}.md"` }); res.end(md); return; }
       if (req.method === 'GET' && action === 'transfer') { const pack = await exportTransfer(team, id); res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-transfer-${id}.json"` }); res.end(JSON.stringify(pack)); return; }
