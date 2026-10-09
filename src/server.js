@@ -78,6 +78,8 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
     if (req.method === 'POST' && url.pathname === '/api/projects') return send(res, 201, await accounts.addProject(await body(req)));
     if (req.method === 'POST' && url.pathname === '/api/projects/pick') return send(res, 200, await accounts.pickFolder());
+    const projectBranches = /^\/api\/projects\/([a-z0-9-]+)\/branches$/.exec(url.pathname);
+    if (req.method === 'GET' && projectBranches) return send(res, 200, await team.branches(projectBranches[1]));
     const projectRemove = /^\/api\/projects\/([a-z0-9-]+)\/remove$/.exec(url.pathname);
     if (req.method === 'POST' && projectRemove) return send(res, 200, await accounts.removeProject(projectRemove[1], await body(req)));
     const projectUpdate = /^\/api\/projects\/([a-z0-9-]+)\/update$/.exec(url.pathname);
@@ -154,7 +156,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST' && action === 'control') { const input = await body(req, 160e6); return send(res, 200, await team.control(id, input.action, input)); }
       if (req.method === 'GET' && action === 'export') { const md = await team.exportJob(id); res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-${id}.md"` }); res.end(md); return; }
       if (req.method === 'GET' && action === 'transfer') { const pack = await exportTransfer(team, id); res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-transfer-${id}.json"` }); res.end(JSON.stringify(pack)); return; }
-      if (req.method === 'GET' && action === 'merge-check') return send(res, 200, await team.mergeCheck(id));
+      if (req.method === 'GET' && action === 'merge-check') return send(res, 200, await team.mergeCheck(id, { type: url.searchParams.get('target') || 'base', branch: url.searchParams.get('branch') }));
       if (req.method === 'POST' && action === 'merge') return send(res, 200, await team.merge(id, await body(req)));
     }
     send(res, 404, { error: 'Not found' });

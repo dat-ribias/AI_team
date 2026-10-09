@@ -562,6 +562,7 @@ export class Team extends EventEmitter {
     const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(job.id);
     if (row) {
       const saved = JSON.parse(row.body); if (saved.status === 'cancelled') return saved;
+      if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; }
       if (Array.isArray(saved.messages) && saved.messages.length > (job.messages?.length || 0)) { job.messages = saved.messages; if (this.runs.has(job.id)) job.steered = true; }
     }
     job.updatedAt = now(); this.db.prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, JSON.stringify(job)); this.emit('change'); return job;
@@ -612,7 +613,19 @@ export class Team extends EventEmitter {
       throw error;
     }
   }
-  async create({ project, goal, files, mode = 'full', sessionId, paused = false, dialogueMode = 'direct', tokenBudget, callBudget }) {
+  async branches(projectId) {
+    const root = this.project(projectId).path;
+    const current = await run(['git'], ['-C', root, 'symbolic-ref', '--quiet', '--short', 'HEAD'], { allowFailure: true });
+    return { current: current.code === 0 ? current.stdout.trim() : null, branches: (await git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'])).split('\n').filter(Boolean) };
+  }
+  async validateBranch(root, branch, exists = true) {
+    if (typeof branch !== 'string' || !branch || branch.length > 250 || branch.startsWith('-') || /^ai-team\//i.test(branch)) throw new Error('Invalid branch name');
+    const valid = await run(['git'], ['-C', root, 'check-ref-format', '--branch', branch], { allowFailure: true });
+    if (valid.code !== 0 || valid.stdout.trim() !== branch) throw new Error('Invalid branch name');
+    const found = await run(['git'], ['-C', root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { allowFailure: true });
+    if (exists ? found.code !== 0 : found.code === 0) throw new Error(exists ? 'Local branch does not exist' : 'Branch already exists');
+  }
+  async create({ project, goal, files, baseBranch, mode = 'full', sessionId, paused = false, dialogueMode = 'direct', tokenBudget, callBudget }) {
     if (!['off', 'direct', 'independent'].includes(dialogueMode)) throw new Error('Invalid dialogue mode');
     for (const v of [tokenBudget, callBudget]) if (v !== undefined && (!Number.isSafeInteger(v) || v < 1)) throw new Error('Budgets must be positive integers');
     if (typeof goal !== 'string' || !goal.trim() || goal.length > 20000) throw new Error(msg("srv.team.muc_tieu_can_tu_1_20"));
@@ -625,8 +638,11 @@ export class Team extends EventEmitter {
     if (realpathSync(root).toLowerCase() !== realpathSync(p.path).toLowerCase()) throw new Error(msg("srv.team.path_phai_la_goc_repo"));
     const dirty = await git(root, ['status', '--porcelain']);
     if (dirty) throw new Error(msg("srv.team.repo_co_thay_doi_chua_commit") + '\n' + dirty.split('\n').slice(0, 10).join('\n'));
-    const baseBranch = await git(root, ['symbolic-ref', '--short', 'HEAD']);
-    const base = await git(root, ['rev-parse', 'HEAD']);
+    const current = (await this.branches(project)).current;
+    if (baseBranch !== undefined) await this.validateBranch(root, baseBranch);
+    else baseBranch = await git(root, ['symbolic-ref', '--short', 'HEAD']);
+    if (accessOf(p).repos.length && baseBranch !== current) throw new Error('Choosing another base branch with linked repositories is not supported');
+    const base = await git(root, ['rev-parse', `refs/heads/${baseBranch}`]);
     const id = randomUUID().slice(0, 8), branch = `ai-team/${id}`;
     const worktree = join(this.dataDir, 'worktrees', id);
     mkdirSync(join(this.dataDir, 'worktrees'), { recursive: true });
@@ -1137,6 +1153,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (moved.length) await git(job.worktree, ['-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'commit', '--allow-empty', '--no-verify', '-m', `AI Team ${job.id}: linked ${moved.join(', ')}`]);
     if ((await run(['git'], ['-C', job.worktree, 'merge-base', '--is-ancestor', job.base, 'HEAD'], { allowFailure: true })).code !== 0) throw new Error(msg("srv.team.branch_khong_con_chua_base_agent"));
     job.revision = await git(job.worktree, ['rev-parse', 'HEAD']);
+    job.pendingMerge = null; job.mergeTargetCheck = null;
     for (const entry of job.evidence || []) if (entry.revision === null) {
       try {
         const root = join(this.dataDir, 'evidence', job.id), dir = `${job.revision}/${basename(entry.dir)}`;
@@ -1678,14 +1695,14 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } else if (action === 'sync') {
       // Base đã đi tiếp: merge base vào branch công việc, rồi bắt buộc test/review/verify lại từ đầu.
       if (!['paused', 'blocked', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_cap_nhat"));
-      const head = await git(this.project(job.project).path, ['rev-parse', job.baseBranch]);
+      const head = await git(this.project(job.project).path, ['rev-parse', `refs/heads/${job.baseBranch}`]);
       for (const l of job.linked || []) if (await git(l.path, ['rev-parse', l.baseBranch]) !== l.base) throw new Error(msg("srv.team.linked_base_moved", { 0: l.project }));
       if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
       if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
       const result = await run(['git'], ['-C', job.worktree, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'merge', '--no-ff', '--no-edit', head], { allowFailure: true, timeoutMs: 120_000 });
       const conflicts = result.code === 0 ? '' : await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']);
       if (result.code !== 0 && !conflicts) { await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true }); throw new Error(msg("srv.team.merge_base_that_bai") + redact(result.stderr).slice(0, 2000)); }
-      job.base = head; job.tested = job.reviewed = job.verified = null; job.status = 'queued';
+      job.base = head; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; job.status = 'queued';
       if (conflicts) {
         job.tasks = [{ agent: null, difficulty: 4, instruction: `Base branch ${job.baseBranch} changed and merging it caused conflicts in:\n${conflicts}\nResolve every conflict keeping the intent of BOTH sides (the goal: ${job.goal.slice(0, 2000)}). Remove all conflict markers. Do not commit and do not run git merge/rebase/reset.` }];
         job.taskIndex = 0; job.stage = 'implement';
@@ -1714,7 +1731,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } else if (action === 'review') {
       if (!['paused', 'blocked', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_review_lai"));
       if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
-      job.stage = 'test'; job.status = 'queued'; job.tested = job.reviewed = job.verified = null; this.save(job); this.kick();
+      job.stage = 'test'; job.status = 'queued'; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; this.save(job); this.kick();
     } else throw new Error(msg("srv.team.action_khong_ho_tro"));
     return this.get(id);
   }
@@ -1724,7 +1741,31 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (const l of job.linked || []) diff += `\n\n### ${l.project} (${l.path})\n` + await git(l.worktree, ['diff', '--no-ext-diff', l.base]);
     return { diff, status: await git(job.worktree, ['status', '--short']), revision: await git(job.worktree, ['rev-parse', 'HEAD']) };
   }
-  async mergeCheck(idOrJob) {
+  async mergeTarget(job, target = { type: 'base' }) {
+    const root = this.project(job.project).path, type = target?.type || 'base';
+    const branch = type === 'base' ? job.baseBranch : target?.branch;
+    const result = { type, branch, tip: null, mode: null, checkedOut: false, error: null };
+    try {
+      if (!['base', 'existing', 'new'].includes(type)) throw new Error('Invalid merge target');
+      if (job.linked?.length && type !== 'base') throw new Error('Another merge target with linked repositories is not supported');
+      await this.validateBranch(root, branch, type !== 'new');
+      const worktrees = (await git(root, ['worktree', 'list', '--porcelain', '-z'])).split('\0\0').map(block => {
+        const rows = block.split('\0'); return { path: rows.find(l => l.startsWith('worktree '))?.slice(9), branch: rows.find(l => l.startsWith('branch '))?.slice(7) };
+      });
+      const owner = worktrees.find(w => w.branch === `refs/heads/${branch}`);
+      result.checkedOut = !!owner && realpathSync(owner.path).toLowerCase() === realpathSync(root).toLowerCase();
+      if (owner && !result.checkedOut) throw new Error('Target branch is checked out in another worktree');
+      if (type === 'new') result.mode = 'create';
+      else {
+        result.tip = await git(root, ['rev-parse', `refs/heads/${branch}`]);
+        const ff = await run(['git'], ['-C', root, 'merge-base', '--is-ancestor', result.tip, job.revision], { allowFailure: true });
+        if (ff.code > 1) throw new Error('Cannot determine merge ancestry');
+        result.mode = ff.code === 0 ? result.checkedOut ? 'ff' : 'update-ref' : 'merge';
+      }
+    } catch (error) { result.error = error.message; }
+    return result;
+  }
+  async mergeCheck(idOrJob, target) {
     const job = typeof idOrJob === 'string' ? this.get(idOrJob) : idOrJob;
     const rows = (await git(job.worktree, ['diff', '--numstat', job.base, job.revision])).split('\n').filter(Boolean).map(l => l.split('\t'));
     for (const l of job.linked || []) rows.push(...(await git(l.worktree, ['diff', '--numstat', l.base, l.revision])).split('\n').filter(Boolean).map(x => x.split('\t')).map(([a, b, f]) => [a, b, `${l.project}:${f}`]));
@@ -1739,11 +1780,21 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (sensitive.length) reasons.push(msg("srv.team.dung_file_nhay_cam") + sensitive.slice(0, 10).join(', '));
     if (deleted.length) reasons.push(msg("srv.team.xoa_file") + deleted.slice(0, 10).join(', '));
     if (added + removed > (this.config.largeDiffLines ?? 300)) reasons.push(msg("srv.team.diff_lon_dong", { 0: added, 1: removed }));
-    const head = await git(this.project(job.project).path, ['rev-parse', job.baseBranch]);
+    const head = await git(this.project(job.project).path, ['rev-parse', `refs/heads/${job.baseBranch}`]);
+    const destination = await this.mergeTarget(job, target);
+    const controllerTests = (job.checkResults || []).filter(r => r.revision === job.revision);
+    const aiChecks = (job.reports || []).filter(r => ['review', 'verify'].includes(r.stage) && r.revision === job.revision).map(({ stage, agent, verdict, findings, tests }) => ({ stage, agent, verdict, findings, tests, selfReported: true }));
+    let pendingMerge = job.pendingMerge?.target.type === destination.type && job.pendingMerge.target.branch === destination.branch ? job.pendingMerge : null;
+    if (pendingMerge) pendingMerge = { ...pendingMerge, diff: Buffer.from(await git(job.worktree, ['diff', '--no-ext-diff', pendingMerge.tip, pendingMerge.commit])).subarray(0, 200000).toString('utf8') };
+    // Bind a dashboard approval to the target tip that the owner actually saw.
+    if (typeof idOrJob === 'string' && job.status === 'ready' && !this.runs.has(job.id) && !destination.error) {
+      job.mergeTargetCheck = { type: destination.type, branch: destination.branch, tip: destination.tip, revision: job.revision }; this.save(job);
+    }
     return { revision: job.revision, code: job.revision.slice(0, 8), files: rows.length, added, removed, risk: reasons.length ? 'high' : job.risk || 'medium', reasons, needsConfirm: reasons.length > 0,
-      checks: { tested: job.tested === job.revision, reviewed: job.reviewed === job.revision || !!job.skipped?.includes('review'), reviewSkipped: !!job.skipped?.includes('review'), verified: job.verified === job.revision || !!job.skipped?.includes('verify'), verifySkipped: !!job.skipped?.includes('verify'), baseUnchanged: head === job.base && linkedUnchanged, ready: job.status === 'ready' } };
+      checks: { tested: job.tested === job.revision, reviewed: job.reviewed === job.revision || !!job.skipped?.includes('review'), reviewSkipped: !!job.skipped?.includes('review'), verified: job.verified === job.revision || !!job.skipped?.includes('verify'), verifySkipped: !!job.skipped?.includes('verify'), baseUnchanged: destination.type !== 'base' || head === job.base && linkedUnchanged, ready: job.status === 'ready' },
+      target: destination, evidence: { revision: job.revision, controllerTests, aiChecks, files: (job.evidence || []).filter(e => e.revision === job.revision), warnNoControllerTest: !controllerTests.some(r => r.code === 0) }, pendingMerge };
   }
-  async merge(id, { confirm } = {}) {
+  async merge(id, { confirm, target, approveMerge } = {}) {
     const job = this.get(id);
     if (job.status !== 'ready' || this.runs.has(id)) throw new Error(msg("srv.team.task_chua_san_sang_hoac_controller"));
     // Reserve before the first await, so double clicks and scheduler ticks cannot race the merge.
@@ -1751,23 +1802,61 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     job.status = 'merging'; this.save(job);
     try {
       await this.assertReady(job);
-      const check = await this.mergeCheck(job);
-      if (!check.checks.baseUnchanged) throw new Error(msg("srv.team.da_co_commit_moi_bam_cap", { 0: job.baseBranch }));
+      const check = await this.mergeCheck(job, target), destination = check.target;
+      if (destination.type === 'base' && !check.checks.baseUnchanged) throw new Error(msg("srv.team.da_co_commit_moi_bam_cap", { 0: job.baseBranch }));
       if (check.needsConfirm && confirm !== check.code) throw new Error(msg("srv.team.rui_ro_cao_nhap_ma_commit", { 0: check.code }));
+      if (destination.error) throw new Error(destination.error);
       const root = this.project(job.project).path;
-      if (await git(root, ['status', '--porcelain'])) throw new Error(msg("srv.team.repo_chinh_co_thay_doi_chua"));
-      if (await git(root, ['symbolic-ref', '--short', 'HEAD']) !== job.baseBranch) throw new Error(msg("srv.team.repo_chinh_da_doi_branch"));
-      if (await git(root, ['rev-parse', 'HEAD']) !== job.base) throw new Error(msg("srv.team.base_branch_da_doi_can_tich"));
+      if (destination.type === 'base' && await git(root, ['status', '--porcelain'])) throw new Error(msg("srv.team.repo_chinh_co_thay_doi_chua"));
+      const seen = job.mergeTargetCheck;
+      if (seen && seen.revision === job.revision && seen.type === destination.type && seen.branch === destination.branch && seen.tip !== destination.tip) {
+        job.pendingMerge = null; job.mergeTargetCheck = null; throw new Error('Target branch tip changed; run merge-check again');
+      }
       // Kiểm hết mọi repo liên kết TRƯỚC khi merge cái nào, để không merge dở dang.
       for (const l of job.linked || []) {
         if (await git(l.path, ['status', '--porcelain'])) throw new Error(`${l.project}: ${msg("srv.team.repo_chinh_co_thay_doi_chua")}`);
         if (await git(l.path, ['symbolic-ref', '--short', 'HEAD']) !== l.baseBranch) throw new Error(`${l.project}: ${msg("srv.team.repo_chinh_da_doi_branch")}`);
         if (await git(l.path, ['rev-parse', 'HEAD']) !== l.base) throw new Error(msg("srv.team.linked_base_moved", { 0: l.project }));
       }
-      await git(root, ['merge', '--ff-only', job.revision]);
+      let commit = job.revision, mode = destination.mode;
+      const pending = job.pendingMerge;
+      if (pending && pending.target.type === destination.type && pending.target.branch === destination.branch) {
+        if (pending.revision !== job.revision || pending.tip !== destination.tip) { job.pendingMerge = null; throw new Error('Pending merge is stale; prepare the merge again'); }
+        if (!pending.passed) throw new Error('Merge commit tests failed; prepare the merge again');
+        if (approveMerge !== pending.commit) throw new Error('Approve the exact pending merge commit');
+        commit = pending.commit; mode = 'merge';
+      } else if (approveMerge !== undefined) throw new Error('No matching pending merge to approve');
+      else if (mode === 'merge') {
+        const wt = join(this.dataDir, 'worktrees', `${id}-merge-${randomUUID().slice(0, 8)}`);
+        job.pendingMerge = null;
+        await git(root, ['worktree', 'add', '--detach', wt, destination.tip]);
+        try {
+          const result = await run(['git'], ['-C', wt, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'merge', '--no-ff', '--no-edit', job.revision], { allowFailure: true, timeoutMs: 120_000 });
+          if (result.code !== 0) {
+            const conflicts = await git(wt, ['diff', '--name-only', '--diff-filter=U']);
+            await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true });
+            throw new Error(conflicts ? `Merge conflicts: ${conflicts.split('\n').join(', ')}` : `Merge failed: ${redact(result.stderr).slice(0, 2000)}`);
+          }
+          commit = await git(wt, ['rev-parse', 'HEAD']);
+          await this.ensureExclude(wt);
+          const passed = await this.runTests(job, wt, commit, this.project(job.project).tests);
+          if (await git(wt, ['rev-parse', 'HEAD']) !== commit || await git(wt, ['status', '--porcelain'])) throw new Error(msg("srv.team.tests_lam_thay_doi_worktree_khong"));
+          job.pendingMerge = { target: { type: destination.type, branch: destination.branch }, tip: destination.tip, commit, revision: job.revision, passed, at: now() };
+        } finally { await git(root, ['worktree', 'remove', '--force', wt]); }
+        job.status = 'ready'; this.save(job); this.event(id, 'controller', 'user', 'MERGE_PENDING', 'Merge commit requires owner approval', job.pendingMerge); return job;
+      }
+      // Recheck checkout ownership immediately before touching the target ref.
+      const fresh = await this.mergeTarget(job, { type: destination.type, branch: destination.branch });
+      if (fresh.error) throw new Error(fresh.error);
+      if (fresh.tip !== destination.tip) { job.pendingMerge = null; throw new Error('Target branch tip changed; prepare the merge again'); }
+      if (fresh.checkedOut) {
+        if (await git(root, ['status', '--porcelain'])) throw new Error(msg("srv.team.repo_chinh_co_thay_doi_chua"));
+        if ((await this.branches(job.project)).current !== destination.branch || await git(root, ['rev-parse', 'HEAD']) !== destination.tip) throw new Error('Target checkout changed; run merge-check again');
+        await git(root, ['merge', '--ff-only', commit]);
+      } else await git(root, ['update-ref', `refs/heads/${destination.branch}`, commit, destination.type === 'new' ? '0000000000000000000000000000000000000000' : destination.type === 'base' ? job.base : destination.tip]);
       // ponytail: ff-only sau khi đã kiểm trước nên gần như không thể lỗi; lỗi giữa chừng thì báo rõ repo nào đã merge.
       for (const l of job.linked || []) { const r = await run(['git'], ['-C', l.path, 'merge', '--ff-only', l.revision], { allowFailure: true }); if (r.code !== 0) throw new Error(msg("srv.team.linked_merge_failed", { 0: l.project, 1: job.baseBranch })); }
-      job.status = 'merged'; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: job.revision.slice(0, 8), 1: job.baseBranch }));
+      job.status = 'merged'; job.pendingMerge = null; job.mergedInto = { branch: destination.branch, commit, mode }; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: commit.slice(0, 8), 1: destination.branch }), job.mergedInto);
     } catch (error) { job.status = 'ready'; this.save(job); throw error; }
     finally { this.runs.delete(id); this.kick(); }
     return job;

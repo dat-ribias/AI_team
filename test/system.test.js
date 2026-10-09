@@ -265,6 +265,195 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   // close is intentionally idempotent for shutdown after a manual close.
 });
 
+async function branchReady(t, f = null, baseBranch) {
+  f ||= await fixture();
+  const team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello', paused: true, ...(baseBranch ? { baseBranch } : {}) });
+  writeFileSync(join(job.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
+  await team.checkpoint(job);
+  assert(await team.runTests(job, job.worktree, job.revision, f.config.projects[0].tests));
+  Object.assign(job, { status: 'ready', tested: job.revision, reviewed: job.revision, verified: job.revision,
+    reports: [...job.reports, { stage: 'review', agent: 'gemini', verdict: 'approved', findings: [], tests: 'AI assertion', revision: job.revision }] });
+  team.save(job); return { f, team, job };
+}
+async function branchCommit(f, branch, file = 'other.txt', content = 'Target work\n') {
+  const tip = (await run(['git'], ['-C', f.path, 'rev-parse', `refs/heads/${branch}`])).stdout.trim();
+  const wt = join(f.data, 'target-edit');
+  await run(['git'], ['-C', f.path, 'worktree', 'add', '--detach', wt, tip]);
+  try {
+    writeFileSync(join(wt, file), content);
+    await run(['git'], ['-C', wt, 'add', '.']);
+    await run(['git'], ['-C', wt, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'target change']);
+    const commit = (await run(['git'], ['-C', wt, 'rev-parse', 'HEAD'])).stdout.trim();
+    await run(['git'], ['-C', f.path, 'update-ref', `refs/heads/${branch}`, commit, tip]); return commit;
+  } finally { await run(['git'], ['-C', f.path, 'worktree', 'remove', '--force', wt]); }
+}
+async function branchTip(f, branch = 'main') { return (await run(['git'], ['-C', f.path, 'rev-parse', `refs/heads/${branch}`])).stdout.trim(); }
+
+test('local branches, alternate job base and non-checkout base merge leave main unchanged', async t => {
+  const f = await fixture(); await run(['git'], ['-C', f.path, 'branch', 'release']);
+  const release = await branchCommit(f, 'release'), main = await branchTip(f);
+  const { team, job } = await branchReady(t, f, 'release');
+  assert.deepEqual(await team.branches('test'), { current: 'main', branches: [`ai-team/${job.id}`, 'main', 'release'] });
+  assert.equal(job.base, release); assert.equal(job.baseBranch, 'release');
+  assert.equal((await team.mergeCheck(job.id)).target.mode, 'update-ref');
+  await team.merge(job.id);
+  assert.equal(await branchTip(f, 'release'), job.revision); assert.equal(await branchTip(f), main);
+  assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8'), 'Hello!\n');
+  await run(['git'], ['-C', f.path, 'checkout', '--detach']); assert.equal((await team.branches('test')).current, null);
+});
+
+test('branch inputs reject options, traversal, internal branches, revision expressions and missing refs', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  await run(['git'], ['-C', f.path, 'tag', 'tag-only']);
+  for (const baseBranch of ['-bad', '../main', 'ai-team/reserved', 'HEAD~0', 'tag-only', '', '@{-1}', 'a'.repeat(251)]) {
+    await assert.rejects(team.create({ project: 'test', goal: 'x', baseBranch, paused: true }), /branch/);
+  }
+  const { job } = await branchReady(t, f);
+  for (const branch of ['-bad', '../main', 'ai-team/reserved', '@{-1}', 'main']) {
+    assert((await team.mergeCheck(job.id, { type: 'new', branch })).target.error);
+    await assert.rejects(team.merge(job.id, { target: { type: 'new', branch } }));
+  }
+});
+
+test('merge creates a new branch only once and provides exact-revision evidence', async t => {
+  const { f, team, job } = await branchReady(t), main = await branchTip(f), target = { type: 'new', branch: 'release/new' };
+  job.checkResults.push({ revision: job.base, code: 0 }); job.reports.push({ stage: 'verify', revision: job.base, tests: 'stale' }); team.save(job);
+  const check = await team.mergeCheck(job.id, target);
+  assert.equal(check.target.mode, 'create'); assert.equal(check.target.tip, null);
+  assert.equal(check.evidence.controllerTests.length, 1); assert.equal(check.evidence.aiChecks.length, 1);
+  assert.equal(check.evidence.aiChecks[0].selfReported, true); assert.equal(check.evidence.warnNoControllerTest, false);
+  assert(check.evidence.files.every(e => e.revision === job.revision));
+  await team.merge(job.id, { target });
+  assert.equal(await branchTip(f, target.branch), job.revision); assert.equal(await branchTip(f), main);
+  assert.deepEqual(team.get(job.id).mergedInto, { branch: target.branch, commit: job.revision, mode: 'create' });
+  assert.deepEqual(team.events(job.id).find(e => e.type === 'MERGED').details, team.get(job.id).mergedInto);
+});
+
+test('existing non-checkout branch fast-forwards and stale dashboard tips are refused', async t => {
+  for (const moved of [false, true]) {
+    const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: 'release' }, main = await branchTip(f);
+    await run(['git'], ['-C', f.path, 'branch', target.branch]);
+    const check = await team.mergeCheck(job.id, target); assert.equal(check.target.mode, 'update-ref');
+    if (moved) {
+      const tip = await branchCommit(f, target.branch);
+      await assert.rejects(team.merge(job.id, { target }), /tip changed/);
+      assert.equal(await branchTip(f, target.branch), tip);
+    } else {
+      await team.merge(job.id, { target }); assert.equal(await branchTip(f, target.branch), job.revision);
+    }
+    assert.equal(await branchTip(f), main);
+  }
+});
+
+test('update-ref CAS rejects a target move after the final target check', async t => {
+  const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: 'release' };
+  await run(['git'], ['-C', f.path, 'branch', target.branch]);
+  await team.mergeCheck(job.id, target);
+  const original = team.mergeTarget.bind(team); let calls = 0, moved;
+  team.mergeTarget = async (...args) => {
+    const result = await original(...args);
+    if (++calls === 2) moved = await branchCommit(f, target.branch);
+    return result;
+  };
+  await assert.rejects(team.merge(job.id, { target }), /cannot lock ref|expected/);
+  assert.equal(await branchTip(f, target.branch), moved); assert.equal(team.get(job.id).status, 'ready');
+});
+
+test('existing checkout fast-forwards cleanly and other worktree checkouts are refused', async t => {
+  const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: 'main' };
+  assert.equal((await team.mergeCheck(job.id, target)).target.mode, 'ff');
+  writeFileSync(join(f.path, 'dirty.txt'), 'dirty');
+  await assert.rejects(team.merge(job.id, { target }), /commit/); rmSync(join(f.path, 'dirty.txt'));
+  await run(['git'], ['-C', f.path, 'worktree', 'add', '-b', 'release', join(f.data, 'other-owner'), 'main']);
+  await assert.rejects(team.merge(job.id, { target: { type: 'existing', branch: 'release' } }), /another worktree/);
+  await team.merge(job.id, { target }); assert.equal(await branchTip(f), job.revision);
+  assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n'), 'Hello from AI Team demo!\n');
+});
+
+test('non-ff merge runs tests on its merge commit and needs a second exact owner approval', async t => {
+  for (const checkedOut of [false, true]) {
+    const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: checkedOut ? 'main' : 'release' };
+    if (!checkedOut) await run(['git'], ['-C', f.path, 'branch', target.branch]);
+    const tip = await branchCommit(f, target.branch);
+    if (checkedOut) await run(['git'], ['-C', f.path, 'reset', '--hard', tip]);
+    const worktrees = (await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout;
+    assert.equal((await team.mergeCheck(job.id, target)).target.mode, 'merge');
+    const prepared = await team.merge(job.id, { target }), pending = prepared.pendingMerge;
+    assert.equal(prepared.status, 'ready'); assert(pending.passed); assert.equal(await branchTip(f, target.branch), tip);
+    const parents = (await run(['git'], ['-C', f.path, 'rev-list', '--parents', '-n', '1', pending.commit])).stdout.trim().split(' ');
+    assert.deepEqual(parents, [pending.commit, tip, job.revision]);
+    assert(prepared.checkResults.some(r => r.revision === pending.commit && r.code === 0 && r.log));
+    assert.equal((await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout, worktrees);
+    const check = await team.mergeCheck(job.id, target); assert(check.pendingMerge.diff.includes('hello.txt')); assert(check.checks.baseUnchanged);
+    assert.equal((await team.mergeCheck(job.id, { type: 'new', branch: 'another-target' })).pendingMerge, null);
+    assert(team.events(job.id).some(e => e.type === 'MERGE_PENDING'));
+    await assert.rejects(team.merge(job.id, { target }), /exact pending/);
+    await assert.rejects(team.merge(job.id, { target, approveMerge: job.revision }), /exact pending/);
+    assert.equal(await branchTip(f, target.branch), tip);
+    await team.merge(job.id, { target, approveMerge: pending.commit });
+    assert.equal(await branchTip(f, target.branch), pending.commit); assert.equal(team.get(job.id).mergedInto.mode, 'merge');
+    if (checkedOut) assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n'), 'Hello from AI Team demo!\n');
+  }
+});
+
+test('non-ff conflicts abort and remove only the temporary worktree without changing refs', async t => {
+  const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: 'release' };
+  await run(['git'], ['-C', f.path, 'branch', target.branch]);
+  const tip = await branchCommit(f, target.branch, 'hello.txt', 'Conflicting target\n');
+  const before = (await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout;
+  await assert.rejects(team.merge(job.id, { target }), /Merge conflicts: hello.txt/);
+  assert.equal(await branchTip(f, target.branch), tip); assert.equal(team.get(job.id).pendingMerge, null);
+  assert.equal((await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout, before);
+});
+
+test('failed merge-commit tests and test mutations never update the target', async t => {
+  for (const mutate of [false, true]) {
+    const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: 'release' };
+    await run(['git'], ['-C', f.path, 'branch', target.branch]); const tip = await branchCommit(f, target.branch);
+    team.project('test').tests = [[process.execPath, '-e', mutate ? "require('node:fs').writeFileSync('hello.txt','tampered')" : 'process.exit(9)']];
+    const before = (await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout;
+    if (mutate) {
+      await assert.rejects(team.merge(job.id, { target }), /worktree/);
+      assert.equal(team.get(job.id).pendingMerge, null);
+    } else {
+      const prepared = await team.merge(job.id, { target }); assert.equal(prepared.pendingMerge.passed, false);
+      assert.equal(prepared.checkResults.at(-1).code, 9);
+      await assert.rejects(team.merge(job.id, { target, approveMerge: prepared.pendingMerge.commit }), /tests failed/);
+    }
+    assert.equal(await branchTip(f, target.branch), tip);
+    assert.equal((await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout, before);
+  }
+});
+
+test('pending approval expires when target tip or job revision changes', async t => {
+  const { f, team, job } = await branchReady(t), target = { type: 'existing', branch: 'release' };
+  await run(['git'], ['-C', f.path, 'branch', target.branch]); await branchCommit(f, target.branch);
+  const pending = (await team.merge(job.id, { target })).pendingMerge;
+  const moved = await branchCommit(f, target.branch, 'later.txt');
+  await assert.rejects(team.merge(job.id, { target, approveMerge: pending.commit }), /stale/);
+  assert.equal(team.get(job.id).pendingMerge, null); assert.equal(await branchTip(f, target.branch), moved);
+  const prepared = await team.merge(job.id, { target }); assert(prepared.pendingMerge);
+  prepared.revision = prepared.base; team.save(prepared); assert.equal(team.get(job.id).pendingMerge, null);
+});
+
+test('linked repositories reject another base and non-base merge targets', async t => {
+  const f = await fixture(), linked = await fixture();
+  f.config.projects.push({ ...linked.config.projects[0], id: 'linked' });
+  f.config.projects[0].access = { repos: [{ project: 'linked', members: ['codex-2'] }] };
+  await run(['git'], ['-C', f.path, 'branch', 'release']);
+  const team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  await assert.rejects(team.create({ project: 'test', goal: 'x', baseBranch: 'release', paused: true }), /not supported/);
+  const job = await team.create({ project: 'test', goal: 'x', paused: true });
+  Object.assign(job, { status: 'ready', tested: job.revision, reviewed: job.revision, verified: job.revision }); team.save(job);
+  for (const type of ['existing', 'new']) {
+    const target = { type, branch: type === 'new' ? 'brand-new' : 'release' };
+    assert.match((await team.mergeCheck(job.id, target)).target.error, /not supported/);
+    await assert.rejects(team.merge(job.id, { target }), /not supported/);
+  }
+  assert.equal(await branchTip(f), job.base);
+});
+
 test('pause cancels process; resume retains work; new guidance invalidates ready approval', async t => {
   const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Demo pause' });
