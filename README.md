@@ -95,6 +95,15 @@ Việc `research` (điều tra, đánh giá, không sửa code) đi cùng luồn
 
 Controller quyết định thứ tự test/review/verify; manager quyết định các task implementation. Timeline ghi đúng nguồn: lệnh do controller sinh được ghi là Controller, nội dung task từ manager được ghi là Manager. Đây là phối hợp qua prompt/report từng lượt; không phải bốn phiên chat thường trực hay hiển thị suy luận nội bộ.
 
+## Duyệt và lịch sử kế hoạch
+
+- Việc `code` chờ bạn duyệt kế hoạch trước khi chạy; `research` và fast path không cần duyệt. Fast path leo thang lên Manager có kế hoạch thì phải duyệt.
+- Bấm **Duyệt** để tiếp tục; bấm ô trong sơ đồ để đổi người trước khi duyệt.
+- Nhắn góp ý khi đang chờ duyệt để Lead lập phiên bản kế hoạch mới.
+- Config toàn đội `planApproval` và `planApprovalRework` mặc định `true`; tùy chọn thứ hai yêu cầu duyệt lại kế hoạch ở vòng sửa.
+- Khi tạo việc qua API/MCP, field boolean `planApproval` ghi đè tùy chọn duyệt cho việc đó; form có checkbox tương ứng.
+- Lịch sử giữ tối đa 20 bản, với lý do ban đầu, phản biện, vòng sửa, góp ý hoặc leo thang. Chọn phiên bản trên sơ đồ để xem lại; bản cũ chỉ đọc.
+
 ## Phản biện
 
 - **Phản biện kế hoạch**: việc rủi ro cao (strict/high) được một member khác — ưu tiên khác loại CLI với Manager — đọc kế hoạch trước khi ai làm. Tối đa 3 phản đối (nhận định · khi nào sai · bằng chứng · cách kiểm · mức ảnh hưởng); `[]` = không có vấn đề đáng kể. Có phản đối mức medium/high → Manager sửa kế hoạch **một lần**, không phản biện lại.
