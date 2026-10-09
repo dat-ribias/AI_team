@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { msg } from './i18n.js';
-import { mkdirSync, existsSync, realpathSync, writeFileSync, readFileSync, appendFileSync, cpSync, statSync, lstatSync, readlinkSync, readdirSync, rmSync } from 'node:fs';
-import { resolve, join, basename, extname } from 'node:path';
+import { mkdirSync, existsSync, realpathSync, writeFileSync, readFileSync, appendFileSync, cpSync, statSync, lstatSync, readlinkSync, readdirSync, rmSync, renameSync } from 'node:fs';
+import { resolve, join, basename, extname, relative, isAbsolute, dirname, sep } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore, fileHash, hash } from './memory.js';
@@ -11,6 +11,7 @@ import { EventEmitter } from 'node:events';
 import { run, executable } from './process.js';
 import { runAgent, readQuota } from './providers.js';
 import { scanSkills, skillRoots } from './skills.js';
+import { collect, kind, safeRel } from './evidence.js';
 
 const now = () => new Date().toISOString();
 const terminal = new Set(['merged', 'cancelled', 'done']);
@@ -113,9 +114,9 @@ In a rework round, address every review finding and failed test listed in report
 Ask before guessing: if the goal is ambiguous, contradictory, or missing a decision that changes scope, cost or risk (which system, which data, expected output, acceptance criteria), return status "needs_input" with 1-5 short, specific questions and no tasks. The human answers in "messages"; then plan. Do not ask about details you can find in the repository yourself.`,
   research: 'Investigate exactly what the task asks. Start from the given taskContext. Do not edit files. Back every finding with evidence: file paths with line numbers, commands you ran and their output, or URLs. Separate facts from inference, state your confidence, and list what you could not verify.',
   challenge: 'Challenge the PLAN before anyone builds it: wrong assumptions, missing requirements, steps that cannot be tested, risky ordering, or a clearly simpler approach. Return at most 3 objections, most important first. Each names the plan statement it disputes (claim), when it fails (failsWhen), your evidence, a concrete check, and impact. objections: [] ("no significant issue") is a valid answer; never invent problems just to disagree.',
-  implement: 'Do only the assigned task. Keep the diff minimal and consistent with the existing code style. Start from the given taskContext; read beyond it only when needed and list what you had to look up in contextGaps. If the task is beyond what you can do reliably, return status=blocked with the reason instead of guessing.',
+  implement: 'Do only the assigned task. Keep the diff minimal and consistent with the existing code style. Start from the given taskContext; read beyond it only when needed and list what you had to look up in contextGaps. If the task is beyond what you can do reliably, return status=blocked with the reason instead of guessing. Save evidence of your checks (screenshots, important logs, e2e/HTML reports) under .ai-team/evidence/ (git-ignored); the controller archives it for the owner.',
   review: 'For a research job (kind=research): check that each conclusion follows from the cited evidence, flag unsupported or missing points, and request changes when evidence is weak. For code: review independently: correctness, edge cases, security, data loss, whether tests really cover the change, and scope creep. Approve only if you would merge it yourself; otherwise changes_requested with concrete findings (file, problem, fix). At most 5 findings, most important first; "no significant issue" is a valid result.',
-  verify: 'Verify against the original goal, not the plan: every requirement met, review findings resolved, test evidence matches this exact revision. Approve only with evidence. If "disputes" are listed (a builder rejected a finding), settle each one by running a check or reading the code and report rulings: the evidence decides, not who argued better. Judge the change, not the paperwork: if checks you ran yourself pass, missing or thin evidence in another member\'s report is not a finding and never a reason for status=blocked.',
+  verify: 'Verify against the original goal, not the plan: every requirement met, review findings resolved, test evidence matches this exact revision. Approve only with evidence. If "disputes" are listed (a builder rejected a finding), settle each one by running a check or reading the code and report rulings: the evidence decides, not who argued better. Judge the change, not the paperwork: if checks you ran yourself pass, missing or thin evidence in another member\'s report is not a finding and never a reason for status=blocked. Save evidence of your checks (screenshots, important logs, e2e/HTML reports) under .ai-team/evidence/ (git-ignored); the controller archives it for the owner.',
   final: 'For code: summarise for the human who decides the merge: what changed, risk, tests, open limitations. For research: write the final answer for the human: the conclusion, the reasoning, evidence/sources, confidence and open questions. Keep the summary to about 200-400 words; details stay in the reports. Then maintain the team memory (field "memory"): add at most 5 DURABLE facts that future jobs on this project need and cannot cheaply rediscover (conventions, architecture, exact commands, pitfalls, decisions the owner made), each one sentence under 200 characters, not job progress and never secrets; remove the ids of listed facts that this job proved wrong or obsolete; rewrite the session summary in 2-4 sentences: what this chat session has been working on, what is done and what is still open.',
 };
 
@@ -152,6 +153,7 @@ export function roster(config) {
 
 export function validateConfig(config) {
   if (config.peerDialogue !== undefined && typeof config.peerDialogue !== 'boolean') throw new Error('peerDialogue must be boolean');
+  if (config.evidenceMaxMB != null && (!Number.isFinite(config.evidenceMaxMB) || config.evidenceMaxMB < 0)) throw new Error('evidenceMaxMB must be a non-negative number');
   if (!Array.isArray(config.agents) || !config.agents.length) throw new Error(msg("srv.team.can_it_nhat_mot_thanh_vien"));
   if (new Set(config.agents.map(a => a.id)).size !== config.agents.length) throw new Error(msg("srv.team.agent_id_bi_trung"));
   const homes = config.agents.filter(a => ['codex', 'claude', 'gemini'].includes(a.provider)).map(a => resolve(a.home || '').toLowerCase());
@@ -461,6 +463,13 @@ export class Team extends EventEmitter {
       for (const f of r.findings || []) lines.push(`- ${typeof f === 'string' ? f : `${f.id || ''} [${f.impact || ''}] ${f.claim || ''} — ${f.evidence || ''}`}`);
       if (r.tests) lines.push('', `Tests: ${r.tests}`);
       lines.push('');
+    }
+    lines.push('## Hồ sơ kiểm tra', '', 'Controller chạy', '', '| Lệnh | Exit | ms | Revision | Log |', '| --- | --- | --- | --- | --- |');
+    const cell = value => String(value ?? '').replace(/\|/g, '\\|').replace(/[\r\n]/g, ' ');
+    for (const c of job.checkResults || []) lines.push(`| ${cell(c.command.join(' '))} | ${c.code} | ${c.ms ?? ''} | ${cell(c.revision)} | ${cell(c.log)} |`);
+    lines.push('');
+    for (const entry of job.evidence || []) {
+      lines.push(`### ${entry.revision || 'pending'} · ${entry.stage} · ${entry.agent}`, '', ...entry.files.map(f => `- ${entry.dir}/${f.path} (${f.bytes} bytes, ${f.type})`), ...entry.skipped.map(f => `- Skipped: ${f.path} — ${f.reason}`), '');
     }
     lines.push('## Trao đổi', '');
     for (const e of ev.filter(e => !['ACTIVITY', 'USAGE', 'RATE_LIMIT', 'SPAWN', 'TEST_OUTPUT', 'DIAGNOSTIC'].includes(e.type))) lines.push(`- ${e.timestamp} · ${e.from} → ${e.to} · ${e.type}: ${String(e.summary || '').replace(/\n/g, ' ').slice(0, 600)}`);
@@ -1034,6 +1043,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       await git(this.project(job.project).path, ['worktree', 'add', '--detach', worktree, job.revision]);
       if (job.attachments?.length) cpSync(join(job.worktree, '.ai-team'), join(worktree, '.ai-team'), { recursive: true });
     }
+    if (['implement', 'verify'].includes(stage)) await this.ensureExclude(worktree);
     const given = await this.provideSkills(worktree, skills);
     const snapshot = await snapshotOf(worktree);
     const linkedSnapshots = new Map(await Promise.all((job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(async l => [l.project, await snapshotOf(l.worktree)])));
@@ -1074,6 +1084,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } finally { if (memoryToken) this.memoryReaders.delete(memoryToken); }
     signal.throwIfAborted();
     if (startHead) await this.guardPaths(job, worktree, startHead, before, agentId, access);
+    if (['implement', 'verify'].includes(stage)) await this.captureEvidence(job, worktree, stage, agentId, stage === 'verify' ? job.revision : null);
     if (opts.task && ['implement', 'research'].includes(stage)) {
       const point = report.checkpoint || {};
       opts.task.checkpoint = scrub({ done: String(point.done || report.summary || '').slice(0, 2000), remaining: String(point.remaining || '').slice(0, 2000), failedAttempts: (Array.isArray(point.failedAttempts) ? point.failedAttempts : []).slice(0, 10).map(x => String(x).slice(0, 1000)), next: String(point.next || '').slice(0, 2000), tests: String(report.tests || '').slice(0, 2000), snapshot: await snapshotOf(worktree), at: now(), by: agentId });
@@ -1126,6 +1137,14 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (moved.length) await git(job.worktree, ['-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'commit', '--allow-empty', '--no-verify', '-m', `AI Team ${job.id}: linked ${moved.join(', ')}`]);
     if ((await run(['git'], ['-C', job.worktree, 'merge-base', '--is-ancestor', job.base, 'HEAD'], { allowFailure: true })).code !== 0) throw new Error(msg("srv.team.branch_khong_con_chua_base_agent"));
     job.revision = await git(job.worktree, ['rev-parse', 'HEAD']);
+    for (const entry of job.evidence || []) if (entry.revision === null) {
+      try {
+        const root = join(this.dataDir, 'evidence', job.id), dir = `${job.revision}/${basename(entry.dir)}`;
+        mkdirSync(join(root, job.revision), { recursive: true });
+        renameSync(join(root, entry.dir), join(root, dir));
+        entry.dir = dir; entry.revision = job.revision;
+      } catch (e) { this.event(job.id, 'controller', 'user', 'EVIDENCE_WARNING', e.message); }
+    }
     job.reviewed = job.verified = job.tested = null;
     this.event(job.id, 'controller', (job.roster || roster(this.config)).manager, 'CHECKPOINT', `Commit ${job.revision.slice(0, 8)}`, { revision: job.revision });
   }
@@ -1221,6 +1240,74 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     return true;
   }
+  evidence(id) {
+    const job = this.get(id);
+    return { items: job.evidence || [], checkResults: job.checkResults || [] };
+  }
+  evidenceFile(id, rel) {
+    this.get(id);
+    const path = safeRel(rel), archive = join(realpathSync(this.dataDir), 'evidence', id);
+    for (let p = archive; p !== realpathSync(this.dataDir); p = dirname(p)) if (lstatSync(p).isSymbolicLink()) throw new Error('Evidence cannot be served through symlinks');
+    const root = realpathSync(archive), file = resolve(root, path);
+    const inside = target => { const rel = relative(root, target); return rel && !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep); };
+    if (!inside(file)) throw new Error('Evidence path is outside the archive');
+    for (let p = file; p !== root; p = dirname(p)) {
+      if (lstatSync(p).isSymbolicLink() || !inside(realpathSync(p))) throw new Error('Evidence cannot be served through symlinks');
+    }
+    if (!lstatSync(file).isFile()) throw new Error('Evidence is not a regular file');
+    return { file, type: kind(file) };
+  }
+  async captureEvidence(job, worktree, stage, agentId, revision) {
+    try {
+      const root = join(this.dataDir, 'evidence', job.id), name = `${skillDir(stage)}-${skillDir(agentId)}`;
+      let dir = `${revision || 'pending'}/${name}${revision ? '' : '-' + randomUUID().slice(0, 8)}`;
+      if (existsSync(join(root, dir))) dir += '-' + randomUUID().slice(0, 8);
+      mkdirSync(join(root, dir), { recursive: true });
+      const result = collect({ worktree, paths: ['.ai-team/evidence/', ...(this.project(job.project).evidence || [])], dest: join(root, dir), maxBytes: (this.config.evidenceMaxMB ?? 50) * 2 ** 20, usedBytes: job.evidenceBytes || 0 });
+      job.evidenceBytes = (job.evidenceBytes || 0) + result.bytes;
+      if (result.files.length || result.skipped.length) job.evidence = [...(job.evidence || []), { revision, stage, agent: agentId, at: now(), dir, files: result.files, skipped: result.skipped }].slice(-200);
+    } catch (e) { this.event(job.id, 'controller', 'user', 'EVIDENCE_WARNING', e.message); }
+  }
+  async runTests(job, cwd, revision, tests) {
+    const manager = (job.roster || roster(this.config)).manager, signal = this.runs.get(job.id)?.abort.signal;
+    for (const test of tests) {
+      const { command, cwd: testCwd = cwd, label } = Array.isArray(test) ? { command: test } : test;
+      this.event(job.id, 'controller', manager, 'TEST_START', (label ? `[${label}] ` : '') + command.join(' '));
+      const started = Date.now(), chunks = [], maxBytes = (this.config.evidenceMaxMB ?? 50) * 2 ** 20;
+      let logBytes = 0, log = null;
+      // Stream the complete output: run() bounds its stdout/stderr buffers.
+      const result = await run(/[\\/]/.test(command[0]) ? [command[0]] : executable(command[0]), command.slice(1), { cwd: testCwd, signal, allowFailure: true,
+        onLine: (line, stream) => {
+          this.event(job.id, 'controller', manager, 'TEST_OUTPUT', line.slice(0, 8000), { stream });
+          const text = redact(line) + '\n'; logBytes += Buffer.byteLength(text);
+          if ((job.evidenceBytes || 0) + logBytes <= maxBytes) chunks.push(text);
+        } });
+      const ms = Date.now() - started;
+      try {
+        const dir = `${revision}/test-controller`, root = join(this.dataDir, 'evidence', job.id);
+        mkdirSync(join(root, dir), { recursive: true });
+        const slug = skillDir(basename(command[0])).slice(0, 60) || 'test';
+        let n = (job.checkResults || []).length + 1, path = `${n}-${slug}.log`;
+        while (existsSync(join(root, dir, path))) path = `${++n}-${slug}.log`;
+        const files = [], skipped = [];
+        if ((job.evidenceBytes || 0) + logBytes > maxBytes) skipped.push({ path, reason: 'Evidence size limit exceeded' });
+        else {
+          writeFileSync(join(root, dir, path), chunks.join(''), { flag: 'wx' });
+          log = `${dir}/${path}`; job.evidenceBytes = (job.evidenceBytes || 0) + logBytes;
+          files.push({ path, bytes: logBytes, type: 'text' });
+        }
+        job.evidence = [...(job.evidence || []), { revision, stage: 'test', agent: 'controller', at: now(), dir, files, skipped }].slice(-200);
+      } catch (e) { this.event(job.id, 'controller', 'user', 'EVIDENCE_WARNING', e.message); }
+      await this.captureEvidence(job, testCwd, 'test', 'controller', revision);
+      this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision, ms, log });
+      job.checkResults = [...(job.checkResults || []), scrub({ command, project: label || job.project, code: result.code, revision, ms, log, output: compressOutput(redact(result.stderr + result.stdout)), at: now() })].slice(-100);
+      if (result.code !== 0) {
+        job.reports.push({ stage: 'test', summary: `Test failed: ${label ? `[${label}] ` : ''}${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
+        return false;
+      }
+    }
+    return true;
+  }
   async testJob(job) {
     // Test của repo liên kết chạy trong worktree của nó; repo chính chạy sau cùng ở job.worktree.
     const tests = [...(job.linked || []).flatMap(l => this.project(l.project).tests.map(command => ({ command, cwd: l.worktree, label: l.project }))), ...this.project(job.project).tests.map(command => ({ command, cwd: job.worktree }))];
@@ -1229,21 +1316,10 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (!tests.length) {
       this.skip(job, 'tests'); job.tested = job.revision;
       this.event(job.id, 'controller', manager, 'TEST_RESULT', msg("srv.team.chua_cau_hinh_lenh_kiem_thu"), { skipped: true, revision: job.revision });
+      await this.captureEvidence(job, job.worktree, 'test', 'controller', job.revision);
       return true;
     }
-    const signal = this.runs.get(job.id).abort.signal;
-    for (const { command, cwd, label } of tests) {
-      this.event(job.id, 'controller', manager, 'TEST_START', (label ? `[${label}] ` : '') + command.join(' '));
-      // Lệnh test gõ dạng "npm test": tự tìm npm.cmd → node + npm-cli.js, không chạy qua cmd.exe.
-      const result = await run(/[\\/]/.test(command[0]) ? [command[0]] : executable(command[0]), command.slice(1), { cwd, signal, allowFailure: true,
-        onLine: (line, stream) => this.event(job.id, 'controller', manager, 'TEST_OUTPUT', line.slice(0, 8000), { stream }) });
-      this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision: job.revision });
-      job.checkResults = [...(job.checkResults || []), scrub({ command, project: label || job.project, code: result.code, revision: job.revision, output: compressOutput(redact(result.stderr + result.stdout)), at: now() })].slice(-100);
-      if (result.code !== 0) {
-        job.reports.push({ stage: 'test', summary: `Test failed: ${label ? `[${label}] ` : ''}${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
-        return false;
-      }
-    }
+    if (!await this.runTests(job, job.worktree, job.revision, tests)) return false;
     if (await git(job.worktree, ['status', '--porcelain']) || await git(job.worktree, ['rev-parse', 'HEAD']) !== job.revision) throw new Error(msg("srv.team.tests_lam_thay_doi_worktree_khong"));
     for (const l of job.linked || []) if (await git(l.worktree, ['status', '--porcelain']) || await git(l.worktree, ['rev-parse', 'HEAD']) !== l.revision) throw new Error(`${l.project}: ${msg("srv.team.tests_lam_thay_doi_worktree_khong")}`);
     job.tested = job.revision; return true;

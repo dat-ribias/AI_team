@@ -6,7 +6,7 @@ import { hash } from './memory.js';
 import { obligations } from './discussions.js';
 
 const git = async (cwd, args) => (await run(['git'], ['-C', cwd, ...args], { timeoutMs: 120000 })).stdout.trim();
-const secret = path => /(^|\/)(\.env(?:\..*)?|auth\.json|controller\.token|id_(?:rsa|ed25519).*|[^/]*\.(?:pem|key|pfx))$/i.test(path);
+export const secret = path => /(^|\/)(\.env(?:\..*)?|auth\.json|controller\.token|id_(?:rsa|ed25519).*|[^/]*\.(?:pem|key|pfx))$/i.test(path);
 function safePath(root, path) {
   if (typeof path !== 'string' || !path || path.length > 1000 || /[\\:\x00-\x1f]|^\/|(^|\/)\.\.?($|\/)|(^|\/)(?:\.git|\.team|\.codex|\.aws)(\/|$)/i.test(path) || secret(path)) throw new Error('Unsafe transfer path');
   const base = realpathSync(root), target = resolve(root, path);
