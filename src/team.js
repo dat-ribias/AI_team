@@ -14,6 +14,8 @@ import { scanSkills, skillRoots } from './skills.js';
 import { collect, kind, safeRel } from './evidence.js';
 
 const now = () => new Date().toISOString();
+const planTasks = tasks => tasks.map(({ kind, instruction, dependsOn, agent, difficulty, files }) => ({ kind, instruction, dependsOn, agent, difficulty, files }));
+const planHash = p => hash(JSON.stringify({ tasks: planTasks(p.tasks), flow: p.flow, summary: p.summary }));
 const terminal = new Set(['merged', 'cancelled', 'done']);
 const git = async (cwd, args) => (await run(['git'], ['-C', cwd, ...args], { timeoutMs: 60_000 })).stdout.trim();
 const snapshotOf = async cwd => {
@@ -152,6 +154,7 @@ export function roster(config) {
 }
 
 export function validateConfig(config) {
+  for (const key of ['planApproval', 'planApprovalRework']) if (config[key] !== undefined && typeof config[key] !== 'boolean') throw new Error(msg("srv.team.plan_approval_invalid"));
   if (config.peerDialogue !== undefined && typeof config.peerDialogue !== 'boolean') throw new Error('peerDialogue must be boolean');
   if (config.evidenceMaxMB != null && (!Number.isFinite(config.evidenceMaxMB) || config.evidenceMaxMB < 0)) throw new Error('evidenceMaxMB must be a non-negative number');
   if (!Array.isArray(config.agents) || !config.agents.length) throw new Error(msg("srv.team.can_it_nhat_mot_thanh_vien"));
@@ -568,6 +571,7 @@ export class Team extends EventEmitter {
       if ((saved.assignSeq || 0) > (job.assignSeq || 0)) {
         Object.assign(job, { assignSeq: saved.assignSeq, override: saved.override, roster: saved.roster, checkers: saved.checkers });
         for (const [i, t] of (saved.tasks || []).entries()) if (t.pinned && job.tasks?.[i]?.instruction === t.instruction && !job.tasks[i].done) Object.assign(job.tasks[i], { agent: t.agent, pinned: true });
+        if (saved.plans?.length === job.plans?.length && saved.plans?.at(-1)?.version === job.plans?.at(-1)?.version) Object.assign(job, { plans: saved.plans, planGate: saved.planGate });
       }
     }
     job.updatedAt = now(); this.db.prepare('INSERT OR REPLACE INTO jobs VALUES (?,?)').run(job.id, JSON.stringify(job)); this.emit('change'); return job;
@@ -630,7 +634,8 @@ export class Team extends EventEmitter {
     const found = await run(['git'], ['-C', root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { allowFailure: true });
     if (exists ? found.code !== 0 : found.code === 0) throw new Error(exists ? 'Local branch does not exist' : 'Branch already exists');
   }
-  async create({ project, goal, files, baseBranch, mode = 'full', sessionId, paused = false, dialogueMode = 'direct', tokenBudget, callBudget }) {
+  async create({ project, goal, files, baseBranch, mode = 'full', sessionId, paused = false, dialogueMode = 'direct', tokenBudget, callBudget, planApproval }) {
+    if (planApproval !== undefined && typeof planApproval !== 'boolean') throw new Error(msg("srv.team.plan_approval_invalid"));
     if (!['off', 'direct', 'independent'].includes(dialogueMode)) throw new Error('Invalid dialogue mode');
     for (const v of [tokenBudget, callBudget]) if (v !== undefined && (!Number.isSafeInteger(v) || v < 1)) throw new Error('Budgets must be positive integers');
     if (typeof goal !== 'string' || !goal.trim() || goal.length > 20000) throw new Error(msg("srv.team.muc_tieu_can_tu_1_20"));
@@ -661,7 +666,7 @@ export class Team extends EventEmitter {
     await git(root, ['worktree', 'add', '-b', branch, worktree, base]);
     for (const l of linked) { await git(l.path, ['worktree', 'add', '-b', l.branch, l.worktree, l.base]); l.revision = l.base; }
     const job = { id, project, goal: goal.trim(), status: 'queued', stage: 'plan', branch, baseBranch, base, worktree,
-      roster: members, dialogueMode, ...(tokenBudget ? { tokenBudget, fixedTokenBudget: true } : {}), ...(callBudget ? { callBudget } : {}), createdAt: now(), round: 0, tasks: [], taskIndex: 0, reports: [], messages: [], revision: base, reviewed: null, verified: null, tested: null, ...(linked.length ? { linked } : {}) };
+      roster: members, dialogueMode, planApproval: planApproval ?? (this.config.planApproval !== false), plans: [], planGate: null, ...(tokenBudget ? { tokenBudget, fixedTokenBudget: true } : {}), ...(callBudget ? { callBudget } : {}), createdAt: now(), round: 0, tasks: [], taskIndex: 0, reports: [], messages: [], revision: base, reviewed: null, verified: null, tested: null, ...(linked.length ? { linked } : {}) };
     job.sessionId = this.sessionFor(project, sessionId);
     const names = await this.attach(job, files);
     // Bộ định tuyến không dùng AI: việc ngắn, không đụng phần nhạy cảm → 1 Builder làm luôn, không gọi Manager.
@@ -1441,10 +1446,30 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   skip(job, ...steps) { job.skipped = [...new Set([...(job.skipped || []), ...steps])]; }
   escalate(job, members, reason) {
     job.fast = false; job.skipped = []; job.stage = 'plan';
+    job.planReason = 'escalate'; job.planTrigger = String(reason).slice(0, 200); job.planGate = null;
     this.event(job.id, 'controller', members.manager, 'ESCALATE', msg("srv.team.escalate", { 0: String(reason).slice(0, 500) }));
+  }
+  recordPlan(job) {
+    const plans = job.plans ||= [], p = { version: (plans.at(-1)?.version || 0) + 1, round: job.round, at: now(),
+      reason: job.planReason || (plans.length ? 'feedback' : 'initial'), trigger: String(job.planTrigger || '').slice(0, 200),
+      summary: job.planSummary, tasks: structuredClone(planTasks(job.tasks)), flow: structuredClone(job.flow.requested) };
+    p.hash = planHash(p); plans.push(p); if (plans.length > 20) plans.shift();
+    job.planGate = null; delete job.planReason; delete job.planTrigger;
+  }
+  planBlocked(job) {
+    const p = job.plans?.at(-1);
+    if (!p || job.fast || job.kind !== 'code' || !job.planApproval || p.hash === job.approvedPlan?.hash) return false;
+    if (job.round > 0 && job.approvedPlan && this.config.planApprovalRework === false) return false;
+    return true;
   }
   async step(job) {
     const members = job.roster || roster(this.config);
+    if (['implement', 'test', 'review', 'verify', 'final'].includes(job.stage) && this.planBlocked(job)) {
+      const p = job.plans.at(-1), proposed = job.planGate?.version === p.version && job.planGate?.hash === p.hash;
+      job.status = 'waiting'; job.planGate = { version: p.version, hash: p.hash, at: proposed ? job.planGate.at : now() }; job.questions = null;
+      if (!proposed) this.event(job.id, 'controller', 'user', 'PLAN_PROPOSED', msg("srv.team.plan_proposed", { 0: p.version }), { version: p.version, hash: p.hash });
+      return;
+    }
     switch (job.stage) {
       case 'plan': {
         const plan = await this.call(job, members.manager, 'plan', msg("srv.team.phan_tich_muc_tieu_va_chia", { 0: members.builders.join(', ') }));
@@ -1492,6 +1517,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         const requested = { reviewer: fl.reviewer ? String(fl.reviewer) : null, verifier: fl.verifier ? String(fl.verifier) : null, steps: Array.isArray(fl.steps) ? fl.steps.filter(x => ['review', 'verify', 'final'].includes(x)) : undefined };
         for (const role of ['reviewer', 'verifier']) if (requested[role] && !valid(requested[role])) this.event(job.id, 'controller', members.manager, 'WARNING', msg("srv.team.flow_invalid_member", { 0: requested[role], 1: role, 2: members[role] || '—' }));
         job.flow = { requested, reviewer: valid(requested.reviewer) ? requested.reviewer : null, verifier: valid(requested.verifier) ? requested.verifier : null, overrides: [] };
+        this.recordPlan(job);
         if (job.obligations?.some(o => o.status === 'unmapped')) { job.status = 'waiting'; job.peerWait = true; job.questions = ['Map or resolve imported discussion obligations before continuing']; }
         this.event(job.id, members.manager, 'team', 'DECISION', `${msg("srv.team.plan_mode", { 0: job.kind, 1: job.rigor })}\n${plan.summary}`, plan.tasks); break;
       }
@@ -1503,7 +1529,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         const all = normFindings(r.objections), serious = all.filter(o => o.impact !== 'low').slice(0, 3);
         this.metric(job, 'objections', serious.length);
         this.event(job.id, who, members.manager, 'CHALLENGE', serious.length ? serious.map(o => `${o.id} [${o.impact}] ${o.claim}`).join('\n') : msg("srv.team.challenge_none"), { objections: all });
-        if (serious.length) { job.challenge = serious; job.stage = 'plan'; } else job.stage = 'implement';
+        if (serious.length) { job.challenge = serious; job.stage = 'plan'; job.planReason = 'challenge'; job.planTrigger = serious.map(o => o.id).join(', '); } else job.stage = 'implement';
         break;
       }
       case 'implement': {
@@ -1560,7 +1586,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         }
         if (job.fast) { this.escalate(job, members, msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round })); break; }
         this.event(job.id, 'controller', members.manager, 'REWORK_REQUEST', msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round }));
-        job.skipped = []; job.stage = 'plan'; break;
+        job.skipped = []; job.stage = 'plan'; job.planReason = 'rework';
+        job.planTrigger = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).map(f => f.id).join(', ') || 'test failed'; break;
       case 'final': await this.finish(job, members); break;
       default: throw new Error(msg("srv.team.stage_khong_hop_le"));
     }
@@ -1614,6 +1641,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (fresh.messages.length > job.messages.length || job.steered) {
         delete job.steered;
         job.stage = 'plan'; job.status = 'queued'; job.reviewed = job.verified = job.tested = null;
+        job.planReason = 'feedback'; job.planTrigger = fresh.messages.at(-1)?.text?.slice(0, 200) || ''; job.planGate = null;
         this.event(job.id, 'controller', (job.roster || roster(this.config)).manager, 'STEERING', msg("srv.team.co_chi_dan_moi_trong_luc"));
       }
       job.messages = fresh.messages;
@@ -1727,13 +1755,20 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const names = await this.attach(job, payload.files);
       job.messages.push({ time: now(), text: payload.message.trim(), ...(names.length ? { attachments: names } : {}) });
       // Steering invalidates a ready-to-merge result; it must go through planning/review again.
-      if (job.status === 'ready') { job.stage = 'plan'; job.reviewed = job.verified = job.tested = null; }
-      if (job.status === 'waiting') { if (!job.peerWait) job.stage = 'plan'; job.questions = null; delete job.peerWait; }
+      if (job.status === 'ready') { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); job.planGate = null; job.reviewed = job.verified = job.tested = null; }
+      if (job.status === 'waiting') { if (!job.peerWait) { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); } job.planGate = null; job.questions = null; delete job.peerWait; }
       // Chat vào task đang dừng/vướng = muốn nhóm làm tiếp: tự xếp hàng lại, chỉ dẫn được giao ở lượt kế tiếp.
       if (['ready', 'waiting', 'paused', 'blocked'].includes(job.status) && !this.runs.has(id)) {
         job.roster = this.jobRoster(job); job.status = 'queued'; job.error = null; setImmediate(() => this.kick());
       }
       this.save(job); this.event(id, 'user', (job.roster || roster(this.config)).manager, 'MESSAGE', payload.message, { delivery: 'next invocation' });
+    } else if (action === 'approve-plan') {
+      if (job.status !== 'waiting' || !job.planGate || this.runs.has(id)) throw new Error(msg("srv.team.plan_not_waiting"));
+      const p = job.plans.at(-1);
+      if (payload.version !== p.version || payload.hash !== p.hash) throw new Error(msg("srv.team.plan_changed"));
+      p.approvedAt = now(); p.approvedBy = 'user'; job.approvedPlan = { version: p.version, hash: p.hash, at: p.approvedAt, by: 'user' };
+      job.planGate = null; job.status = 'queued'; job.error = null; job.roster = this.jobRoster(job); this.save(job);
+      this.event(id, 'user', 'team', 'PLAN_APPROVED', msg("srv.team.plan_approved", { 0: p.version }), { version: p.version, hash: p.hash }); this.kick();
     } else if (action === 'assign') {
       // Đổi người cho riêng việc này (bấm ô trên sơ đồ). Lượt đang chạy không bị ngắt: áp dụng từ lượt sau.
       const agent = this.config.agents.find(a => a.id === payload.agent && a.enabled !== false), building = !Number.isInteger(payload.task) ? payload.role === 'builder' : job.tasks[payload.task]?.kind !== 'review';
@@ -1751,6 +1786,11 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         addBuilder(agent.id); o.drop = [...new Set([...(o.drop || []), payload.from])]; o.add = o.add.filter(x => x !== payload.from);
         for (const t of job.tasks) if (!t.done && t.kind !== 'review' && t.agent === payload.from) Object.assign(t, { agent: agent.id, pinned: true });
       } else throw new Error(msg("srv.team.action_khong_ho_tro"));
+      if (job.planGate) {
+        const p = job.plans.at(-1);
+        for (const [i, t] of job.tasks.entries()) if (!t.auto && p.tasks[i]) p.tasks[i].agent = t.agent;
+        p.hash = planHash(p); job.planGate = { ...job.planGate, hash: p.hash };
+      }
       job.roster = this.jobRoster(job); job.assignSeq = (job.assignSeq || 0) + 1; this.save(job);
       this.event(id, 'user', agent.id, 'REASSIGN', msg(this.runs.has(id) ? "srv.team.assign_next_turn" : "srv.team.assign_ok", { 0: task ? `T${payload.task + 1}` : payload.role, 1: agent.label || agent.id }), { task: payload.task ?? null, role: payload.role ?? null, agent: agent.id });
     } else if (action === 'reassign') {
