@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots } from '../src/team.js';
+import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots, defaultSensitive } from '../src/team.js';
 import { testList } from '../src/accounts.js';
 import { run, childEnv } from '../src/process.js';
 import { parseReport, normalizeCodexQuota, normalizeGoogleQuota, runAgent } from '../src/providers.js';
@@ -43,13 +43,26 @@ test('evidence collection preserves paths, filters credentials and Git, and enfo
   mkdirSync(join(f.path, '.ai-team/evidence'), { recursive: true });
   writeFileSync(join(f.path, '.ai-team/evidence/check.log'), 'passed');
   writeFileSync(join(f.path, '.ai-team/evidence/view.png'), Buffer.from([137, 80, 78, 71]));
-  for (const name of ['.env', 'auth.json', 'controller.token', 'id_ed25519', 'test.key', 'credentials.json', 'my-secret.log']) writeFileSync(join(f.path, '.ai-team/evidence', name), 'dummy');
+  for (const name of ['.env', 'auth.json', 'controller.token', 'id_ed25519', 'test.key', 'credentials.json', 'my-secret.log', 'passwords.txt', 'access-token.json', 'auth.log']) writeFileSync(join(f.path, '.ai-team/evidence', name), 'dummy');
   const paths = ['.ai-team/evidence', '.git', '../outside', '..\\outside', f.path, 'C:relative', 'bad\0path'];
-  const result = collect({ worktree: f.path, paths, dest, maxBytes: 100 });
+  const result = collect({ worktree: f.path, paths, dest, maxBytes: 100, exclude: new RegExp(defaultSensitive, 'i') });
   assert.equal(result.bytes, 10);
   assert.deepEqual(result.files.map(f => [f.path, f.type]), [['.ai-team/evidence/check.log', 'text'], ['.ai-team/evidence/view.png', 'image']]);
   assert.equal(readFileSync(join(dest, '.ai-team/evidence/check.log'), 'utf8'), 'passed');
-  assert.equal(result.skipped.filter(f => f.reason === 'Credential file').length, 7);
+  assert.equal(result.skipped.filter(f => f.reason === 'Credential file').length, 10);
+  for (const name of ['passwords.txt', 'access-token.json', 'auth.log']) {
+    assert(!result.files.some(f => f.path === `.ai-team/evidence/${name}`));
+    assert(result.skipped.some(f => f.path === `.ai-team/evidence/${name}` && f.reason === 'Credential file'));
+  }
+  writeFileSync(join(f.path, '.ai-team/evidence/private-notes.md'), 'dummy');
+  const custom = collect({ worktree: f.path, paths: ['.ai-team\\evidence\\private-notes.md'], dest: join(f.data, 'custom'), maxBytes: 100, exclude: /private-notes/i });
+  assert.equal(custom.files.length, 0);
+  assert.deepEqual(custom.skipped, [{ path: '.ai-team/evidence/private-notes.md', reason: 'Credential file' }]);
+  mkdirSync(join(f.path, '.ai-team/evidence/private-notes'));
+  writeFileSync(join(f.path, '.ai-team/evidence/private-notes/check.log'), 'dummy');
+  const directory = collect({ worktree: f.path, paths: ['.ai-team\\evidence\\private-notes'], dest: join(f.data, 'directory'), maxBytes: 100, exclude: /private-notes/i });
+  assert.equal(directory.files.length, 0);
+  assert.deepEqual(directory.skipped, [{ path: '.ai-team/evidence/private-notes', reason: 'Credential file' }]);
   assert(result.skipped.some(f => f.reason === 'Git metadata'));
   assert.equal(result.skipped.filter(f => f.reason === 'Unsafe evidence path').length, 5);
   const limited = collect({ worktree: f.path, paths: ['.ai-team/evidence/check.log'], dest: join(f.data, 'limited'), maxBytes: 10, usedBytes: 5 });
@@ -1017,13 +1030,13 @@ test('fast path escalates to the Manager when tests fail; risk gate forces a rev
   const f = await fixture(); f.config.projects[0].tests = [[process.execPath, '-e', "process.exit(require('fs').existsSync('ok.flag')?0:1)"]];
   const team = new Team(f.config, f.data); t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello text', mode: 'fast' });
-  await settle(team, job.id, 'blocked');
+  await settle(team, job.id, 'blocked', 60000);
   const ev = team.events(job.id);
   assert(ev.some(e => e.type === 'ESCALATE')); assert(ev.some(e => e.details?.stage === 'plan'));
   const f2 = await fixture(); f2.config.sensitivePaths = 'hello';
   const team2 = new Team(f2.config, f2.data); t.after(() => team2.close());
   const j2 = await team2.create({ project: 'test', goal: 'Update hello text', mode: 'fast' });
-  const r2 = await settle(team2, j2.id, 'ready');
+  const r2 = await settle(team2, j2.id, 'ready', 60000);
   assert.equal(r2.reviewed, r2.revision); assert(!r2.skipped.includes('review'));
 });
 

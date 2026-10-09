@@ -17,7 +17,7 @@ export function kind(path) {
   return 'other';
 }
 
-export function collect({ worktree, paths, dest, maxBytes, usedBytes = 0 }) {
+export function collect({ worktree, paths, dest, maxBytes, usedBytes = 0, exclude }) {
   if (!Number.isFinite(maxBytes) || maxBytes < 0 || !Number.isFinite(usedBytes) || usedBytes < 0) throw new Error('Invalid evidence size limit');
   mkdirSync(dest, { recursive: true });
   const root = realpathSync(worktree), files = [], skipped = [], seen = new Set();
@@ -31,6 +31,7 @@ export function collect({ worktree, paths, dest, maxBytes, usedBytes = 0 }) {
     seen.add(rel);
     if (rel.split('/').some(p => p.toLowerCase() === '.git')) { skipped.push({ path: rel, reason: 'Git metadata' }); return; }
     if (rel.split('/').some(secret) || /credentials|secret/i.test(rel)) { skipped.push({ path: rel, reason: 'Credential file' }); return; }
+    if (exclude?.test(rel)) { skipped.push({ path: rel, reason: 'Credential file' }); return; }
     if (full) { skipped.push({ path: rel, reason: 'Evidence size limit exceeded' }); return; }
     const source = resolve(root, rel);
     try {

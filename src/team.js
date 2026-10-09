@@ -82,7 +82,7 @@ export function computeSlots({ freeGB, totalGB, running = 0, reserveGB = 4, ramP
   return { start: Math.max(0, Math.min(maxAgents - running, Math.max(running ? 0 : 1, fit))), hardStop: false };
 }
 export const rolesOf = (r, id) => ROLE_KEYS.filter(k => k === 'builder' ? r.builders.includes(id) : r[k] === id);
-const defaultSensitive = String.raw`(^|/)(\.env|\.github/|migrations?/|dockerfile|docker-compose|package(-lock)?\.json$|pnpm-lock|yarn\.lock|[^/]*(secret|credential|auth|password|token|permission)[^/]*)`;
+export const defaultSensitive = String.raw`(^|/)(\.env|\.github/|migrations?/|dockerfile|docker-compose|package(-lock)?\.json$|pnpm-lock|yarn\.lock|[^/]*(secret|credential|auth|password|token|permission)[^/]*)`;
 const stageGuide = {
   plan: `As team lead, you decide how much process the goal needs. Small, low-risk work: return ONE task with rigor "light". Larger work: split into 1-12 tasks.
 Independent tasks run IN PARALLEL. For every task give "dependsOn" (indexes of EARLIER tasks it needs, [] = can start immediately), "estMinutes" (your time estimate) and, for code, "files" (paths it will edit). Tasks whose files overlap never run at the same time; parallel code tasks run in separate worktrees and are merged before tests. Split only when it really saves time.
@@ -1280,7 +1280,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       let dir = `${revision || 'pending'}/${name}${revision ? '' : '-' + randomUUID().slice(0, 8)}`;
       if (existsSync(join(root, dir))) dir += '-' + randomUUID().slice(0, 8);
       mkdirSync(join(root, dir), { recursive: true });
-      const result = collect({ worktree, paths: ['.ai-team/evidence/', ...(this.project(job.project).evidence || [])], dest: join(root, dir), maxBytes: (this.config.evidenceMaxMB ?? 50) * 2 ** 20, usedBytes: job.evidenceBytes || 0 });
+      const result = collect({ worktree, paths: ['.ai-team/evidence/', ...(this.project(job.project).evidence || [])], dest: join(root, dir), maxBytes: (this.config.evidenceMaxMB ?? 50) * 2 ** 20, usedBytes: job.evidenceBytes || 0, exclude: new RegExp(this.config.sensitivePaths || defaultSensitive, 'i') });
       job.evidenceBytes = (job.evidenceBytes || 0) + result.bytes;
       if (result.files.length || result.skipped.length) job.evidence = [...(job.evidence || []), { revision, stage, agent: agentId, at: now(), dir, files: result.files, skipped: result.skipped }].slice(-200);
     } catch (e) { this.event(job.id, 'controller', 'user', 'EVIDENCE_WARNING', e.message); }
