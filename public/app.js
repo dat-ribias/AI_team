@@ -25,6 +25,7 @@ applyTheme(store.get('theme'));
 const clock = time => time ? new Date(time).toLocaleString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo' }) : t('ui.common.unknown');
 let names = {};
 let state, selected, events = [], filter, tab = 'messages', rendering = false, again = false, eventsOf, loginId;
+let planView = { job: null, version: null };
 async function api(path, data) {
   const r = await fetch('/api/' + path, { method: data ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Team-Request': '1' }, ...(data ? { body: JSON.stringify(data) } : {}) });
   const result = await r.json().catch(() => ({}));
@@ -507,7 +508,21 @@ async function saveSlot() {
 }
 // Sơ đồ dựng lại từ roster + plan của task đang chọn: thêm member hay Manager đổi người là tự vẽ lại.
 function drawFlow() {
-  const job = state.jobs.find(j => j.id === selected), r = job?.roster || state.roster;
+  const current = state.jobs.find(j => j.id === selected), plans = current?.plans || [], latest = plans.at(-1);
+  if (planView.job !== selected) planView = { job: selected, version: null };
+  const plan = plans.find(p => p.version === planView.version) || latest, readonly = !!plan && plan !== latest;
+  const job = readonly ? { ...current, tasks: plan.tasks, flow: plan.flow, round: plan.round, running: [], current: null, checkers: {}, override: {}, skipped: [] } : current, r = job?.roster || state.roster;
+  let history = '';
+  if (plans.length > 1 || latest && current.planGate) {
+    const previous = plans[plans.indexOf(plan) - 1], before = previous?.tasks || [], after = plan.tasks || [];
+    const remaining = [...before]; let added = 0, reassigned = 0;
+    for (const task of after) {
+      const i = remaining.findIndex(x => x.instruction === task.instruction);
+      if (i < 0) added++; else { if (remaining[i].agent !== task.agent) reassigned++; remaining.splice(i, 1); }
+    }
+    const diff = previous ? added || remaining.length || reassigned ? t('ui.plan.diff', { added, removed: remaining.length, reassigned }) : t('ui.plan.noDiff') : '';
+    history = `<div class="plan-history"><nav class="plan-versions" aria-label="${esc(t('ui.plan.history'))}">${plans.map(p => `<button type="button" data-plan-version="${p.version}" aria-pressed="${p === plan}" class="${p === plan ? 'selected' : ''}">${esc(t('ui.plan.version', { v: p.version }))}${p === latest ? ' · ' + esc(t(current.planGate ? 'ui.plan.draft' : 'ui.plan.current')) : ''}</button>`).join('')}</nav>${readonly ? `<b class="plan-readonly">${esc(t('ui.plan.readonly'))}</b>` : ''}<p>${esc(t('ui.plan.reason.' + plan.reason))}${plan.trigger ? ' · ' + esc(plan.trigger) : ''}</p>${plan.summary ? `<p>${esc(plan.summary)}</p>` : ''}${diff ? `<p class="muted">${esc(diff)}</p>` : ''}</div>`;
+  }
   const byId = Object.fromEntries(state.agents.map(a => [a.id, a]));
   const graph = !!job?.tasks?.some(x => x.kind === 'review'), gtasks = graph ? job.tasks : [];
   const depsOf = (x, i) => Array.isArray(x.dependsOn) ? x.dependsOn : i ? [i - 1] : [];
@@ -528,7 +543,7 @@ function drawFlow() {
   place('verifier', 945 + shift, cy, 172);
   place('merge', 1155 + shift, cy, 92);
   const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
-  const runs = runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
+  const runs = readonly ? [] : runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
   const active = new Set(job?.status === 'running' && runs.length ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
   const edge = (a, b, cls, label = '') => {
     const A = nodes[a], B = nodes[b]; if (!A || !B) return '';
@@ -541,6 +556,7 @@ function drawFlow() {
     return `${tierLabel(a.tier)} · ${h ? `${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}` : ((a.model || t('ui.flow.defaultModel')) + (a.effort ? '/' + a.effort : ''))}`;
   };
   const box = (key, title, subtitle, agentId, slot, task) => {
+    if (readonly) slot = null;
     const n = nodes[key], a = agentId && byId[agentId];
     const h = a ? agentHealth(a) : null;
     const cls = [
@@ -582,12 +598,14 @@ function drawFlow() {
   const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
     + gtasks.map((x, i) => { const who = x.ranBy || x.agent, wait = depsOf(x, i).filter(d => gtasks[d] && !gtasks[d].done).map(d => 'T' + (d + 1)); return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review ' + depsOf(x, i).map(d => 'T' + (d + 1)).join(',') : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
-      (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
+      readonly ? cut(x.instruction, 40) : (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
     + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', rvId), skipped('review') ? t('ui.flow.skipped') : forced('review') || sub(rvId), rvId || null, 'reviewer')
     + box('verifier', named('Verify', vfId), skipped('verify') ? t('ui.flow.skipped') : forced('verify') || sub(vfId), vfId || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
   // Mỗi cột là một đợt: task cùng cột chạy song song, cột sau chờ cột trước theo mũi tên.
   const waves = graph ? perCol.map((n, c) => `<text class="edge-label wave" x="${365 + c * colW + 86}" y="${top + 4}" text-anchor="middle">${esc(t(n > 1 ? 'ui.flow.waveParallel' : 'ui.flow.wave', { n: c + 1 }))}</text>`).join('') : '';
-  $('flow').innerHTML = builders.length || r.manager ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`;
+  const planTasks = plan && !graph ? `<ul class="task-list plan-tasks">${job.tasks.map((x, i) => `<li><b>T${i + 1}</b> · ${esc(byId[x.agent]?.label || x.agent || t('ui.flow.notChosen'))}<br>${esc(x.instruction)}</li>`).join('')}</ul>` : '';
+  $('flow').innerHTML = history + planTasks + (builders.length || r.manager || graph ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
+  document.querySelectorAll('[data-plan-version]').forEach(b => b.onclick = () => { const version = Number(b.dataset.planVersion); planView.version = version === latest.version ? null : version; drawState(); });
   // CSP cấm style="" trong markup; đặt qua CSSOM để vòng sáng không giật lại từ đầu mỗi lần vẽ lại.
   const phase = `-${(Date.now() % 2000) / 1000}s`; $('flow').querySelectorAll('rect.ring').forEach(x => { x.style.animationDelay = phase; });
   const inRoster = new Set([r.manager, r.reviewer, r.verifier, ...r.builders]);
@@ -625,7 +643,7 @@ function drawInspector() {
     return `<div class="progress-box"><span class="dot green"></span><div>${lines.map(l => `<b>${esc(l)}</b>`).join('<br>')}<br><span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
-  const waiting = job.status === 'waiting' ? `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
+  const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b><button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
   const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${runningOf(job).some(r => r.task === i) ? 'current' : ''} ${x.done ? 'done' : ''}"><b>${x.done ? '✓ ' : ''}T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}${x.estMinutes ? ' · ~' + esc(duration(x.estMinutes)) : ''}${x.dependsOn?.length ? ' · ' + esc(t('ui.inspector.after', { list: x.dependsOn.map(d => 'T' + (d + 1)).join(', ') })) : ''}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}${x.skills?.length ? `<br><span class="skill-tags">${x.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</span>` : ''}${x.contextGaps?.length ? `<details><summary class="muted">${esc(t('ui.inspector.contextGaps', { n: x.contextGaps.length }))}</summary><ul>${x.contextGaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></details>` : ''}</li>`).join('')}</ul>` : '';
   const openDiscussions = new Set([...$('inspector').querySelectorAll('details[data-discussion][open]')].map(d => d.dataset.discussion));
   const discussions = (job.discussions || []).map(d => `<details data-discussion="${esc(d.id)}" ${openDiscussions.has(d.id) ? 'open' : ''}><summary>${esc(d.id)} · ${esc(d.topic)} · ${esc(t('ui.peer.' + d.status))} (${d.rounds}/2)</summary><p class="muted">${esc(names[d.owner || d.from] || d.owner || d.from)} → ${esc(names[d.to] || d.to)} · ${esc(d.stage)}${d.task != null ? ' / T' + (d.task + 1) : ''}</p><p>${esc(d.claim)}</p>${d.assessment ? `<p><b>${esc(t('ui.peer.independent'))}</b><br>${esc(d.assessment.answer)}</p>` : ''}${(d.claims || []).map(c => `<p><b>${esc(c.id)}</b> · ${esc(c.statement)} · ${esc(c.status)}${c.judgment ? ' · ' + esc(t('ui.peer.' + c.judgment.transition)) : ''} <button data-score-thread="${esc(d.id)}" data-claim="${esc(c.id)}" ${['running','queued','merging'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.peer.score'))}</button></p>`).join('')}${(d.messages || []).map(m => `<p><b>${esc(m.id || '')}${m.replyTo ? ' → ' + esc(m.replyTo) : ''} · ${esc(names[m.by] || m.by)} · ${esc(t('ui.peer.' + m.type))}</b> ${esc((m.claimIds || []).join(', '))}<br>${esc(m.text)}</p>${m.evidence?.length ? `<ul>${m.evidence.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}<small class="muted">${esc(t('ui.peer.snapshot'))}: ${esc(m.snapshot?.commit?.slice(0, 12) || '—')} / ${esc(m.snapshot?.fingerprint?.slice(0, 12) || m.snapshot?.dirtyHash?.slice(0, 12) || '—')}</small>`).join('')}${d.evidence?.length ? `<ul>${d.evidence.map(e => `<li>${esc(e.id)} · ${esc(e.kind)} · ${esc(t('ui.peer.' + e.status))} · ${esc(e.source)}</li>`).join('')}</ul>` : ''}${d.decision ? `<p><b>${esc(t('ui.peer.' + d.decision.outcome))}</b><br>${esc(d.decision.choice || d.decision.reason)}<br>${esc(d.decision.reason)}</p><ul>${(d.decision.evidence || []).map(e => `<li>${esc(e)}</li>`).join('')}</ul>${d.decision.conditions?.length ? `<p>${esc(t('ui.peer.conditions'))}: ${esc(d.decision.conditions.join('; '))}</p>` : ''}${d.decision.remaining?.length ? `<p>${esc(t('ui.peer.obligations'))}: ${esc(d.decision.remaining.join('; '))}</p>` : ''}` : ''}${d.status !== 'resolved' && (idle || job.status === 'waiting') ? `<button data-obligation="${esc(d.id)}">${esc(t('ui.peer.map'))}</button>` : ''}</details>`).join('');
@@ -668,6 +686,7 @@ function drawInspector() {
   });
   if ($('merge')) $('merge').onclick = () => attempt(openMerge);
   if ($('send-answer')) $('send-answer').onclick = () => attempt(async () => { const v = $('answer').value.trim(); if (!v) return; await api(`jobs/${selected}/control`, { action: 'message', message: v }); await refresh(); });
+  if ($('approve-plan')) $('approve-plan').onclick = () => attempt(async () => { const gate = state.jobs.find(j => j.id === selected)?.planGate; if (!gate) return; await api(`jobs/${selected}/control`, { action: 'approve-plan', version: gate.version, hash: gate.hash }); await refresh(); });
 }
 async function showDiff() { const result = await api(`jobs/${selected}/diff`); $('diff-content').textContent = result.diff || t('ui.diff.empty'); if (result.status) $('diff-content').textContent += '\n\nWorking tree:\n' + result.status; $('diff-dialog').showModal(); }
 const evidenceURL = (id, path) => '/api/jobs/' + encodeURIComponent(id) + '/evidence-file?path=' + encodeURIComponent(path);
@@ -1045,7 +1064,7 @@ document.querySelectorAll('[data-job-filter]').forEach(b => {
   };
 });
 $('compare-modes').onchange = () => { $('token-budget').required = $('call-budget').required = $('compare-modes').checked; };
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
 let scoreTarget, obligationTarget;
 $('close-claim-score').onclick = () => $('claim-score-dialog').close();
 $('close-obligation').onclick = () => $('obligation-dialog').close();
