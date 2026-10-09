@@ -776,10 +776,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const checker = id => id === (job.checkers?.reviewer || members.reviewer) || verifies && id === members.verifier;
     // Tải hiện tại (kể cả task vừa xếp trong đợt này): một tài khoản nhận được nhiều slot không có nghĩa là nên dồn hết việc cho nó.
     const load = id => this.loadMap?.get(id) ?? this.useOf(id);
-    if (fits(task.agent) && !checker(task.agent) && !load(task.agent)) return task.agent;
     const remaining = id => this.remaining(id) ?? 50;
+    // Đủ quota cho cả task: ngưỡng tối thiểu + %/phút × phút dự kiến. Chỉ là ưu tiên, không chặn: hết giữa chừng thì HANDOVER.
+    // ponytail: hệ số %/phút cố định (quotaPercentPerMinute); học từ quota_history nếu cần chính xác hơn.
+    const enough = id => remaining(id) >= (this.config.minRemainingPercent ?? 15) + this.estimate(id, task) * (this.config.quotaPercentPerMinute ?? 0.3);
+    if (fits(task.agent) && !checker(task.agent) && !load(task.agent) && enough(task.agent)) return task.agent;
     // Ưu tiên người đang rảnh, rồi người không kiêm review/verify (kiêm thì checker() tự đổi người kiểm), rồi người Manager chọn, rồi mạnh nhất còn quota.
-    const pool = members.builders.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
+    const pool = members.builders.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || enough(y) - enough(x) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
     if (fits(task.agent) && (!pool.length || checker(pool[0]))) return task.agent;
     if (pool.length) return pool[0];
     // Người mạnh hết quota/đang tắt: tăng mức suy luận cho người còn quota nếu nhờ đó đủ năng lực.
@@ -1139,6 +1142,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const ready = readyAll;
     const head0 = code ? await git(job.worktree, ['rev-parse', 'HEAD']) : null;
     const overlap = (a, b) => !a.files?.length || !b.files?.length || a.files.some(x => b.files.some(y => x === y || x.startsWith(y.replace(/\/?$/, '/')) || y.startsWith(x.replace(/\/?$/, '/'))));
+    await this.freshenQuota(job.roster || roster(this.config));
     const limit = 1 + this.capacity().start, busy = this.fullAgents(), batch = [], use = new Map(this.slotKeys().map(k => k.split('#')[0]).reduce((m, id) => m.set(id, (m.get(id) || 0) + 1), new Map()));
     this.loadMap = use;
     for (const [task, i] of ready) {
@@ -1787,6 +1791,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     this.db.prepare('INSERT OR REPLACE INTO quotas VALUES (?,?)').run(agentId, JSON.stringify(q));
     this.db.prepare('INSERT INTO quota_history (agent,body) VALUES (?,?)').run(agentId, JSON.stringify(q));
     this.emit('change');
+  }
+  // Trước khi giao việc: quota của builder rảnh đã cũ (>5 phút hoặc chưa đọc được) thì đọc lại, tối đa 30 giây, không quá 1 lần/2 phút.
+  async freshenQuota(members) {
+    const stale = id => { const q = this.quota(id), p = this.config.agents.find(a => a.id === id)?.provider; return !['mock', 'claude'].includes(p) && !this.isBusy(id) && (!q.checkedAt || Date.now() - Date.parse(q.checkedAt) > 5 * 60_000); };
+    if (this.refreshing || Date.now() - (this.lastFreshen || 0) < 120_000 || !members.builders.some(stale)) return;
+    this.lastFreshen = Date.now();
+    await Promise.race([this.refreshQuota().catch(() => {}), new Promise(r => setTimeout(r, 30_000))]);
   }
   async refreshQuota() {
     if (this.refreshing || this.closed || this.accountLoginBusy) return; this.refreshing = true;

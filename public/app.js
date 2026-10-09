@@ -744,8 +744,8 @@ function drawTimeline() {
     return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
   }).join('') : `<div class="empty"><span class="empty-icon">◎</span><b>${esc(t('ui.timeline.emptyTitle'))}</b><span>${esc(t('ui.timeline.emptyText'))}</span></div>`;
   // Agent đang chạy: bong bóng "đang soạn" ba chấm.
-  // Mọi AI đang chạy trong phiên này đều hiện "đang gõ": việc đang xem trước, việc khác cùng phiên kèm mã việc.
-  const sessionRuns = [job, ...state.jobs.filter(j => j.id !== job.id && j.project === job.project && j.sessionId && j.sessionId === job.sessionId)].flatMap(j => runningOf(j).map(r => ({ ...r, job: j.id })));
+  // Chỉ AI đang chạy cho đúng việc đang xem; việc khác cùng phiên đã hiện ở sơ đồ (viền đứt "đang làm việc khác").
+  const sessionRuns = job ? runningOf(job).map(r => ({ ...r, job: job.id })) : [];
   for (const cur of sessionRuns) if (!filter || filter === cur.agent) timeline.insertAdjacentHTML('beforeend', `<article class="chat-msg typing">${avatar(cur.agent)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[cur.agent] || cur.agent)}</strong><span class="chat-to">${cur.job !== job.id ? `#${esc(cur.job.slice(0, 8))} · ` : ''}${esc(t('ui.chat.typing', { stage: cur.task != null ? `${cur.stage} T${cur.task + 1}` : cur.stage }))}</span></div><div class="chat-bubble"><span class="dots"><i></i><i></i><i></i></span></div></div></article>`);
   if (atBottom) timeline.scrollTop = timeline.scrollHeight;
 }
