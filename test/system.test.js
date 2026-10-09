@@ -8,9 +8,10 @@ import { testList } from '../src/accounts.js';
 import { run, childEnv } from '../src/process.js';
 import { parseReport, normalizeCodexQuota, normalizeGoogleQuota, runAgent } from '../src/providers.js';
 import { exportTransfer, importTransfer } from '../src/transfer.js';
-import { fileHash, MemoryStore } from '../src/memory.js';
+import { fileHash, MemoryStore, hash } from '../src/memory.js';
 import { ledger, question, answer, decide, refreshLedger } from '../src/discussions.js';
 import { collect, kind, safeRel } from '../src/evidence.js';
+import { msg } from '../src/i18n.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
@@ -20,7 +21,7 @@ async function fixture() {
   writeFileSync(join(path, 'hello.txt'), 'Hello!\n');
   await run(['git'], ['-C', path, 'add', '.']);
   await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial']);
-  const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100,
+  const config = { demo: true, planApproval: false, maxRamPercent: 100, maxCpuPercent: 100,
     agents: ['codex-1', 'codex-2', 'codex-3', 'codex-4', 'gemini'].map(id => ({ id, label: id, role: id, provider: 'mock' })),
     pipeline: { manager: 'codex-1', builders: ['codex-2', 'codex-4'], reviewer: 'gemini', verifier: 'codex-3' },
     projects: [{ id: 'test', path, tests: [[process.execPath, '-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('hello.txt','utf8'),'Hello from AI Team demo!\\n')"]] }],
@@ -37,6 +38,164 @@ async function settle(team, id, expected, timeoutMs = 20000) {
   }
   assert.fail(`Timeout: ${JSON.stringify(team.get(id))}`);
 }
+
+async function approvalAgent(agent, task, prompt, opts) {
+  if (task.stage === 'plan') return { summary: `Plan round ${task.round}: ${task.messages.map(m => m.text).join('; ')}`,
+    kind: /research/i.test(task.goal) ? 'research' : 'code', rigor: 'standard', risk: 'low',
+    tasks: [{ kind: 'implement', agent: 'codex-2', difficulty: 2, instruction: 'Update hello.txt', files: ['hello.txt'], dependsOn: [] }] };
+  if (task.stage === 'implement') return runAgent(agent, task, prompt, opts);
+  return { summary: 'Checked', status: 'completed', verdict: 'approved', findings: [], objections: [] };
+}
+
+test('plan approval: code waits before execution, including every challenge exit and resume', async t => {
+  for (const challenge of ['none', 'skipped', 'approved', 'revised']) {
+    const f = await fixture(); delete f.config.planApproval;
+    const calls = [], team = new Team(f.config, f.data, { runAgent: async (...args) => {
+      calls.push(args[1].stage);
+      const r = await approvalAgent(...args);
+      if (args[1].stage === 'plan' && challenge !== 'none') r.rigor = 'strict';
+      if (args[1].stage === 'challenge' && challenge === 'revised') r.objections = [{ id: 'C1', claim: 'Revise the plan', impact: 'high' }];
+      return r;
+    } }); t.after(() => team.close());
+    if (challenge === 'skipped') team.challenger = () => null;
+    const job = await team.create({ project: 'test', goal: 'Update hello' });
+    const waiting = await settle(team, job.id, 'waiting');
+    assert.equal(waiting.planApproval, true); assert.equal(waiting.stage, 'implement'); assert.equal(waiting.questions, null);
+    assert.equal(waiting.plans[0].reason, 'initial');
+    const snapshot = waiting.plans.at(-1);
+    assert.equal(snapshot.hash, hash(JSON.stringify({ tasks: snapshot.tasks.map(({ kind, instruction, dependsOn, agent, difficulty, files }) => ({ kind, instruction, dependsOn, agent, difficulty, files })), flow: snapshot.flow, summary: snapshot.summary })));
+    assert.equal(waiting.planGate.version, challenge === 'revised' ? 2 : 1);
+    if (challenge === 'revised') { assert.equal(waiting.plans[1].reason, 'challenge'); assert.equal(waiting.plans[1].trigger, 'C1'); }
+    assert(!calls.includes('implement')); assert(!waiting.reports.some(r => r.stage === 'implement'));
+    assert.deepEqual(team.events(job.id).filter(e => e.type === 'PLAN_PROPOSED').map(e => e.details), [{ version: waiting.planGate.version, hash: waiting.planGate.hash }]);
+    await team.control(job.id, 'resume');
+    await settle(team, job.id, 'waiting');
+    assert.equal(team.events(job.id).filter(e => e.type === 'PLAN_PROPOSED').length, 1);
+    for (const stage of ['implement', 'test', 'review', 'verify', 'final']) {
+      const guarded = { ...team.get(job.id), stage, status: 'running' };
+      await team.step(guarded); assert.equal(guarded.status, 'waiting');
+    }
+    assert(!calls.includes('implement'));
+    assert.equal(team.planBlocked({ ...waiting, plans: [] }), false, 'legacy jobs remain resumable');
+  }
+});
+
+test('plan approval: stale version/hash and invalid state are rejected; approval runs the saved plan', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data, { runAgent: approvalAgent }); t.after(() => team.close());
+  for (const key of ['planApproval', 'planApprovalRework']) assert.throws(() => validateConfig({ ...f.config, [key]: 'yes' }), { message: msg('srv.team.plan_approval_invalid') });
+  await assert.rejects(team.create({ project: 'test', goal: 'Update hello', planApproval: 'yes' }), { message: msg('srv.team.plan_approval_invalid') });
+  const job = await team.create({ project: 'test', goal: 'Update hello', planApproval: true });
+  const waiting = await settle(team, job.id, 'waiting'), p = waiting.plans.at(-1);
+  await assert.rejects(team.control(job.id, 'approve-plan', { version: p.version, hash: 'stale' }), { message: msg('srv.team.plan_changed') });
+  await assert.rejects(team.control(job.id, 'approve-plan', { version: p.version + 1, hash: p.hash }), { message: msg('srv.team.plan_changed') });
+  team.runs.set(job.id, {});
+  try { await assert.rejects(team.control(job.id, 'approve-plan', p), { message: msg('srv.team.plan_not_waiting') }); }
+  finally { team.runs.delete(job.id); }
+  const approved = await team.control(job.id, 'approve-plan', p);
+  assert.equal(approved.stage, 'implement'); assert.equal(approved.taskIndex, waiting.taskIndex); assert.equal(approved.planGate, null);
+  assert.deepEqual(approved.approvedPlan, { version: p.version, hash: p.hash, at: approved.plans[0].approvedAt, by: 'user' });
+  assert.equal(approved.plans[0].approvedBy, 'user');
+  const ready = await settle(team, job.id, 'ready');
+  assert(ready.reports.some(r => r.stage === 'implement'));
+  assert.deepEqual(ready.plans[0].tasks, p.tasks, 'execution does not mutate the snapshot');
+  assert.equal(team.planBlocked({ ...ready, tasks: [...ready.tasks, { auto: true }] }), false);
+  assert.deepEqual(team.events(job.id).find(e => e.type === 'PLAN_APPROVED').details, { version: p.version, hash: p.hash });
+  await assert.rejects(team.control(job.id, 'approve-plan', p), { message: msg('srv.team.plan_not_waiting') });
+});
+
+test('plan approval: assignment updates the gated hash, survives stale saves and uses the pinned member', async t => {
+  const f = await fixture(), calls = [], team = new Team(f.config, f.data, { runAgent: async (...args) => { calls.push([args[1].stage, args[0].id]); return approvalAgent(...args); } }); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello', planApproval: true });
+  const stale = await settle(team, job.id, 'waiting'), old = stale.plans.at(-1);
+  await team.control(job.id, 'assign', { task: 0, agent: 'codex-4' });
+  const assigned = team.get(job.id), p = assigned.plans.at(-1);
+  assert.notEqual(p.hash, old.hash); assert.equal(assigned.planGate.hash, p.hash); assert.equal(p.tasks[0].agent, 'codex-4');
+  await team.control(job.id, 'assign', { role: 'reviewer', agent: 'codex-3' });
+  assert.equal(team.get(job.id).plans.at(-1).hash, p.hash, 'role overrides do not change the hash');
+  team.save(stale);
+  assert.equal(team.get(job.id).plans.at(-1).hash, p.hash); assert.equal(team.get(job.id).planGate.hash, p.hash);
+  await assert.rejects(team.control(job.id, 'approve-plan', old), { message: msg('srv.team.plan_changed') });
+  await team.control(job.id, 'approve-plan', p);
+  const ready = await settle(team, job.id, 'ready');
+  assert(calls.some(([stage, agent]) => stage === 'implement' && agent === 'codex-4'));
+  await team.control(job.id, 'assign', { role: 'builder', from: 'codex-4', agent: 'codex-2' });
+  assert.equal(team.get(job.id).plans.at(-1).hash, ready.plans.at(-1).hash, 'assignment outside the gate preserves history');
+});
+
+test('plan approval: feedback creates a new version; snapshots keep the latest 20 monotonic versions', async t => {
+  const f = await fixture(), team = new Team(f.config, f.data, { runAgent: approvalAgent }); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello', planApproval: true });
+  const waiting = await settle(team, job.id, 'waiting');
+  const feedback = 'Please revise the greeting. '.repeat(12);
+  const queued = await team.control(job.id, 'message', { message: feedback });
+  assert.equal(queued.planGate, null);
+  const revised = await settle(team, job.id, 'waiting'), p = revised.plans.at(-1);
+  assert.equal(p.version, 2); assert.equal(p.reason, 'feedback'); assert.equal(p.trigger, feedback.trim().slice(0, 200));
+  assert.equal(revised.planGate.version, 2); assert.notEqual(p.hash, waiting.plans[0].hash); assert.deepEqual(revised.plans[0], waiting.plans[0]);
+  assert(!revised.reports.some(r => r.stage === 'implement'));
+  for (let i = 0; i < 20; i++) team.recordPlan(revised);
+  assert.equal(revised.plans.length, 20); assert.equal(revised.plans[0].version, 3); assert.equal(revised.plans.at(-1).version, 22);
+  team.save(revised);
+  const stale = team.get(job.id);
+  await team.control(job.id, 'assign', { task: 0, agent: 'codex-4' });
+  team.recordPlan(stale); team.save(stale);
+  assert.equal(team.get(job.id).plans.at(-1).version, 23, 'a concurrent assignment cannot overwrite a new version when history is full');
+});
+
+test('plan approval: review rework waits again unless planApprovalRework is disabled', async t => {
+  for (const reworkApproval of [true, false]) {
+    const f = await fixture(); if (!reworkApproval) f.config.planApprovalRework = false;
+    let reviews = 0;
+    const team = new Team(f.config, f.data, { runAgent: async (...args) => {
+      const r = await approvalAgent(...args);
+      if (args[1].stage === 'review' && reviews++ === 0) return { ...r, verdict: 'changes_requested', findings: [{ id: 'F1', claim: 'Refine greeting', impact: 'medium' }] };
+      return r;
+    } }); t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: 'Update hello', planApproval: true });
+    const first = await settle(team, job.id, 'waiting');
+    await team.control(job.id, 'approve-plan', first.plans.at(-1));
+    const revised = await settle(team, job.id, reworkApproval ? 'waiting' : 'ready'), p = revised.plans.at(-1);
+    assert.equal(p.version, 2); assert.equal(p.round, 1); assert.equal(p.reason, 'rework'); assert.equal(p.trigger, 'F1');
+    assert.notEqual(p.hash, first.plans[0].hash); assert(revised.plans[0].approvedAt);
+    if (reworkApproval) {
+      assert.equal(revised.planGate.version, 2); assert(!revised.reports.slice(revised.reports.findLastIndex(r => r.stage === 'plan') + 1).some(r => r.stage === 'implement'));
+      await team.control(job.id, 'approve-plan', p); await settle(team, job.id, 'ready');
+    } else { assert.equal(revised.planGate, null); assert.equal(revised.approvedPlan.version, 1); }
+  }
+});
+
+test('plan approval: research and fast paths run freely, but fast escalation waits for the owner', async t => {
+  for (const scenario of ['research', 'fast', 'auto', 'escalate', 'disabled']) {
+    const f = await fixture(); f.config.planApproval = true;
+    if (scenario === 'escalate') f.config.projects[0].tests = [[process.execPath, '-e', 'process.exit(1)']];
+    const team = new Team(f.config, f.data, { runAgent: approvalAgent }); t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: scenario === 'research' ? 'Research greeting' : 'Update hello text',
+      mode: ['fast', 'auto'].includes(scenario) ? scenario : scenario === 'escalate' ? 'fast' : 'full', ...(scenario === 'disabled' ? { planApproval: false } : {}) });
+    const result = await settle(team, job.id, scenario === 'research' ? 'done' : scenario === 'escalate' ? 'waiting' : 'ready');
+    assert.equal(result.planApproval, scenario !== 'disabled');
+    if (scenario === 'escalate') {
+      assert.equal(result.fast, false); assert.equal(result.plans[0].reason, 'escalate'); assert.equal(result.planGate.version, 1);
+      assert.equal(result.reports.filter(r => r.stage === 'implement').length, 1, 'only the fast implementation ran');
+    } else {
+      assert.equal(result.planGate, null); assert(!team.events(job.id).some(e => e.type === 'PLAN_PROPOSED'));
+      assert.equal(result.plans.length, ['research', 'disabled'].includes(scenario) ? 1 : 0);
+    }
+  }
+});
+
+test('plan approval: restart preserves the waiting gate and history without dispatching work', async t => {
+  const f = await fixture(); f.config.planApproval = true;
+  const team = new Team(f.config, f.data, { runAgent: approvalAgent }); t.after(() => team.close());
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const waiting = await settle(team, job.id, 'waiting');
+  await team.close();
+  let calls = 0;
+  const reopened = new Team(f.config, f.data, { runAgent: (...args) => { calls++; return approvalAgent(...args); } }); t.after(() => reopened.close());
+  await reopened.tick(); await new Promise(r => setTimeout(r, 50));
+  const restored = reopened.get(job.id);
+  assert.equal(restored.status, 'waiting'); assert.deepEqual(restored.planGate, waiting.planGate); assert.deepEqual(restored.plans, waiting.plans);
+  assert.equal(calls, 0); assert(!restored.reports.some(r => r.stage === 'implement'));
+});
 
 test('evidence collection preserves paths, filters credentials and Git, and enforces the byte budget', async t => {
   const f = await fixture(), dest = join(f.data, 'archive');
@@ -323,7 +482,7 @@ test('local branches, alternate job base and non-checkout base merge leave main 
 
 test('startup sweep removes stray review worktrees and everything left by finished jobs', async t => {
   const { f, team, job } = await branchReady(t);
-  const trees = async () => (await run(['git'], ['-C', f.path, 'worktree', 'list'])).stdout;
+  const trees = async () => (await run(['git'], ['-C', f.path, 'worktree', 'list'])).stdout.replaceAll('/', process.platform === 'win32' ? '\\' : '/');
   await run(['git'], ['-C', f.path, 'worktree', 'add', '--detach', join(f.data, 'worktrees', `${job.id}-review-0123abcd`), job.revision]);
   await team.sweepGit();
   assert(!(await trees()).includes('-review-')); assert((await trees()).includes(job.worktree), 'a ready job keeps its worktree');
@@ -522,7 +681,7 @@ test('pause cancels process; resume retains work; new guidance invalidates ready
 test('cancel during a mock agent run is terminal and idempotent; stale saves cannot resurrect it', async t => {
   let entered;
   const started = new Promise(resolve => { entered = resolve; });
-  const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100,
+  const config = { demo: true, planApproval: false, maxRamPercent: 100, maxCpuPercent: 100,
     agents: [{ id: 'solo', label: 'solo', provider: 'mock' }],
     pipeline: { manager: 'solo', builders: ['solo'], reviewer: 'solo', verifier: 'solo' },
     projects: [{ id: 'test', path: process.cwd(), tests: [] }],
