@@ -652,6 +652,7 @@
   "srv.team.assign_task_done": "Task đã xong, không đổi người được",
   "srv.team.assign_ok": "{0}: đổi sang {1} cho việc này",
   "srv.team.assign_next_turn": "{0}: đổi sang {1} cho việc này (lượt đang chạy không bị ngắt, áp dụng từ lượt sau)",
+  "ui.slot.teamTitle": "{role} · đổi cho cả đội (việc này đã kết thúc, giữ nguyên lịch sử)",
   "ui.slot.taskTitle": "Đổi người làm T{n}",
   "ui.slot.jobTitle": "{role} · chỉ cho việc này",
   "ui.slot.jobNote": "Chỉ áp dụng cho việc đang xem; lượt đang chạy không bị ngắt.",

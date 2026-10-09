@@ -652,6 +652,7 @@
   "srv.team.assign_task_done": "タスクは完了済みです",
   "srv.team.assign_ok": "{0}: このジョブを {1} に変更",
   "srv.team.assign_next_turn": "{0}: このジョブを {1} に変更（実行中のターンは中断せず、次のターンから適用）",
+  "ui.slot.teamTitle": "{role}・チーム全体（このジョブは終了済み、履歴は変わりません）",
   "ui.slot.taskTitle": "T{n} の担当を変更",
   "ui.slot.jobTitle": "{role}・このジョブのみ",
   "ui.slot.jobNote": "表示中のジョブだけに適用。実行中のターンは中断しません。",

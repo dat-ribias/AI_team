@@ -812,7 +812,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     // Đủ quota cho cả task: ngưỡng tối thiểu + %/phút × phút dự kiến. Chỉ là ưu tiên, không chặn: hết giữa chừng thì HANDOVER.
     // ponytail: hệ số %/phút cố định (quotaPercentPerMinute); học từ quota_history nếu cần chính xác hơn.
     const enough = id => remaining(id) >= (this.config.minRemainingPercent ?? 15) + this.estimate(id, task) * (this.config.quotaPercentPerMinute ?? 0.3);
-    if (fits(task.agent) && !checker(task.agent) && !load(task.agent) && enough(task.agent)) return task.agent;
+    // Lead đã chọn người này và họ rảnh, đủ quota: giữ nguyên. Nếu họ cũng là reviewer/verifier, checker() tự đổi người kiểm lúc review/verify,
+    // nên không đẩy task sang member yếu hơn hay ít quota hơn chỉ để né vai trò kiểm.
+    if (fits(task.agent) && !load(task.agent) && enough(task.agent)) return task.agent;
     // Ưu tiên người đang rảnh, rồi người không kiêm review/verify (kiêm thì checker() tự đổi người kiểm), rồi người Manager chọn, rồi mạnh nhất còn quota.
     const pool = members.builders.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || enough(y) - enough(x) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
     if (fits(task.agent) && (!pool.length || checker(pool[0]))) return task.agent;

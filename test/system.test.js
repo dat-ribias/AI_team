@@ -483,6 +483,14 @@ test('linked repositories reject another base and non-base merge targets', async
   assert.equal(await branchTip(f), job.base);
 });
 
+test('a builder who is also the verifier keeps the task the Lead gave them; verify moves to someone else', async t => {
+  const f = await fixture(); f.config.pipeline.builders = ['codex-2', 'codex-3'];
+  const team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
+  const job = team.get((await team.create({ project: 'test', goal: 'Update hello', paused: true })).id);
+  assert.equal(team.chooseBuilder(job, { agent: 'codex-3', difficulty: 1, instruction: 'a' }), 'codex-3');
+  assert.notEqual(team.checker({ ...job, implementers: ['codex-3'] }, 'verifier', job.roster, ['codex-3'], undefined, false), 'codex-3');
+});
+
 test('assign on the diagram changes only this job, survives role sync and stale saves, and the pinned builder is used', async t => {
   const f = await fixture(), team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello', paused: true });

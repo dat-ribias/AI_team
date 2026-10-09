@@ -477,6 +477,7 @@ function refreshSlotLive() {
 // Bấm ô trên sơ đồ của một việc → chỉ đổi người cho việc đó (task hoặc vai trò); ngoài sơ đồ việc → đổi vai trò chung của đội.
 function openSlot(kind, current, task, jobId) {
   const job = jobId && state.jobs.find(j => j.id === jobId && !['merged', 'cancelled', 'done'].includes(j.status));
+  if (jobId && !job && task != null) return; // việc đã kết thúc: ô task là lịch sử, không đổi được
   slot = { kind, current, task: job && task != null ? +task : null, job: job?.id || null };
   $('slot-live').innerHTML = slotLive(current); const lg = $('slot-live').querySelector('.live-log'); if (lg) lg.scrollTop = lg.scrollHeight;
   $('slot-title').textContent = t(current || kind !== 'builder' ? 'ui.slot.title' : 'ui.slot.addBuilderTitle', { role: roleLabel(kind) });
@@ -486,6 +487,7 @@ function openSlot(kind, current, task, jobId) {
     return `<option value="${esc(a.id)}" ${a.id === current ? 'selected' : ''} ${kind === 'builder' && a.provider === 'antigravity' ? 'disabled' : ''}>${esc(a.label)} · ${esc(a.provider)} · ${esc(tierLabel(a.tier))}${healthText}</option>`;
   }).join('');
   if (slot.job) $('slot-title').textContent = slot.task != null ? t('ui.slot.taskTitle', { n: slot.task + 1 }) : t('ui.slot.jobTitle', { role: roleLabel(kind) });
+  else if (jobId) $('slot-title').textContent = t('ui.slot.teamTitle', { role: roleLabel(kind) }); // việc đã kết thúc giữ người đã làm; đổi ở đây là đổi cả đội
   $('slot-remove').hidden = !current || !!slot.job; $('slot-filter').hidden = !current; $('slot-profile').hidden = !current;
   slotMember(); $('slot-dialog').showModal();
 }

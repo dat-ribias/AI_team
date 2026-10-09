@@ -652,6 +652,7 @@
   "srv.team.assign_task_done": "Task is already done",
   "srv.team.assign_ok": "{0}: switched to {1} for this job",
   "srv.team.assign_next_turn": "{0}: switched to {1} for this job (the running turn is not interrupted; applies from the next turn)",
+  "ui.slot.teamTitle": "{role} · whole team (this job has ended; its history stays)",
   "ui.slot.taskTitle": "Change who does T{n}",
   "ui.slot.jobTitle": "{role} · this job only",
   "ui.slot.jobNote": "Applies only to the job you are viewing; a running turn is not interrupted.",
