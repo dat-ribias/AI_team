@@ -83,13 +83,13 @@ Chỉnh lệnh test đúng dự án; ví dụ trên chỉ phù hợp nếu test 
 
 ## Luồng hoạt động
 
-1. Người dùng gửi mục tiêu; controller tạo branch và worktree từ HEAD.
+1. Người dùng gửi mục tiêu và chọn branch gốc local (mặc định branch đang checkout); controller tạo branch và worktree từ tip đó, không đổi checkout của repo chính. API/MCP nhận tham số `baseBranch`; repo vẫn phải sạch.
 2. Manager đọc repo, trả danh sách việc và chỉ định Builder (xem "Hồ sơ thành viên" bên dưới).
 3. Controller giao việc (song song nếu không phụ thuộc), thu hoạt động/report rồi checkpoint bằng Git.
 4. Controller chạy các lệnh `tests`. Nếu thất bại, trả bằng chứng cho Manager lập việc sửa.
 5. Reviewer đánh giá commit; findings được đưa vào lần lập kế hoạch tiếp theo.
 6. Verifier xác minh; Manager tổng hợp báo cáo. Tối đa `maxReworkRounds` vòng sửa (mặc định 3).
-7. Khi test, review và verify cùng commit, task chuyển READY. Nút merge thực hiện fast-forward local sau khi kiểm tra source branch vẫn ở base ban đầu. Không push remote.
+7. Khi test, review và verify cùng commit, task chuyển READY. Người dùng xem hồ sơ kiểm tra, chọn đích và duyệt merge local (xem mục Merge). Không push remote.
 
 Việc `research` (điều tra, đánh giá, không sửa code) đi cùng luồng nhưng kết thúc bằng kết luận thay vì merge.
 
@@ -192,11 +192,26 @@ Tools: `team_status`, `delegate_task`, `get_agent_status`, `read_messages`, `sen
 **Chạy song song**: task không phụ thuộc nhau chạy cùng lúc; task code trùng `files` thì không. Nhiều task code song song chạy ở worktree/branch con rồi gộp vào nhánh việc trước khi test (xung đột → BLOCKED kèm danh sách file). Nhiều công việc cũng chạy song song. Số agent chạy cùng lúc tính theo RAM trống (GB), `team.config.json`:
 `"resources": { "reserveGB": 4, "ramPerAgentGB": 1.5, "maxAgents": 3, "hardStopRamPercent": 90 }` → thêm agent khi `(RAM trống − reserveGB) / ramPerAgentGB ≥ 1`; RAM ≥ 90% thì không mở agent mới (không dừng agent đang chạy). Mặc định một tài khoản chạy một việc một lúc. Cho chạy song song: `"maxJobsPerAccount": 2` (toàn đội) hoặc `"maxJobs": 2` trên từng agent (tối đa 8). Codex slot 2+ dùng SQLite riêng `<home>/sqlite-N` qua `CODEX_SQLITE_HOME` (đừng đặt `sqlite_home` trong config.toml của profile, nó ghi đè); đăng nhập dùng chung. Nếu `config.toml` của profile hoặc `.codex/config.toml` của project đặt `sqlite_home`, tài khoản đó tự quay về 1 việc (có cảnh báo trong log). Các job dùng chung hạn mức của tài khoản; chạy đồng thời có thể làm hạn mức hết nhanh hơn. Tiến trình đọc quota Codex (`account/rateLimits/read`) dùng SQLite riêng (`<home>/sqlite-quota`) nên vẫn chạy khi tài khoản đang làm việc; nếu phát hiện `sqlite_home` thì hoãn đọc tới khi tài khoản rảnh. SQLite riêng không phải quota riêng. Giới hạn song song tính theo email tài khoản (từ lần đọc quota), nên hai hồ sơ cùng tài khoản dùng chung bộ đếm; chưa đọc được email thì tính theo hồ sơ. Mỗi lần chạy CLI ghi sự kiện SPAWN (PID, slot, thư mục, đường dẫn SQLite). Controller tắt đột ngột mà tiến trình con còn sống: sau khi khởi động lại, slot của nó vẫn bị giữ (tối đa 60 phút) chứ không cấp trùng; controller không tự kill tiến trình đó. Nhiều việc trên cùng project: mỗi việc có branch/worktree riêng; Lead của việc mới được báo các việc đang chạy và file họ dự định sửa để tránh trùng; việc merge sau sẽ phải "Cập nhật theo base".
 
-**Merge** không bao giờ tự động. Nút Duyệt merge mở bảng kiểm:
+## Merge
+
+Merge không bao giờ tự động. Nút **Duyệt merge** mở bảng kiểm và cho chọn branch đích: branch gốc của job, branch local có sẵn khác, hoặc **Tạo branch mới**. Tên branch mới phải hợp lệ và chưa tồn tại; branch này trỏ tới commit của job, không thay đổi branch khác.
+
 - test, review, verify đều phải pass trên *đúng commit* sẽ merge; ai đã viết code trong việc đó không được review/verify chính nó;
-- base branch phải chưa đổi. Nếu đã đổi: bấm **Cập nhật theo base** → merge base vào branch việc; không xung đột thì chạy lại test/review/verify, có xung đột thì tạo task gỡ xung đột (độ khó 4) rồi mới đi tiếp. Commit còn conflict marker bị chặn;
+- khi chọn branch gốc, base phải chưa đổi. Nếu đã đổi: bấm **Cập nhật theo base** → merge base vào branch việc; không xung đột thì chạy lại test/review/verify, có xung đột thì tạo task gỡ xung đột (độ khó 4) rồi mới đi tiếp. Commit còn conflict marker bị chặn;
 - rủi ro cao (Manager đánh giá cao, đụng file nhạy cảm, xóa file, diff > `largeDiffLines` = 300 dòng, hoặc task do người thiếu năng lực làm) → phải gõ mã commit để xác nhận;
-- merge chỉ fast-forward vào branch gốc. Tùy chỉnh trong `team.config.json`: `sensitivePaths` (regex), `largeDiffLines`.
+- đích là ancestor của commit job → fast-forward: nếu đang checkout ở repo chính, yêu cầu sạch và dùng `git merge --ff-only`; nếu không checkout, dùng `git update-ref` với tip cũ (compare-and-swap/CAS), từ chối khi tip đã đổi. Đích đang checkout ở worktree khác bị từ chối;
+- đích đã phân kỳ → tạo worktree tạm từ đích, chạy `git merge --no-ff`, rồi chạy lại test của project trên commit merge. Owner xem test và diff, duyệt lần hai đúng commit đó trước khi cập nhật đích. Test fail thì không cập nhật đích; xung đột thì abort, báo file và gỡ worktree tạm, không đổi branch đích;
+- job có repo liên kết chỉ hỗ trợ đích là branch gốc. Ghi nhận branch/commit đã merge trong `mergedInto`; không push remote, không tự xóa worktree của job.
+
+Tùy chỉnh trong `team.config.json`: `sensitivePaths` (regex), `largeDiffLines`.
+
+## Hồ sơ kiểm tra
+
+Builder/verifier lưu ảnh chụp, log quan trọng và report e2e vào `.ai-team/evidence/` trong worktree (được Git exclude). Project có thể thêm `"evidence": ["docs/screenshots", "playwright-report"]` để thu các thư mục tương đối khác. Controller thu sau lượt implement/verify và sau test, giữ cấu trúc thư mục tại `<dataDir>/evidence/<jobId>/<revision>/<stage>-<agent>/` (có hậu tố khi thu nhiều lần).
+
+`evidenceMaxMB` trong cấu hình toàn đội giới hạn tổng dung lượng mỗi job, mặc định 50 MB. File vượt giới hạn bị bỏ qua; controller chặn đường dẫn ngoài worktree, symlink/junction và đường dẫn credential/secret. Log test đầy đủ đã lọc secret cũng được lưu trong giới hạn này; HTML được phục vụ với CSP sandbox chặn script và cô lập origin khỏi dashboard.
+
+Tab **Hồ sơ kiểm tra** nhóm theo commit: **Controller chạy** là lệnh test thực tế, exit code, thời lượng và link log; **AI tự khai** là verdict, findings và trường `tests` của review/verify. Ảnh có thumbnail, report/log có link mở. Bảng duyệt merge tóm tắt bằng chứng đúng commit, cảnh báo nếu thiếu test controller và có link sang tab; bản xuất Markdown cũng kèm kết quả test và danh sách file. Test của commit merge phân kỳ được lưu riêng trước lần duyệt thứ hai.
 
 ## Quyền theo dự án và repo sửa cùng
 
