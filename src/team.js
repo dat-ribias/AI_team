@@ -1,12 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import { msg } from './i18n.js';
 import { mkdirSync, existsSync, realpathSync, writeFileSync, readFileSync, appendFileSync, cpSync, statSync, lstatSync, readlinkSync, readdirSync, rmSync, renameSync } from 'node:fs';
-import { resolve, join, basename, extname, relative, isAbsolute, dirname, sep } from 'node:path';
+import { resolve, join, basename, extname, relative, isAbsolute, dirname, sep, win32, posix } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore, fileHash, hash } from './memory.js';
 import { ledger, scopeFiles, question, answer, decide, refreshLedger, obligations, evidence } from './discussions.js';
-import { cpus, totalmem, freemem } from 'node:os';
+import { cpus, totalmem, freemem, homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { run, executable } from './process.js';
 import { runAgent, readQuota } from './providers.js';
@@ -26,7 +26,11 @@ const snapshotOf = async cwd => {
   });
   return { commit, dirtyHash: hash(JSON.stringify({ diff, status, files })) };
 };
-export const redact = text => String(text).replace(/\b(?:sk-[\w-]{12,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, '[REDACTED]').replace(/((?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
+export const redact = text => String(text)
+  .replace(/\b(?:sk-[\w-]{12,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16})\b/g, '[REDACTED]')
+  .replace(/(authorization(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\r\n"'}\\]+)/gi, '$1[REDACTED]')
+  .replace(/(\bBearer\s+)([^\s,"'{}\\]+)/gi, '$1[REDACTED]')
+  .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
 const scrub = value => JSON.parse(redact(JSON.stringify(value)));
 // Skill names may contain ':' (plugin:skill), which Windows forbids in folder names.
 const skillDir = name => name.replace(/[^\w.-]+/g, '-');
@@ -201,6 +205,11 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, session TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, job TEXT, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.memoryStore = new MemoryStore(this.db, redact); this.memoryReaders = new Map();
+    const memoryJobs = this.jobs();
+    this.memoryStore.promoteMerged(memoryJobs);
+    for (const job of memoryJobs) if (this.outsideProject(job)) {
+      for (const r of this.memoryStore.rows(job.project)) if (r.job === job.id) this.memoryStore.markStale(job.project, r.id, r.revision);
+    }
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
     this.previewChrome = adapters.findChrome || findChrome;
     try { this.db.exec('ALTER TABLE member_stats ADD COLUMN est REAL'); } catch {}
@@ -379,6 +388,7 @@ export class Team extends EventEmitter {
       }
       let valid = true;
       for (const [path, expected] of Object.entries(r.files)) {
+        if (path.replace(/\\/g, '/').startsWith('.ai-team/')) continue;
         if (!fingerprints.has(path)) { try { fingerprints.set(path, fileHash(worktree, path)); } catch { fingerprints.set(path, undefined); } }
         if (fingerprints.get(path) !== expected) { valid = false; break; }
       }
@@ -401,6 +411,20 @@ export class Team extends EventEmitter {
       records: selected.map(({ id, scope, job, source, commitSha, revision }) => ({ id: `M${id}`, scope, job, source, commit: commitSha, revision })),
       snapshot: found.snapshot, session: summary || undefined, recentJobs: task ? undefined : cap(log.map(l => l.text), 1500) };
   }
+  outsideProject(job) {
+    if (job.kind !== 'research') return false;
+    const paths = [...String(job.goal || '').matchAll(/(?<![\w:/\\])(?:["'`]((?:[A-Za-z]:[\\/]|\\\\|\/)[^"'`\r\n]+)["'`]|((?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'`<>]+))/g)].map(m => m[1] || m[2]);
+    if (!paths.length) return false;
+    const project = this.config.projects.find(p => p.id === job.project);
+    if (!project) return false;
+    const linked = [...(job.linked || []).map(l => l.path), ...(project.access?.repos || []).map(r => this.config.projects.find(p => p.id === r.project)?.path)];
+    const roots = [project.path, ...linked, this.dataDir, homedir()].filter(Boolean);
+    return paths.every(path => !roots.some(root => {
+      const style = win32.isAbsolute(path) && !posix.isAbsolute(path) ? win32 : posix;
+      const rel = style.relative(style.resolve(root), style.resolve(path));
+      return !rel || rel !== '..' && !rel.startsWith('..' + style.sep) && !style.isAbsolute(rel);
+    }));
+  }
   async remember(job, mem) {
     const at = now();
     const ins = this.db.prepare('INSERT INTO memory (project, session, kind, text, job, at) VALUES (?,?,?,?,?,?)');
@@ -408,10 +432,10 @@ export class Team extends EventEmitter {
     if (job.sessionId && !job.comparison) ins.run(job.project, job.sessionId, 'log', redact(line), job.id, at);
     // Comparison outputs stay in reports; they must not teach the next comparison job its answer.
     if (mem && typeof mem === 'object' && !job.comparison) {
-      const scope = job.kind === 'research' || job.status === 'merged' ? 'project' : 'job';
+      const scope = !this.outsideProject(job) && (job.kind === 'research' || job.status === 'merged') ? 'project' : 'job';
       // ponytail: a final report shares changed/declared file dependencies; accept per-fact paths if invalidation is too broad.
       const files = {}, changed = job.kind === 'research' ? [] : (await git(job.worktree, ['diff', '--no-ext-diff', '--name-only', '-z', job.base, job.revision])).split('\0').filter(Boolean);
-      for (const path of [...new Set([...changed, ...job.tasks.flatMap(t => t.files || [])])]) { try { files[path] = fileHash(job.worktree, path); } catch {} }
+      for (const path of [...new Set([...changed, ...job.tasks.flatMap(t => t.files || [])])]) { if (path.replace(/\\/g, '/').startsWith('.ai-team/')) continue; try { files[path] = fileHash(job.worktree, path); } catch {} }
       const provenance = { project: job.project, job: job.id, scope, commitSha: job.kind === 'research' ? null : job.revision, files, source: `job:${job.id}/final` };
       for (const id of (Array.isArray(mem.remove) ? mem.remove : []).map(x => Number(String(x).replace(/^M/i, ''))).filter(Number.isInteger)) {
         const old = this.memoryStore.candidates(job.project, job.id, '', 1, id)[0];
@@ -424,10 +448,11 @@ export class Team extends EventEmitter {
     // Prompt limits do not delete stored knowledge or job history.
     this.emit('change');
   }
-  editMemory({ project, session, add, remove, revision, summary }) {
+  editMemory({ project, session, add, remove, stale, revision, summary }) {
     this.project(project);
     if (add) this.memoryStore.add({ project, text: String(add).slice(0, 300) });
     if (remove != null) this.memoryStore.retire(project, remove, revision);
+    if (stale != null) this.memoryStore.markStale(project, stale, revision);
     if (summary != null && session) this.db.prepare('UPDATE sessions SET notes=? WHERE id=? AND project=?').run(redact(String(summary)).slice(0, 1500), session, project);
     this.emit('change'); return this.memory(project, session);
   }
