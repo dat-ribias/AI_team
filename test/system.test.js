@@ -1,4 +1,5 @@
 import './memory.test.js';
+import './cleanup.test.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';

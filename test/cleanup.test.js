@@ -7,14 +7,19 @@ import { gunzipSync } from 'node:zlib';
 import { planJob, planPeriodic, apply, storageStats } from '../src/cleanup.js';
 import { collect } from '../src/evidence.js';
 import { run } from '../src/process.js';
+import { Team, validateConfig } from '../src/team.js';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 
 const day = 86400_000, now = Date.now();
 function fixture(t) {
   const temp = mkdtempSync(join(tmpdir(), 'ai-team-cleanup-'));
   const dataDir = join(temp, 'data'), home = join(temp, 'member');
   mkdirSync(dataDir); mkdirSync(home);
-  t.after(() => rmSync(temp, { recursive: true, force: true }));
-  return { temp, dataDir, agents: [{ id: 'test', home }], jobs: [], now, run };
+  const ctx = { temp, dataDir, agents: [{ id: 'test', home }], jobs: [], now, run };
+  t.after(async () => { await ctx.stopServer?.(); if (ctx.team) { ctx.team.runs.clear(); ctx.team.previews.clear(); await ctx.team.close(); } rmSync(temp, { recursive: true, force: true }); });
+  return ctx;
 }
 function file(path, size = 8, days = 0) {
   mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, Buffer.alloc(size));
@@ -300,4 +305,231 @@ test('storageStats counts regular files and ignores symlink targets', t => {
   symlinkSync(outside, join(ctx.dataDir, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
   const stats = storageStats(ctx.dataDir);
   assert.equal(stats.dataDirBytes, 30); assert.ok(stats.freeBytes > 0);
+});
+
+async function controller(t, options = {}) {
+  const ctx = await repository(t);
+  ctx.config = { demo: true, backup: false, planApproval: false, agents: [{ id: 'builder', provider: 'mock' }],
+    pipeline: { manager: 'builder', builders: ['builder'], reviewer: 'builder', verifier: 'builder' },
+    projects: [{ id: 'p', path: ctx.root, tests: [] }], ...options };
+  ctx.team = new Team(ctx.config, ctx.dataDir, { runAgent: async () => ({ status: 'completed', summary: 'Mock report', verdict: 'approved', findings: [] }) });
+  ctx.team.closed = true;
+  return ctx;
+}
+async function changedJob(ctx) {
+  const job = await ctx.team.create({ project: 'p', goal: 'Change hello', paused: true });
+  writeFileSync(join(job.worktree, 'hello.txt'), 'Updated\n');
+  await run(['git'], ['-C', job.worktree, 'add', '.']);
+  await run(['git'], ['-C', job.worktree, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'change']);
+  job.revision = (await run(['git'], ['-C', job.worktree, 'rev-parse', 'HEAD'])).stdout.trim();
+  Object.assign(job, { status: 'ready', kind: 'code', risk: 'low', tested: job.revision, reviewed: job.revision, verified: job.revision });
+  ctx.team.save(job);
+  ctx.team.event(job.id, 'builder', 'team', 'ACTIVITY', 'First activity', { action: 'update' });
+  ctx.team.event(job.id, 'builder', 'team', 'ACTIVITY', 'Second activity');
+  return job;
+}
+function manifests(ctx, jobId) {
+  const dir = join(ctx.dataDir, 'cleanup');
+  return existsSync(dir) ? readdirSync(dir).map(f => JSON.parse(readFileSync(join(dir, f), 'utf8'))).filter(m => m.items.some(i => i.jobId === jobId)) : [];
+}
+
+test('controller merge creates exactly one manifest, removes merged trees/branches and archives all events', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  const child = join(ctx.dataDir, 'worktrees', `${job.id}-t1`);
+  await git(ctx, ['worktree', 'add', '-b', `${job.branch}-t1`, child, job.revision]);
+  const stop = team.stopPreview.bind(team), stopped = [];
+  team.stopPreview = async (id, reason) => { stopped.push(reason); assert.ok(existsSync(job.worktree)); return stop(id, reason); };
+  const result = await team.merge(job.id);
+  assert.equal(result.status, 'merged'); assert.ok(result.cleanedAt);
+  assert.equal(existsSync(job.worktree), false); assert.equal(existsSync(child), false);
+  assert.equal(await git(ctx, ['branch', '--list', `${job.branch}*`]), '');
+  assert.ok(stopped.includes('merged'));
+  const events = team.events(job.id), summaries = events.filter(e => e.type === 'ACTIVITY_SUMMARY');
+  assert.equal(events.filter(e => e.type === 'ACTIVITY').length, 0); assert.equal(summaries.length, 1);
+  const archive = JSON.parse(gunzipSync(readFileSync(join(ctx.dataDir, summaries[0].details.archive))));
+  assert.equal(archive.filter(e => e.type === 'ACTIVITY').length, 2); assert.ok(archive.some(e => e.type === 'MERGED'));
+  assert.equal(manifests(ctx, job.id).length, 1);
+  await team.cleanupJob(job.id); await team.cleanupJob(job.id);
+  assert.equal(manifests(ctx, job.id).length, 1);
+});
+
+test('controller cancel drains the run, keeps unmerged branch and writes cleanedAt for cancelled snapshots', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  const abort = new AbortController();
+  abort.signal.addEventListener('abort', () => setTimeout(() => team.runs.delete(job.id), 30), { once: true });
+  team.runs.set(job.id, { abort, agents: new Set() });
+  const result = await team.control(job.id, 'cancel');
+  assert.equal(result.status, 'cancelled'); assert.ok(result.cleanedAt); assert.equal(team.runs.has(job.id), false);
+  assert.equal(existsSync(job.worktree), false); assert.equal(await git(ctx, ['branch', '--list', job.branch]), job.branch);
+  assert.equal(team.events(job.id).filter(e => e.type === 'ACTIVITY_SUMMARY').length, 1);
+  await team.control(job.id, 'cancel'); assert.equal(manifests(ctx, job.id).length, 1);
+});
+
+test('cleanupOnMerge=false retains ACTIVITY and the legacy releaseGit behavior', async t => {
+  const ctx = await controller(t, { cleanupOnMerge: false }), job = await changedJob(ctx);
+  await ctx.team.merge(job.id);
+  assert.equal(existsSync(job.worktree), false);
+  assert.equal(await git(ctx, ['branch', '--list', job.branch]), '');
+  assert.equal(ctx.team.events(job.id).filter(e => e.type === 'ACTIVITY').length, 2);
+  assert.equal(ctx.team.events(job.id).filter(e => e.type === 'ACTIVITY_SUMMARY').length, 0);
+  assert.equal(manifests(ctx, job.id).length, 0);
+  await ctx.team.cleanup();
+  assert.equal(ctx.team.events(job.id).filter(e => e.type === 'ACTIVITY').length, 2);
+});
+
+test('research done cleans once and retains cleanedAt through the runJob final save', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  Object.assign(job, { kind: 'research', stage: 'final', fast: true, reports: [{ stage: 'research', agent: 'builder', summary: 'Research conclusion' }] });
+  team.save(job); await team.runJob(job);
+  const result = team.get(job.id);
+  assert.equal(result.status, 'done'); assert.ok(result.cleanedAt);
+  assert.equal(existsSync(job.worktree), false); assert.equal(await git(ctx, ['branch', '--list', job.branch]), job.branch);
+  assert.equal(manifests(ctx, job.id).length, 1);
+  assert.ok(team.events(job.id).some(e => e.type === 'CONCLUSION'));
+});
+
+test('cleanupJob serializes duplicate requests and saves cleanedAt from the newest snapshot', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  job.status = 'done'; team.save(job);
+  const context = team.cleanupContext.bind(team); let updated = false;
+  team.cleanupContext = (...args) => {
+    const value = context(...args), page = value.events.page;
+    value.events.page = (...params) => {
+      if (!updated) { const fresh = team.get(job.id); fresh.messages.push({ text: 'Concurrent update' }); fresh.ownerNote = 'Keep this'; team.save(fresh); updated = true; }
+      return page(...params);
+    };
+    return value;
+  };
+  await Promise.all([team.cleanupJob(job.id), team.cleanupJob(job.id)]);
+  const result = team.get(job.id);
+  assert.ok(result.cleanedAt); assert.equal(result.ownerNote, 'Keep this'); assert.equal(result.messages.at(-1).text, 'Concurrent update');
+  assert.equal(manifests(ctx, job.id).length, 1);
+});
+
+test('startup with cleanupOnMerge=false preserves unmerged research branches and retries failed compaction', async t => {
+  const ctx = await controller(t, { cleanupOnMerge: false }), job = await changedJob(ctx), { team } = ctx;
+  job.status = 'done'; team.save(job);
+  const context = team.cleanupContext.bind(team), faults = [];
+  team.on('fault', e => faults.push(e.message));
+  team.cleanupContext = (...args) => { const value = context(...args); value.events.transaction = () => { throw new Error('Mock transaction failure'); }; return value; };
+  team.start(); await team.cleanupStartup;
+  assert.ok(faults.some(f => f.includes('Mock transaction failure')));
+  assert.equal(team.get(job.id).cleanedAt, undefined);
+  assert.equal(await git(ctx, ['branch', '--list', job.branch]), job.branch);
+  assert.equal(team.events(job.id).filter(e => e.type === 'ACTIVITY').length, 2);
+  team.cleanupContext = context; await team.cleanupJob(job.id);
+  assert.ok(team.get(job.id).cleanedAt);
+  assert.equal(team.events(job.id).filter(e => e.type === 'ACTIVITY_SUMMARY').length, 1);
+  assert.equal(await git(ctx, ['branch', '--list', job.branch]), job.branch);
+});
+
+test('startup cleans previously released jobs and periodic cleanup excludes runs, previews and unfinished jobs', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  job.status = 'done'; job.released = true; team.save(job);
+  const running = await team.create({ project: 'p', goal: 'Still running', paused: true });
+  running.status = 'done'; team.save(running);
+  const preview = await team.create({ project: 'p', goal: 'Still previewing', paused: true });
+  preview.status = 'done'; team.save(preview);
+  const paused = await team.create({ project: 'p', goal: 'Unfinished', paused: true });
+  team.runs.set(running.id, { abort: new AbortController(), agents: new Set() }); team.previews.set(preview.id, {});
+  t.after(() => { team.runs.clear(); team.previews.clear(); });
+  team.start(); await team.cleanupStartup;
+  assert.ok(team.get(job.id).cleanedAt); assert.equal(existsSync(job.worktree), false);
+  assert.equal(team.cleanupTimer._idleTimeout, 24 * 3600_000);
+  for (const kept of [running, preview, paused]) { assert.ok(existsSync(kept.worktree)); assert.equal(team.get(kept.id).cleanedAt, undefined); }
+  team.runs.clear(); team.previews.clear();
+  await team.close(); assert.equal(team.cleanupTimer._destroyed, true);
+});
+
+test('controller dry-run is read-only, rejects obsolete/expired ids and rechecks resumed jobs', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  job.status = 'done'; team.save(job);
+  const first = await team.cleanup({ dryRun: true }), second = await team.cleanup({ dryRun: true });
+  assert.equal(manifests(ctx, job.id).length, 0); assert.ok(existsSync(job.worktree));
+  assert.equal(team.events(job.id).filter(e => e.type === 'ACTIVITY').length, 2);
+  await assert.rejects(team.cleanup({ id: first.id }), { code: 409 });
+  team.cleanupPreview.at = new Date(Date.now() - 11 * 60_000).toISOString();
+  await assert.rejects(team.cleanup({ id: second.id }), { code: 409 });
+  const current = await team.cleanup({ dryRun: true });
+  job.status = 'paused'; team.save(job);
+  const result = await team.cleanup({ id: current.id });
+  assert.ok(result.results.filter(r => r.jobId === job.id).every(r => r.status === 'skipped'));
+  assert.ok(existsSync(job.worktree)); assert.equal(team.get(job.id).cleanedAt, undefined);
+  await assert.rejects(team.cleanup({ id: current.id }), { code: 409 });
+});
+
+test('backup uses shared manifests for count and size limits and keeps the newest backup', async t => {
+  const ctx = await controller(t, { maxBackups: 2, maxBackupMB: 0 }), { team } = ctx;
+  const old = file(join(ctx.dataDir, 'backups', 'team-old.sqlite'), 8, 2);
+  const newest = team.backup('manual'); assert.ok(existsSync(newest)); await team.cleanupPending;
+  assert.equal(existsSync(old), false); assert.ok(existsSync(newest));
+  assert.ok(readdirSync(join(ctx.dataDir, 'cleanup')).map(f => JSON.parse(readFileSync(join(ctx.dataDir, 'cleanup', f), 'utf8'))).some(m => m.items.some(i => i.kind === 'backup' && i.target === old)));
+  team.config.maxBackupMB = 2048; team.config.maxBackups = 1;
+  const older = file(join(ctx.dataDir, 'backups', 'team-another.sqlite'), 8, 1);
+  await team.cleanup({ backupsOnly: true }); assert.equal(existsSync(older), false); assert.ok(existsSync(newest));
+});
+
+test('storage caches directory stats for ten minutes and exposes the agreed warning fields', async t => {
+  const ctx = await controller(t), { team } = ctx;
+  const first = team.state().storage; file(join(ctx.dataDir, 'larger.log'), 5000);
+  assert.equal(team.state().storage.dataDirBytes, first.dataDirBytes);
+  team.storageCache.at -= 10 * 60_000;
+  assert.ok(team.state().storage.dataDirBytes > first.dataDirBytes);
+  team.storageCache = { at: Date.now(), dataDirBytes: 2 ** 30 + 1, freeBytes: 10e9 - 1 };
+  assert.deepEqual(team.state().storage.warn, { dataDir: true, disk: true });
+  team.storageCache = { at: Date.now(), dataDirBytes: 2 ** 30, freeBytes: 10e9 };
+  assert.deepEqual(team.state().storage.warn, { dataDir: false, disk: false });
+  await team.cleanup(); assert.ok(team.state().storage.lastCleanup.id);
+});
+
+test('validateConfig sets cleanup defaults and rejects invalid values/types', () => {
+  const config = () => ({ demo: true, agents: [{ id: 'test', provider: 'mock' }], projects: [] });
+  const defaults = validateConfig(config());
+  assert.equal(defaults.retentionDays, 30); assert.equal(defaults.maxBackups, 14); assert.equal(defaults.maxBackupMB, 2048); assert.equal(defaults.cleanupOnMerge, true);
+  assert.equal(validateConfig({ ...config(), backupKeep: 3 }).maxBackups, 3);
+  assert.equal(validateConfig({ ...config(), retentionDays: 0.5, maxBackups: 1, maxBackupMB: 0, cleanupOnMerge: false }).cleanupOnMerge, false);
+  for (const [key, values] of Object.entries({ retentionDays: [0, -1, '30', null, NaN, Infinity], maxBackups: [0, -1, 1.5, '3', null, Infinity], maxBackupMB: [-1, '1', null, NaN, Infinity], cleanupOnMerge: [0, 1, 'true', null] })) {
+    for (const value of values) assert.throws(() => validateConfig({ ...config(), [key]: value }), new RegExp(key));
+  }
+});
+
+test('GET/POST cleanup API requires CSRF and a matching latest dry-run manifest', { timeout: 30_000 }, async t => {
+  const ctx = await controller(t), { team } = ctx;
+  const finished = await changedJob(ctx); await team.control(finished.id, 'cancel');
+  await team.close();
+  const old = file(join(ctx.dataDir, 'backups', 'team-api-old.sqlite'), 8, 2);
+  const newest = file(join(ctx.dataDir, 'backups', 'team-api-new.sqlite'), 8);
+  const socket = createServer(); await new Promise(r => socket.listen(0, '127.0.0.1', r));
+  const port = socket.address().port; await new Promise(r => socket.close(r)); assert.notEqual(port, 3333);
+  const configFile = join(ctx.temp, 'server-config.json');
+  writeFileSync(configFile, JSON.stringify({ ...ctx.config, dataDir: ctx.dataDir, port, maxBackups: 1 }));
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/server.js', import.meta.url)), '--config', configFile], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; child.stdout.on('data', b => { output += b; }); child.stderr.on('data', b => { output += b; });
+  const timeout = setTimeout(() => child.kill(), 25_000);
+  ctx.stopServer = async () => {
+    clearTimeout(timeout);
+    if (child.exitCode === null && child.signalCode === null) { const exited = new Promise(r => child.once('exit', r)); child.kill(); await exited; }
+  };
+  const origin = `http://127.0.0.1:${port}`;
+  let response;
+  for (const deadline = Date.now() + 10_000; Date.now() < deadline;) {
+    assert.equal(child.exitCode, null, output);
+    try { response = await fetch(origin); if (response.ok) break; } catch {}
+    await new Promise(r => setTimeout(r, 30));
+  }
+  assert.ok(response?.ok, output);
+  const cookie = response.headers.get('set-cookie').split(';')[0];
+  const post = id => fetch(`${origin}/api/cleanup`, { method: 'POST', headers: { cookie, 'x-team-request': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(id === undefined ? {} : { id }) });
+  assert.equal((await post()).status, 409);
+  const forbidden = await fetch(`${origin}/api/cleanup`, { method: 'POST', headers: { cookie }, body: '{}' }); assert.equal(forbidden.status, 403);
+  // Startup may already enforce the limit; recreate a backup after it finishes.
+  for (const deadline = Date.now() + 5000; existsSync(old) && Date.now() < deadline;) await new Promise(r => setTimeout(r, 30));
+  assert.equal(existsSync(old), false); file(old, 8, 2);
+  const first = await (await fetch(`${origin}/api/cleanup`, { headers: { cookie } })).json();
+  assert.equal(first.dryRun, true); assert.ok(first.items.some(i => i.target === old)); assert.ok(existsSync(old));
+  const latest = await (await fetch(`${origin}/api/cleanup`, { headers: { cookie } })).json();
+  assert.equal((await post(first.id)).status, 409);
+  const applied = await post(latest.id); assert.equal(applied.status, 200);
+  const result = await applied.json(); assert.equal(result.id, latest.id); assert.ok(result.results.some(r => r.target === old && r.status === 'ok'));
+  assert.equal(existsSync(old), false); assert.ok(existsSync(newest)); assert.equal((await post(latest.id)).status, 409);
 });

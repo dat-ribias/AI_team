@@ -12,6 +12,7 @@ import { run, executable } from './process.js';
 import { runAgent, readQuota } from './providers.js';
 import { scanSkills, skillRoots } from './skills.js';
 import { collect, kind, safeRel } from './evidence.js';
+import { planJob, planPeriodic, apply as applyCleanup, storageStats } from './cleanup.js';
 import { validatePreview, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
 
 const now = () => new Date().toISOString();
@@ -159,6 +160,14 @@ export function roster(config) {
 }
 
 export function validateConfig(config) {
+  if (config.retentionDays === undefined) config.retentionDays = 30;
+  if (config.maxBackups === undefined) config.maxBackups = config.backupKeep ?? 14;
+  if (config.maxBackupMB === undefined) config.maxBackupMB = 2048;
+  if (config.cleanupOnMerge === undefined) config.cleanupOnMerge = true;
+  if (!Number.isFinite(config.retentionDays) || config.retentionDays <= 0) throw new Error('retentionDays must be a positive number');
+  if (!Number.isInteger(config.maxBackups) || config.maxBackups < 1) throw new Error('maxBackups must be an integer >= 1');
+  if (!Number.isFinite(config.maxBackupMB) || config.maxBackupMB < 0) throw new Error('maxBackupMB must be a non-negative number');
+  if (typeof config.cleanupOnMerge !== 'boolean') throw new Error('cleanupOnMerge must be boolean');
   for (const key of ['planApproval', 'planApprovalRework']) if (config[key] !== undefined && typeof config[key] !== 'boolean') throw new Error(msg("srv.team.plan_approval_invalid"));
   if (config.peerDialogue !== undefined && typeof config.peerDialogue !== 'boolean') throw new Error('peerDialogue must be boolean');
   if (config.evidenceMaxMB != null && (!Number.isFinite(config.evidenceMaxMB) || config.evidenceMaxMB < 0)) throw new Error('evidenceMaxMB must be a non-negative number');
@@ -463,8 +472,7 @@ export class Team extends EventEmitter {
     const file = join(dir, `team-${new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '')}-${String(reason).replace(/[^\w-]/g, '')}.sqlite`);
     if (existsSync(file)) return file;
     this.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
-    const keep = this.config.backupKeep ?? 14, all = readdirSync(dir).filter(f => /^team-.*\.sqlite$/.test(f)).sort();
-    for (const f of all.slice(0, Math.max(0, all.length - keep))) rmSync(join(dir, f), { force: true });
+    this.cleanup({ backupsOnly: true }).catch(e => this.emit('fault', e));
     this.lastBackup = { file, at: now() }; return file;
   }
   backups() { const dir = this.backupDir(); try { return readdirSync(dir).filter(f => /^team-.*\.sqlite$/.test(f)).sort().reverse().map(f => ({ file: join(dir, f), bytes: statSync(join(dir, f)).size, at: statSync(join(dir, f)).mtime.toISOString() })); } catch { return []; } }
@@ -632,6 +640,7 @@ export class Team extends EventEmitter {
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, slots: used + cap.start, active: used, waitingReason: this.waitingReason },
+      storage: this.storage(),
     };
   }
   comparisonSignature(project, sessionId) {
@@ -1520,7 +1529,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const r = single ? job.reports.filter(x => x.stage === 'research').at(-1) : await this.call(job, members.manager, 'final', msg("srv.team.research_final"));
       if (single) job.skipped = [...new Set([...(job.skipped || []), 'final'])];
       job.conclusion = { summary: r.summary, conclusion: r.conclusion || r.summary, sources: r.sources || [], confidence: r.confidence || null, openQuestions: r.openQuestions || [] };
-      job.status = 'done'; await this.remember(job, single ? null : r.memory); this.event(job.id, single ? r.agent : members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion); return;
+      job.status = 'done'; await this.remember(job, single ? null : r.memory); this.save(job); this.event(job.id, single ? r.agent : members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion);
+      await this.cleanupJob(job.id).catch(e => this.emit('fault', e)); Object.assign(job, this.get(job.id)); return;
     }
     const stepsF = job.flow?.requested?.steps;
     if (stepsF ? !stepsF.includes('final') : job.fast || job.rigor === 'light') job.skipped = [...new Set([...(job.skipped || []), 'final'])];
@@ -1830,7 +1840,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } finally { this.runs.delete(job.id); this.emit('change'); this.kick(); }
   }
   kick() { if (!this.closed) setImmediate(() => this.tick().catch(e => this.emit('fault', e))); }
-  start() { this.interval = setInterval(() => this.tick().catch(e => this.emit('fault', e)), 3000); this.backupTimer = setInterval(() => this.autoBackup(), 3600_000); setImmediate(() => this.autoBackup()); this.sweepGit().catch(e => this.emit('fault', e)); this.kick(); }
+  start() {
+    this.interval = setInterval(() => this.tick().catch(e => this.emit('fault', e)), 3000);
+    this.backupTimer = setInterval(() => this.autoBackup(), 3600_000); setImmediate(() => this.autoBackup());
+    this.cleanupTimer = setInterval(() => this.cleanup().catch(e => this.emit('fault', e)), 24 * 3600_000);
+    this.cleanupStartup = this.sweepGit().then(() => this.cleanup()).catch(e => this.emit('fault', e)); this.kick();
+  }
   async control(id, action, payload = {}) {
     const job = this.get(id);
     if (action === 'preview-stop') { await this.stopPreview(id, 'user'); return this.get(id); }
@@ -1895,6 +1910,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (action === 'cancel') await this.stopPreview(id, 'cancelled');
       if (this.runs.has(id)) this.runs.get(id).abort.abort(new DOMException(action === 'cancel' ? msg("srv.team.huy_task_giu_worktree_de_khong") : msg("srv.team.dung_tien_trinh_khi_tiep_tuc"), 'AbortError'));
       this.event(id, 'user', 'team', 'CONTROL', action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
+      if (action === 'cancel') await this.cleanupJob(id).catch(e => this.emit('fault', e));
     } else if (action === 'resume') {
       if (!['blocked', 'paused', 'waiting'].includes(job.status)) throw new Error(msg("srv.team.chi_tiep_tuc_task_paused_blocked"));
       if (this.runs.has(id)) throw new Error(msg("srv.team.tien_trinh_dang_dung_thu_lai"));
@@ -1990,6 +2006,85 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } else throw new Error(msg("srv.team.action_khong_ho_tro"));
     return this.get(id);
   }
+  storage() {
+    if (!this.storageCache || Date.now() - this.storageCache.at >= 10 * 60_000) this.storageCache = { at: Date.now(), ...storageStats(this.dataDir) };
+    const { dataDirBytes, freeBytes } = this.storageCache;
+    return { dataDirBytes, freeBytes, warn: { dataDir: dataDirBytes > 2 ** 30, disk: freeBytes !== null && freeBytes < 10e9 }, lastCleanup: this.lastCleanup || null };
+  }
+  cleanupContext(ownId) {
+    return { dataDir: this.dataDir, projects: this.config.projects, agents: this.config.agents, config: this.config, jobs: this.jobs(), run, git,
+      isActive: id => {
+        const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(id);
+        return !!row && !terminal.has(JSON.parse(row.body).status) || this.previews.has(id) || this.runs.has(id) && id !== ownId;
+      },
+      events: {
+        page: (id, after, limit) => this.db.prepare('SELECT seq,body FROM events WHERE job=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit),
+        transaction: fn => {
+          this.db.exec('BEGIN IMMEDIATE');
+          try {
+            fn({ deleteActivity: (id, seqs) => {
+              const remove = this.db.prepare("DELETE FROM events WHERE job=? AND seq=? AND json_extract(body,'$.type')='ACTIVITY'");
+              for (const seq of seqs) remove.run(id, seq);
+            }, insert: (id, event) => this.db.prepare('INSERT INTO events (job,body) VALUES (?,?)').run(id, JSON.stringify(scrub(event))) });
+            this.db.exec('COMMIT');
+          } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+        },
+      },
+    };
+  }
+  queueCleanup(fn) {
+    const pending = (this.cleanupPending || Promise.resolve()).then(fn);
+    this.cleanupPending = pending.catch(() => {}); return pending;
+  }
+  cleaned(ids, result) {
+    for (const id of ids) {
+      if (result.results.some(r => r.jobId === id && (r.status === 'error' || !r.keep && r.status !== 'ok'))) continue;
+      const job = this.get(id);
+      if (!terminal.has(job.status) || job.cleanedAt) continue;
+      job.cleanedAt = now();
+      this.db.prepare('UPDATE jobs SET body=? WHERE id=?').run(JSON.stringify(job), id);
+    }
+    this.lastCleanup = { id: result.id, at: now() }; this.emit('change');
+    for (const r of result.results) if (r.status === 'error') this.emit('fault', new Error(`${r.kind}: ${r.detail}`));
+  }
+  async cleanupJob(id, { dryRun = false } = {}) {
+    if (!dryRun) {
+      if (this.get(id).cleanedAt) return null;
+      await this.stopPreview(id, 'cleanup');
+      if (this.get(id).status === 'cancelled') while (this.runs.has(id)) await new Promise(r => setTimeout(r, 25));
+    }
+    return this.queueCleanup(async () => {
+      const job = this.get(id);
+      if (!terminal.has(job.status) || job.cleanedAt && !dryRun) return null;
+      const ctx = this.cleanupContext(id), root = this.project(job.project).path;
+      const plan = await planJob({ ...ctx, root, job });
+      if (dryRun) return plan;
+      const result = await applyCleanup({ ...plan, dryRun: false }, this.cleanupContext(id));
+      this.cleaned([id], result); return result;
+    });
+  }
+  cleanup({ dryRun = false, id, backupsOnly = false } = {}) {
+    return this.queueCleanup(async () => {
+      await this.previewRecovery;
+      let ctx = this.cleanupContext(), plan, pending = [];
+      if (id !== undefined) {
+        const preview = this.cleanupPreview;
+        if (!preview || preview.id !== id || Date.now() - Date.parse(preview.at) > 10 * 60_000) throw Object.assign(new Error('Cleanup preview expired or does not match; preview again'), { code: 409 });
+        plan = preview; pending = preview.jobIds; this.cleanupPreview = null;
+      } else {
+        plan = await planPeriodic(backupsOnly ? { ...ctx, jobs: [], projects: [], agents: [], isActive: () => false } : ctx);
+        if (!backupsOnly) for (const job of ctx.jobs) if (terminal.has(job.status) && !job.cleanedAt && !ctx.isActive(job.id) && !(job.status === 'merged' && this.config.cleanupOnMerge === false)) {
+          const planned = await planJob({ ...ctx, root: this.project(job.project).path, job });
+          plan.items.push(...planned.items); pending.push(job.id);
+        }
+        plan.items = plan.items.filter((entry, i, all) => all.findIndex(e => e.kind === entry.kind && e.target === entry.target && e.root === entry.root) === i);
+      }
+      if (dryRun) { this.cleanupPreview = { ...plan, jobIds: pending }; return plan; }
+      ctx = this.cleanupContext();
+      const result = await applyCleanup({ ...plan, dryRun: false }, ctx);
+      this.cleaned(pending.filter(jobId => !ctx.isActive(jobId)), result); return result;
+    });
+  }
   // Gỡ mọi worktree controller tạo cho việc (chính, -tN, -review-*, -consult-*) và branch ai-team/<id>*. Không đụng worktree/branch người dùng tạo.
   async releaseGit(job) {
     const root = this.config.projects.find(p => p.id === job.project)?.path, mine = join(this.dataDir, 'worktrees');
@@ -2002,14 +2097,11 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     for (const l of job.linked || []) if (l.worktree?.startsWith(mine)) { await run(['git'], ['-C', l.path, 'worktree', 'remove', '--force', l.worktree], { allowFailure: true }); if (job.status !== 'merged') await run(['git'], ['-C', l.path, 'branch', '-D', l.branch], { allowFailure: true }); }
   }
-  // Lúc khởi động chưa có lượt nào chạy: dọn rác của việc đã merge/nghiên cứu xong và worktree review/consult sót lại (bản cũ không gỡ, hoặc server bị tắt giữa lượt).
+  // Giữ đường release cũ cho merged khi tắt cleanupOnMerge; phần còn lại đi qua manifest.
   async sweepGit() {
-    const mine = join(this.dataDir, 'worktrees');
-    for (const job of this.jobs()) if (['merged', 'done'].includes(job.status) && !job.released) { await this.releaseGit(job); job.released = true; this.save(job); }
-    for (const p of this.config.projects) {
-      const trees = (await git(p.path, ['worktree', 'list', '--porcelain']).catch(() => '')).split(/\r?\n/).filter(l => l.startsWith('worktree ')).map(l => l.slice(9));
-      for (const wt of trees) if (resolve(wt).toLowerCase().startsWith(resolve(mine).toLowerCase()) && /-(review|consult|preview)-[0-9a-f]{8}$/.test(wt) && !this.runs.has(basename(wt).split('-')[0]) && !this.previews.has(basename(wt).split('-')[0])) await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
-      await run(['git'], ['-C', p.path, 'worktree', 'prune'], { allowFailure: true });
+    if (this.config.cleanupOnMerge !== false) return;
+    for (const job of this.jobs()) if (job.status === 'merged' && !job.released) {
+      await this.releaseGit(job); const fresh = this.get(job.id); fresh.released = true; this.save(fresh);
     }
   }
   async diff(id) {
@@ -2144,7 +2236,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       for (const l of job.linked || []) { const r = await run(['git'], ['-C', l.path, 'merge', '--ff-only', l.revision], { allowFailure: true }); if (r.code !== 0) throw new Error(msg("srv.team.linked_merge_failed", { 0: l.project, 1: job.baseBranch })); }
       job.status = 'merged'; job.pendingMerge = null; job.mergedInto = { branch: destination.branch, commit, mode }; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: commit.slice(0, 8), 1: destination.branch }), job.mergedInto);
       await this.stopPreview(id, 'merged'); job.preview = this.get(id).preview;
-      await this.releaseGit(job).catch(e => this.emit('fault', e));
+      if (this.config.cleanupOnMerge !== false) await this.cleanupJob(id).catch(e => this.emit('fault', e));
+      else await this.releaseGit(job).catch(e => this.emit('fault', e));
+      Object.assign(job, this.get(id));
     } catch (error) { job.status = 'ready'; this.save(job); throw error; }
     finally { this.runs.delete(id); this.kick(); }
     return job;
@@ -2279,12 +2373,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   async close() {
     if (this.dbClosed) return;
-    this.closed = true; clearInterval(this.interval); clearInterval(this.backupTimer); for (const r of this.runs.values()) r.abort.abort();
+    this.closed = true; clearInterval(this.interval); clearInterval(this.backupTimer); clearInterval(this.cleanupTimer); for (const r of this.runs.values()) r.abort.abort();
     await this.previewRecovery;
     const previews = [...this.previews.entries()];
     for (const [id] of previews) await this.stopPreview(id, 'close');
     await Promise.all(previews.map(([, p]) => p.done));
     while (this.runs.size || this.refreshing) await new Promise(r => setTimeout(r, 25));
+    await this.cleanupStartup; await this.cleanupPending;
     this.db.close(); this.dbClosed = true;
   }
 }
