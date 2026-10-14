@@ -241,6 +241,108 @@ function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
 const deletable = j => !['running', 'queued', 'merging'].includes(j.status);
 const runningOf = j => j?.status === 'running' ? (j.running?.length ? j.running : j.current ? [j.current] : []) : [];
 const nodeOfRun = r => ({ plan: 'manager', challenge: 'manager', final: 'manager', implement: 'b:' + r.agent, research: 'b:' + r.agent, review: 'reviewer', verify: 'verifier' })[r.stage] || null;
+// ---- Token: isolated usage report view ----
+let tokenFilter = { period: 'today', project: '', session: '', job: '', from: '', to: '' }, tokenRequest = 0, tokenReports, tokenTimezone;
+const tokenNumber = value => value == null ? '—' : Number(value).toLocaleString(LOCALE_TAG[lang], { maximumFractionDigits: 1 });
+const tokenShift = (day, count) => new Date(Date.parse(day + 'T00:00:00Z') + count * 86400000).toISOString().slice(0, 10);
+function tokenDay(date, timezone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(p => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+function tokenRange(timezone, now = new Date()) {
+  const today = tokenDay(now, timezone);
+  let from = today, to = tokenShift(today, 1);
+  if (tokenFilter.period === 'week') { from = tokenShift(today, -((new Date(today + 'T00:00:00Z').getUTCDay() + 6) % 7)); to = tokenShift(from, 7); }
+  if (tokenFilter.period === 'month') { from = today.slice(0, 7) + '-01'; const end = new Date(from + 'T00:00:00Z'); end.setUTCMonth(end.getUTCMonth() + 1); to = end.toISOString().slice(0, 10); }
+  if (tokenFilter.period === 'custom') { from = tokenFilter.from; to = tokenFilter.to ? tokenShift(tokenFilter.to, 1) : ''; }
+  return { from, to };
+}
+const tokenJobCache = new Map();
+function tokenJobLink(job) {
+  const key = `${job.id}:${job.usage?.calls}:${job.usage?.tokens}:${job.status}`, cached = tokenJobCache.get(key);
+  if (!cached && job.createdAt) {
+    tokenJobCache.set(key, {});
+    api('usage?' + new URLSearchParams({ job: job.id, from: job.createdAt, to: new Date().toISOString(), groupBy: 'job' })).then(report => {
+      const totals = report.totals; tokenJobCache.set(key, totals);
+      document.querySelectorAll('[data-token-job]').forEach(link => { if (link.dataset.tokenJob === job.id && link.closest('.token-job-usage')) link.textContent = t('ui.token.jobUsage', { tokens: tokenNumber(totals.tokens), calls: tokenNumber(totals.calls), minutes: tokenNumber(totals.unknownDurationCalls ? null : totals.durationMs / 60000) }); });
+    }).catch(() => {});
+  }
+  const ms = cached?.durationMs != null && !cached.unknownDurationCalls ? cached.durationMs : null;
+  return `<p class="token-job-usage"><a href="#token" data-token-job="${esc(job.id)}">${esc(t('ui.token.jobUsage', { tokens: tokenNumber(cached?.tokens ?? job.usage?.tokens), calls: tokenNumber(cached?.calls ?? job.usage?.calls), minutes: tokenNumber(ms == null ? null : ms / 60000) }))}</a></p>`;
+}
+document.addEventListener('click', e => {
+  const link = e.target.closest('[data-token-job]');
+  if (!link) return;
+  e.preventDefault();
+  const job = state.jobs.find(j => j.id === link.dataset.tokenJob);
+  tokenFilter.job = link.dataset.tokenJob; tokenFilter.project = job?.project || ''; tokenFilter.session = job?.sessionId || '';
+  if (job?.createdAt) { const timezone = tokenTimezone || state.usageTimezone || state.timezone || 'Asia/Tokyo'; tokenFilter.period = 'custom'; tokenFilter.from = tokenDay(new Date(job.createdAt), timezone); tokenFilter.to = tokenDay(new Date(), timezone); }
+  view('token');
+});
+function tokenCSV(rows) {
+  return rows.map(row => row.map(value => '"' + String(value ?? '').replace(/"/g, '""') + '"').join(',')).join('\r\n');
+}
+function tokenExport() {
+  if (!tokenReports) return;
+  const rows = [['from', 'to', 'timezone', 'groupBy', 'key', 'tokens', 'calls', 'durationMs', 'tokensPerMinute', 'wasteRatio', 'unknownTokenCalls', 'unknownDurationCalls']];
+  for (const report of Object.values(tokenReports)) for (const row of [{ key: 'total', ...report.totals }, ...report.groups]) rows.push([report.from, report.to, report.timezone, report.groupBy, row.key, row.tokens, row.calls, row.durationMs, row.tokensPerMinute, row.wasteRatio, row.unknownTokenCalls, row.unknownDurationCalls]);
+  const url = URL.createObjectURL(new Blob(['\uFEFF', tokenCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a'); link.href = url; link.download = 'usage.csv'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function tokenRanking(report) {
+  const jobGroup = report.groupBy === 'job';
+  return `<section class="panel token-ranking"><h3>${esc(t('ui.token.' + report.groupBy))}</h3><div class="token-table-wrap"><table><thead><tr>${['name', 'tokens', 'minutes', 'calls', ...(jobGroup ? ['fixes'] : [])].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${[...report.groups].sort((a, b) => b.tokens - a.tokens).map(row => {
+    const job = jobGroup && state.jobs.find(j => j.id === row.key);
+    const label = job ? job.goal : report.groupBy === 'agent' ? names[row.key] || row.key : row.key;
+    return `<tr><th scope="row">${jobGroup ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(label || t('ui.common.unknown'))}</a>` : esc(label || t('ui.common.unknown'))}${job ? `<small>${esc(row.key)}</small>` : ''}</th><td>${tokenNumber(row.tokens)}</td><td>${tokenNumber(row.durationMs / 60000)}</td><td>${tokenNumber(row.calls)}</td>${jobGroup ? `<td>${tokenNumber(job ? job.round ?? null : null)}</td>` : ''}</tr>`;
+  }).join('') || `<tr><td colspan="${jobGroup ? 5 : 4}">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
+}
+async function drawToken() {
+  if (!state) return;
+  const request = ++tokenRequest, root = $('token-view'); tokenReports = null;
+  const timezone = tokenTimezone || state.usageTimezone || state.timezone || 'Asia/Tokyo';
+  const range = tokenRange(timezone), projects = state.projects, sessions = state.sessions.filter(s => !tokenFilter.project || s.project === tokenFilter.project);
+  root.innerHTML = `<div class="panel token-toolbar"><div class="panel-heading"><h2 id="token-title">${esc(t('ui.token.title'))}</h2><button id="token-export" disabled>${esc(t('ui.token.csv'))}</button></div><form id="token-form" class="token-filters"><label>${esc(t('ui.token.period'))}<select id="token-period">${['today', 'week', 'month', 'custom'].map(k => `<option value="${k}" ${tokenFilter.period === k ? 'selected' : ''}>${esc(t('ui.token.' + k))}</option>`).join('')}</select></label><label>${esc(t('ui.task.project'))}<select id="token-project"><option value="">${esc(t('ui.token.all'))}</option>${projects.map(p => `<option value="${esc(p.id)}" ${p.id === tokenFilter.project ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select></label><label>${esc(t('ui.token.session'))}<select id="token-session"><option value="">${esc(t('ui.token.all'))}</option>${sessions.map(s => `<option value="${esc(s.id)}" ${s.id === tokenFilter.session ? 'selected' : ''}>${esc(s.name || s.id)}</option>`).join('')}</select></label><label ${tokenFilter.period !== 'custom' ? 'hidden' : ''}>${esc(t('ui.token.from'))}<input id="token-from" type="date" value="${esc(tokenFilter.from)}" required></label><label ${tokenFilter.period !== 'custom' ? 'hidden' : ''}>${esc(t('ui.token.to'))}<input id="token-to" type="date" value="${esc(tokenFilter.to)}" required></label><button type="submit">${esc(t('ui.token.apply'))}</button></form><p class="token-range muted">${esc(range.from)} – ${esc(range.to)} · ${esc(timezone)} · ${esc(t('ui.token.exclusive'))}</p>${tokenFilter.job ? `<p class="token-range">${esc(t('ui.token.job'))}: ${esc(tokenFilter.job)} <button id="token-clear-job">${esc(t('ui.token.clearJob'))}</button></p>` : ''}</div><div id="token-data" aria-live="polite" aria-busy="true">${esc(t('ui.token.loading'))}</div>`;
+  $('token-period').onchange = e => { tokenFilter.period = e.target.value; if (tokenFilter.period === 'custom') { tokenFilter.from ||= range.from; tokenFilter.to ||= tokenShift(range.to, -1); } drawToken(); };
+  $('token-project').onchange = e => { tokenFilter.project = e.target.value; tokenFilter.session = ''; tokenFilter.job = ''; drawToken(); };
+  $('token-session').onchange = e => { tokenFilter.session = e.target.value; tokenFilter.job = ''; drawToken(); };
+  for (const key of ['from', 'to']) { $('token-' + key).disabled = tokenFilter.period !== 'custom'; $('token-' + key).onchange = e => { tokenFilter[key] = e.target.value; }; }
+  $('token-form').onsubmit = e => { e.preventDefault(); drawToken(); };
+  $('token-export').onclick = tokenExport;
+  if ($('token-clear-job')) $('token-clear-job').onclick = () => { tokenFilter.job = ''; drawToken(); };
+  try {
+    if (!range.from || !range.to || range.from >= range.to) throw new Error(t('ui.token.invalidRange'));
+    const query = { ...range, project: tokenFilter.project, session: tokenFilter.session, job: tokenFilter.job };
+    const get = (groupBy, dates = {}) => api('usage?' + new URLSearchParams({ ...query, ...dates, groupBy }));
+    const reports = await Promise.all(['day', 'job', 'agent', 'stage', 'model'].map(k => get(k)));
+    if (request !== tokenRequest) return;
+    if (reports[0].timezone && reports[0].timezone !== timezone) { tokenTimezone = reports[0].timezone; return drawToken(); }
+    const daily = reports[0], days = [...daily.groups].sort((a, b) => a.key.localeCompare(b.key)), members = new Map();
+    // Fetch real member totals within each day's bounds; never distribute totals by guesswork.
+    for (let i = 0; i < days.length; i += 4) {
+      const batch = await Promise.all(days.slice(i, i + 4).map(day => get('agent', { from: day.key, to: tokenShift(day.key, 1) })));
+      if (request !== tokenRequest) return;
+      batch.forEach((report, n) => members.set(days[i + n].key, report.groups));
+    }
+    tokenReports = Object.fromEntries(reports.map(r => [r.groupBy, r]));
+    const totals = daily.totals, change = daily.change || {}, colors = ['#3182ce', '#d69e2e', '#38a169', '#805ad5', '#dd6b20', '#d53f8c'];
+    const agents = reports[2].groups.map(r => r.key).sort(), color = id => colors[agents.indexOf(id) % colors.length];
+    const max = Math.max(1, ...days.map(d => d.tokens));
+    const comparison = (value, points = false) => value == null ? t('ui.token.noBaseline') : `${value > 0 ? '+' : ''}${tokenNumber(value)}${points ? ' ' + t('ui.token.points') : '%'} ${t('ui.token.previous')}`;
+    const cards = [['tokens', tokenNumber(totals.tokens), change.tokensPercent], ['calls', tokenNumber(totals.calls), change.callsPercent], ['minutes', tokenNumber(totals.durationMs / 60000), change.durationPercent], ['waste', tokenNumber(totals.wasteRatio * 100) + '%', change.wasteRatioPoints]];
+    const stage = reports[3].groups.find(r => r.key === 'review'), wasted = [...reports[1].groups].sort((a, b) => b.wastedTokens - a.wastedTokens)[0];
+    const tips = [];
+    if (totals.tokens && stage?.tokens / totals.tokens > .4) tips.push(t('ui.token.reviewTip'));
+    if (totals.wastedCalls) tips.push(t('ui.token.wasteTip', { job: wasted?.key || '—' }));
+    $('token-data').innerHTML = `<div class="token-totals">${cards.map(([k, value, delta]) => `<div class="metric"><span>${esc(t('ui.token.' + k))}</span><strong>${esc(value)}</strong><small>${esc(comparison(delta, k === 'waste'))}</small></div>`).join('')}</div><p class="token-range muted">${esc(t('ui.token.rate', { rate: tokenNumber(totals.tokensPerMinute) }))}${totals.unknownTokenCalls || totals.unknownDurationCalls ? ' · ' + esc(t('ui.token.partial', { tokens: totals.unknownTokenCalls, durations: totals.unknownDurationCalls })) : ''}</p><section class="panel token-chart-panel"><h3>${esc(t('ui.token.daily'))}</h3><div class="token-legend">${agents.map(id => `<span><i style="background:${color(id)}"></i>${esc(names[id] || id)}</span>`).join('')}</div><div class="token-chart" role="img" aria-label="${esc(t('ui.token.daily'))}">${days.map(day => `<div class="token-column"><span>${tokenNumber(day.tokens)}</span><div class="token-stack" style="height:${Math.max(1, day.tokens / max * 180)}px">${(members.get(day.key) || []).map(row => `<div style="height:${day.tokens ? row.tokens / day.tokens * 100 : 0}%;background:${color(row.key)}" title="${esc(day.key + ' · ' + (names[row.key] || row.key) + ': ' + tokenNumber(row.tokens))}"></div>`).join('')}</div><small>${esc(day.key.slice(5))}</small></div>`).join('') || `<p>${esc(t('ui.token.empty'))}</p>`}</div><details><summary>${esc(t('ui.token.chartData'))}</summary><div class="token-table-wrap"><table><thead><tr>${['day', 'agent', 'tokens'].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${days.flatMap(day => (members.get(day.key) || []).map(row => `<tr><td>${esc(day.key)}</td><td>${esc(names[row.key] || row.key || t('ui.common.unknown'))}</td><td>${tokenNumber(row.tokens)}</td></tr>`)).join('')}</tbody></table></div></details></section><div class="token-rankings">${reports.slice(1).map(tokenRanking).join('')}</div><section class="panel token-tips"><h3>${esc(t('ui.token.tips'))}</h3>${(tips.length ? tips : [t('ui.token.noTips')]).map(tip => `<p>${esc(tip)}</p>`).join('')}</section>`;
+    $('token-data').setAttribute('aria-busy', 'false'); $('token-export').disabled = false;
+  } catch (e) {
+    if (request !== tokenRequest) return;
+    $('token-data').innerHTML = `<p class="error-box">${esc(t('ui.token.failed'))} ${esc(e.message)}</p><button id="token-retry">${esc(t('ui.token.retry'))}</button>`;
+    $('token-data').setAttribute('aria-busy', 'false'); $('token-retry').onclick = drawToken;
+  }
+}
+
 function drawState() {
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
@@ -681,7 +783,7 @@ function drawInspector() {
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  $('inspector').innerHTML = `<p class="task-goal">${esc(job.goal)}</p>${badge(job)}${tokenJobLink(job)}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   if (discussions) $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.title'))}</h3>${discussions}`);
   const unmapped = (job.obligations || []).filter(o => o.status === 'unmapped');
   if (unmapped.length) $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.obligations'))}</h3>${unmapped.map(o => `<p>${esc(o.id)} · ${esc(o.topic)}<br>${esc((o.pending || []).map(m => m.text).join('; ') || o.reason)} <button data-obligation="${esc(o.id)}" ${['running','queued','merging'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.peer.map'))}</button></p>`).join('')}`);
@@ -780,7 +882,7 @@ async function drawResults() {
   const configured = job.kind !== 'research' && !!project?.preview;
   const stats = checking ? t('ui.members.checking') : changes ? t('ui.results.stats', { n: changes.files?.length || 0, added: changes.added ?? '—', removed: changes.removed ?? '—' }) : '—';
   const level = (key, ok) => `<li class="${ok ? 'evidence-pass' : 'muted'}"><b>${esc(t('ui.results.' + key))}</b><span>${esc(t(ok ? 'ui.results.pass' : 'ui.results.pending'))}</span></li>`;
-  const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(job.goal)}</p><details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
+  const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(job.goal)}</p>${tokenJobLink(job)}<details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
     <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>
     <section class="result-section"><h3>${esc(t('ui.results.proof'))}</h3>${preview?.status === 'failed' || preview?.screenshots === false ? `<div class="error-box">${source('controller')} ${stale(preview.revision)}<p>${esc(preview.error || t(preview.screenshots === false ? 'ui.results.noChrome' : 'ui.results.previewFailed'))}</p>${other.filter(x => x.item.stage === 'preview' && x.item.revision === preview.revision && x.file.path.endsWith('preview.log')).map(x => evidenceLink(id, x.path, t('ui.evidence.openLog'))).join(' ')}</div>` : ''}
     <div class="result-images">${images.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!images.length ? `<p class="muted">${esc(t('ui.results.noImages'))}</p>` : ''}
@@ -1180,6 +1282,9 @@ $('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); 
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });
 function view(name) {
   name = name === true ? 'members' : name || 'work';
+  $('token-view').hidden = name !== 'token'; $('token-nav').classList.toggle('active', name === 'token');
+  $('metrics').hidden = name === 'token'; document.querySelector('main > header').hidden = name === 'token';
+  if (name === 'token') drawToken();
   $('work-view').hidden = name !== 'work'; $('quota-view').hidden = name !== 'members'; $('security-view').hidden = name !== 'security';
   $('overview').classList.toggle('active', name === 'work'); $('quota-nav').classList.toggle('active', name === 'members'); $('security-nav').classList.toggle('active', name === 'security');
   if (name === 'security') { drawSecurity(); drawAccess(); }
@@ -1331,6 +1436,7 @@ async function drawMemory() {
 }
 $('memory-open').onclick = () => attempt(async () => { await drawMemory(); $('memory-dialog').showModal(); });
 $('close-memory').onclick = () => $('memory-dialog').close();
+$('token-nav').onclick = () => view('token');
 $('overview').onclick = () => view('work');
 $('security-nav').onclick = () => view('security');
 $('quota-nav').onclick = () => attempt(async () => { view('members'); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
@@ -1469,7 +1575,7 @@ $('theme-select').onchange = () => { store.set('theme', $('theme-select').value)
 $('lang-select').onchange = () => attempt(async () => {
   const next = $('lang-select').value; store.set('lang', next);
   await api('settings', { language: next }).catch(e => notice(e.message));
-  await loadLanguage(next); notice(''); if (state) { drawState(); drawTimeline(); }
+  await loadLanguage(next); notice(''); if (state) { drawState(); drawTimeline(); if (!$('token-view').hidden) drawToken(); }
 });
 document.addEventListener('click', e => {
   if (!e.target.closest('.actions-dropdown')) {

@@ -8,6 +8,7 @@
   <div class="workspace-label" data-i18n="ui.nav.workspace"></div>
   <button class="nav active" id="overview">◉ &nbsp; <span data-i18n="ui.nav.overview"></span></button>
   <button class="nav" id="quota-nav">◷ &nbsp; <span data-i18n="ui.nav.members"></span></button>
+  <button class="nav" id="token-nav"><span aria-hidden="true">?</span> &nbsp; <span data-i18n="ui.token.title"></span></button>
   <button class="nav" id="security-nav">⛨ &nbsp; <span data-i18n="ui.nav.security"></span></button>
   <div class="sidebar-heading">
     <span data-i18n="ui.nav.jobs"></span>
@@ -48,6 +49,7 @@
     </div>
   </div>
   <section id="quota-view" hidden><div class="panel"><div class="panel-heading"><div><span class="eyebrow">MEMBERS & ACCOUNTS</span><h2 data-i18n="ui.members.title"></h2></div><div class="account-actions"><div class="view-switch" role="group" aria-label="View mode"><button type="button" id="view-mode-compact" class="selected"><span class="view-icon">☰</span> <span data-i18n="ui.members.viewCompact"></span></button><button type="button" id="view-mode-detailed"><span class="view-icon">⊞</span> <span data-i18n="ui.members.viewDetailed"></span></button></div><button id="refresh-quota" data-i18n="ui.members.refreshQuota"></button><button class="primary" id="add-member" data-i18n="ui.members.add"></button></div></div><p class="section-note" data-i18n="ui.members.note"></p><div class="demo-live-link" id="demo-live-link" hidden><span data-i18n="ui.members.demoNote"></span> <a class="primary button-link" href="http://127.0.0.1:3333/?members=1" data-i18n="ui.members.openLive"></a></div><div id="quota-compact" class="quota-compact"></div><div id="quota-cards" class="quota-cards" hidden></div><details class="history" id="skills-box"><summary><span data-i18n="ui.skills.title"></span> <span id="skills-count"></span></summary><p class="muted" data-i18n="ui.skills.note"></p><button type="button" id="skills-refresh" data-i18n="ui.skills.refresh"></button><div id="skills-list" class="skills-list"></div></details><details class="history"><summary data-i18n="ui.members.history"></summary><pre id="quota-history"></pre></details></div></section>
+  <section id="token-view" hidden aria-labelledby="token-title"></section>
   <section id="security-view" hidden><div class="panel"><div class="panel-heading"><div><span class="eyebrow">PERMISSIONS & DATA</span><h2 data-i18n="ui.sec.title"></h2></div></div><p class="section-note" data-i18n="ui.sec.intro"></p><div class="access-box" id="project-access"></div><div class="sec-wrap" id="security-matrix"></div><div class="sec-notes" id="security-notes"></div></div></section>
   <footer>AI Team / Local orchestrator <span data-i18n="ui.footer.flow"></span></footer>
 </main>
