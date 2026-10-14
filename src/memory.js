@@ -53,6 +53,10 @@ export class MemoryStore {
     const result = this.db.prepare("UPDATE memory SET status='superseded',revision=revision+1 WHERE project=? AND id=? AND status='active' AND revision=?").run(project, Number(String(id).replace(/^M/i, '')), revision);
     if (!result.changes) throw new Error('Memory changed; reload before editing');
   }
+  markStale(project, id, revision) {
+    const result = this.db.prepare("UPDATE memory SET status='stale',revision=revision+1 WHERE project=? AND id=? AND status='active' AND revision=?").run(project, Number(String(id).replace(/^M/i, '')), revision);
+    if (!result.changes) throw new Error('Memory changed; reload before editing');
+  }
   candidates(project, job, query = '', limit = 200, memoryId) {
     if (typeof query !== 'string' || query.length > 2000) throw new Error('Memory query is too long');
     limit = Math.max(1, Math.min(500, Number(limit) || 200));
@@ -73,6 +77,9 @@ export class MemoryStore {
       if (r.kind === 'retraction') this.db.prepare("UPDATE memory SET status='superseded',revision=revision+1 WHERE project=? AND uid=? AND status='active'").run(job.project, r.text);
       this.db.prepare("UPDATE memory SET scope='project',revision=revision+1 WHERE id=?").run(r.id);
     }
+  }
+  promoteMerged(jobs) {
+    for (const job of jobs) if (job.status === 'merged') this.promote(job);
   }
   export(project) { return { format: 'ai-team-memory', version: 1, exportedAt: new Date().toISOString(), project, records: this.rows(project, true) }; }
   import(project, pack, jobMap = {}, validateOnly = false) {
