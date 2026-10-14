@@ -443,6 +443,37 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   // close is intentionally idempotent for shutdown after a manual close.
 });
 
+test('Git authors: task checkpoints identify members and controller merges identify their work', async t => {
+  const { team, f } = await parallelTeam(t, [
+    { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [] },
+    { agent: 'codex-4', difficulty: 2, instruction: 'T2 edit', files: ['t2.txt'], dependsOn: [] },
+    { agent: 'codex-2', difficulty: 2, instruction: 'T3 edit', files: ['t3.txt'], dependsOn: [0, 1] },
+  ]);
+  team.config.agents.find(a => a.id === 'codex-2').label = 'Builder Two\nDisplay';
+  team.start();
+  const job = await team.create({ project: 'test', goal: 'Git attribution' }), ready = await settle(team, job.id, 'ready');
+  const log = (await run(['git'], ['-C', ready.worktree, 'log', '--format=%an|%ae|%s'])).stdout;
+  for (const [i, task] of ready.tasks.entries()) {
+    const id = task.ranBy, label = team.agent(id).label.replace(/[\r\n]/g, ' ');
+    assert(log.includes(`${label} (AI Team)|${id}@ai-team.local|AI Team ${job.id} T${i + 1} ${id}: checkpoint`), log);
+    if (i < 2) assert(log.includes(`AI Team controller|controller@ai-team.local|Merge T${i + 1} (${id}) into ai-team/${job.id}`), log);
+  }
+  // A job-level checkpoint uses the last builder even after a checker has run.
+  writeFileSync(join(ready.worktree, 'followup.txt'), 'followup\n');
+  await team.checkpoint(ready);
+  assert.equal((await run(['git'], ['-C', ready.worktree, 'log', '-1', '--format=%an|%ae|%s'])).stdout.trim(),
+    `Builder Two Display (AI Team)|codex-2@ai-team.local|AI Team ${job.id} codex-2: checkpoint`);
+  ready.tested = ready.reviewed = ready.verified = ready.revision; team.save(ready);
+  const target = { type: 'existing', branch: 'release' };
+  await run(['git'], ['-C', f.path, 'branch', target.branch]); await branchCommit(f, target.branch);
+  const prepared = await team.merge(job.id, { target }), pending = prepared.pendingMerge;
+  assert(pending?.passed);
+  const builders = [...new Set(ready.tasks.map(task => task.ranBy))].join(',');
+  assert.equal((await run(['git'], ['-C', f.path, 'log', '-1', '--format=%an|%ae|%s', pending.commit])).stdout.trim(),
+    `AI Team controller|controller@ai-team.local|Merge ai-team/${job.id} (${builders}) into release`);
+  assert.equal((await run(['git'], ['-C', f.path, 'rev-list', '--parents', '-n', '1', pending.commit])).stdout.trim().split(' ').length, 3);
+});
+
 async function branchReady(t, f = null, baseBranch) {
   f ||= await fixture();
   const team = new Team(f.config, f.data); team.closed = true; t.after(() => team.close());

@@ -19,6 +19,8 @@ const planTasks = tasks => tasks.map(({ kind, instruction, dependsOn, agent, dif
 const planHash = p => hash(JSON.stringify({ tasks: planTasks(p.tasks), flow: p.flow, summary: p.summary }));
 const terminal = new Set(['merged', 'cancelled', 'done']);
 const git = async (cwd, args) => (await run(['git'], ['-C', cwd, ...args], { timeoutMs: 60_000 })).stdout.trim();
+const gitAuthor = (id, label) => ['-c', `user.name=${String(label || id).replace(/[\r\n]/g, ' ')}`, '-c', `user.email=${String(id).toLowerCase().replace(/[^a-z0-9._-]/g, '')}@ai-team.local`];
+const controllerAuthor = gitAuthor('controller', 'AI Team controller');
 const snapshotOf = async cwd => {
   const [commit, diff, status] = await Promise.all([git(cwd, ['rev-parse', 'HEAD']), git(cwd, ['diff', '--no-ext-diff', '--binary', 'HEAD']), git(cwd, ['status', '--porcelain', '-z', '--untracked-files=all'])]);
   const files = status.split('\0').filter(x => x.startsWith('?? ')).map(x => x.slice(3)).sort().map(path => {
@@ -1175,27 +1177,29 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     return report;
     } finally { if (scratchTree) await run(['git'], ['-C', this.project(job.project).path, 'worktree', 'remove', '--force', scratchTree], { allowFailure: true }); }
   }
-  async commitAll(job, wt = job.worktree, branch = job.branch) {
+  async commitAll(job, wt = job.worktree, branch = job.branch, { agent, taskIndex } = {}) {
     if (await git(wt, ['symbolic-ref', '--short', 'HEAD']) !== branch) throw new Error(msg("srv.team.agent_doi_branch_can_kiem_tra"));
     await git(wt, ['add', '--all']);
     const markers = await run(['git'], ['-C', wt, 'grep', '--cached', '-n', '-I', '-E', '^(<<<<<<<|>>>>>>>)( |$)'], { allowFailure: true, timeoutMs: 60_000 });
     if (markers.code === 0) throw new Error(msg("srv.team.con_conflict_marker_trong_code") + markers.stdout.slice(0, 2000));
     const merging = (await run(['git'], ['-C', wt, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'], { allowFailure: true })).code === 0;
     if (merging || await git(wt, ['diff', '--cached', '--name-only'])) {
-      await git(wt, ['-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'commit', '--no-verify', '-m', `AI Team ${job.id}: checkpoint`]);
+      const id = agent || job.reports?.findLast(r => r.stage === 'implement')?.agent || job.implementers?.at(-1) || job.reports?.at(-1)?.agent || (job.roster || roster(this.config)).builders[0] || 'controller';
+      const label = this.config.agents.find(a => a.id === id)?.label || id;
+      await git(wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `AI Team ${job.id}${taskIndex != null ? ` T${taskIndex + 1}` : ''} ${id}: checkpoint`]);
     }
   }
-  async checkpoint(job) {
+  async checkpoint(job, options = {}) {
     // Repo liên kết đổi → thêm 1 commit rỗng ghi lại trong repo chính, để revision chính đổi theo và mọi duyệt cũ (test/review/verify) mất hiệu lực.
     const moved = [];
     for (const l of job.linked || []) {
-      await this.commitAll(job, l.worktree, l.branch);
+      await this.commitAll(job, l.worktree, l.branch, options);
       const rev = await git(l.worktree, ['rev-parse', 'HEAD']);
       if ((await run(['git'], ['-C', l.worktree, 'merge-base', '--is-ancestor', l.base, 'HEAD'], { allowFailure: true })).code !== 0) throw new Error(`${l.project}: ${msg("srv.team.branch_khong_con_chua_base_agent")}`);
       if (rev !== l.revision) { l.revision = rev; moved.push(`${l.project}@${rev.slice(0, 12)}`); }
     }
-    await this.commitAll(job);
-    if (moved.length) await git(job.worktree, ['-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'commit', '--allow-empty', '--no-verify', '-m', `AI Team ${job.id}: linked ${moved.join(', ')}`]);
+    await this.commitAll(job, job.worktree, job.branch, options);
+    if (moved.length) await git(job.worktree, [...controllerAuthor, 'commit', '--allow-empty', '--no-verify', '-m', `AI Team ${job.id}: linked ${moved.join(', ')}`]);
     if ((await run(['git'], ['-C', job.worktree, 'merge-base', '--is-ancestor', job.base, 'HEAD'], { allowFailure: true })).code !== 0) throw new Error(msg("srv.team.branch_khong_con_chua_base_agent"));
     job.revision = await git(job.worktree, ['rev-parse', 'HEAD']);
     job.pendingMerge = null; job.mergeTargetCheck = null;
@@ -1270,15 +1274,15 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         try { report = await this.callWithHandover(job, task, i, who, code ? 'implement' : 'research', skills, children[k]?.wt); }
         catch (error) { if (!error.peerReport && (!error.peerWait || runState.abort.signal.aborted)) throw error; peerWaits.set(k, error); report = error.peerReport || error.report; }
         task.contextGaps = (Array.isArray(report.contextGaps) ? report.contextGaps : []).map(String).filter(Boolean).slice(0, 10);
-        if (children[k]) { await this.commitAll(job, children[k].wt, children[k].branch); task.base = head0; task.commit = await git(children[k].wt, ['rev-parse', 'HEAD']); }
+        if (children[k]) { await this.commitAll(job, children[k].wt, children[k].branch, { agent: task.ranBy || who, taskIndex: i }); task.base = head0; task.commit = await git(children[k].wt, ['rev-parse', 'HEAD']); }
         return report;
       }));
     } finally { this.extra -= batch.length - 1; }
     let failure = results.find(r => r.status === 'rejected')?.reason, conflict = false;
-    for (const [k, [task]] of batch.entries()) {
+    for (const [k, [task, i, who]] of batch.entries()) {
       if (results[k].status !== 'fulfilled' || conflict) continue;
       if (children[k]) {
-        const merged = await run(['git'], ['-C', job.worktree, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'merge', '--no-ff', '--no-edit', children[k].branch], { allowFailure: true, timeoutMs: 120_000 });
+        const merged = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge T${i + 1} (${task.ranBy || who}) into ai-team/${job.id}`, children[k].branch], { allowFailure: true, timeoutMs: 120_000 });
         if (merged.code !== 0) {
           const files = await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']).catch(() => '');
           await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true });
@@ -1293,7 +1297,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (batch.find((b, k) => children[k] === c)[0].done) await run(['git'], ['-C', root, 'branch', '-D', c.branch], { allowFailure: true });
     }
     job.taskIndex = job.tasks.filter(t => t.done).length;
-    if (code && results.some(r => r.status === 'fulfilled')) { await this.checkpoint(job); if (!split) for (const [k, [t]] of batch.entries()) if (results[k].status === 'fulfilled') { t.base = head0; t.commit = job.revision; } }
+    if (code && results.some(r => r.status === 'fulfilled')) { await this.checkpoint(job, split ? {} : { agent: batch[0][0].ranBy || batch[0][2], taskIndex: batch[0][1] }); if (!split) for (const [k, [t]] of batch.entries()) if (results[k].status === 'fulfilled') { t.base = head0; t.commit = job.revision; } }
     failure ||= peerWaits.values().next().value;
     if (failure) {
       // Đường nhanh bị vướng → nâng lên Manager lập kế hoạch thay vì dừng hẳn.
@@ -1897,7 +1901,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       for (const l of job.linked || []) if (await git(l.path, ['rev-parse', l.baseBranch]) !== l.base) throw new Error(msg("srv.team.linked_base_moved", { 0: l.project }));
       if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
       if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
-      const result = await run(['git'], ['-C', job.worktree, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'merge', '--no-ff', '--no-edit', head], { allowFailure: true, timeoutMs: 120_000 });
+      const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} into ai-team/${job.id}`, head], { allowFailure: true, timeoutMs: 120_000 });
       const conflicts = result.code === 0 ? '' : await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']);
       if (result.code !== 0 && !conflicts) { await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true }); throw new Error(msg("srv.team.merge_base_that_bai") + redact(result.stderr).slice(0, 2000)); }
       job.base = head; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; job.status = 'queued';
@@ -2092,7 +2096,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         job.pendingMerge = null;
         await git(root, ['worktree', 'add', '--detach', wt, destination.tip]);
         try {
-          const result = await run(['git'], ['-C', wt, '-c', 'user.name=AI Team', '-c', 'user.email=ai-team@localhost', 'merge', '--no-ff', '--no-edit', job.revision], { allowFailure: true, timeoutMs: 120_000 });
+          const builders = [...new Set(job.tasks.filter(t => t.kind !== 'review').map(t => t.ranBy || t.agent).filter(Boolean))];
+          const result = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ai-team/${job.id} (${builders.join(',')}) into ${destination.branch}`, job.revision], { allowFailure: true, timeoutMs: 120_000 });
           if (result.code !== 0) {
             const conflicts = await git(wt, ['diff', '--name-only', '--diff-filter=U']);
             await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true });
