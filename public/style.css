@@ -247,3 +247,12 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 .results-panel pre{max-width:100%;overflow:auto}.results-panel .tag{display:inline-block;margin:2px 4px 2px 0}
 .project-row{flex-wrap:wrap}.project-row>span{flex:1;min-width:0}.project-row>.read-dirs{flex-basis:100%;min-width:0}.project-row .controls{display:flex;flex-wrap:wrap;gap:6px}
 @media(max-width:750px){.results-panel{max-height:none}.result-images img{height:145px}.result-levels li{flex-wrap:wrap}.tabs{overflow-x:auto}.tabs button{flex-shrink:0}.project-row textarea{max-width:100%}}
+
+.notice#storage-warn{display:flex;flex-wrap:wrap;align-items:center;gap:12px;justify-content:space-between}
+.notice#storage-warn[hidden]{display:none}
+.cleanup-actions{display:flex;flex-wrap:wrap;gap:8px}
+#cleanup-dialog{width:min(760px,95vw)}
+.cleanup-group{border-top:1px solid var(--line);margin-top:14px;padding-top:10px}
+.cleanup-group ul{padding-left:20px}
+.cleanup-group li{margin:8px 0;overflow-wrap:anywhere}
+.cleanup-group small{display:block}

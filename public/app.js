@@ -241,9 +241,70 @@ function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
 const deletable = j => !['running', 'queued', 'merging'].includes(j.status);
 const runningOf = j => j?.status === 'running' ? (j.running?.length ? j.running : j.current ? [j.current] : []) : [];
 const nodeOfRun = r => ({ plan: 'manager', challenge: 'manager', final: 'manager', implement: 'b:' + r.agent, research: 'b:' + r.agent, review: 'reviewer', verify: 'verifier' })[r.stage] || null;
+function drawStorage() {
+  const storage = state.storage, box = $('storage-warn');
+  box.hidden = !(storage?.warn?.dataDir || storage?.warn?.disk);
+  if (box.hidden) { box.innerHTML = ''; return; }
+  const messages = [];
+  if (storage.warn.dataDir) messages.push(t('ui.storage.dataDir', { gb: (storage.dataDirBytes / 2 ** 30).toFixed(1) }));
+  if (storage.warn.disk) messages.push(t('ui.storage.disk', { gb: (storage.freeBytes / 2 ** 30).toFixed(1) }));
+  box.innerHTML = `<span>${esc(messages.join(' '))}</span><div class="cleanup-actions">${cleanupButtons('storage')}</div>`;
+  wireCleanup('storage');
+}
+function cleanupButtons(prefix) {
+  return `<button type="button" id="${esc(prefix)}-cleanup-preview">${esc(t('ui.cleanup.preview'))}</button><button type="button" id="${esc(prefix)}-cleanup-now">${esc(t('ui.cleanup.now'))}</button>`;
+}
+const cleanupKept = item => /unmerged|kept/i.test(item.reason || '');
+function cleanupTotals(items) {
+  const removable = items.filter(item => !cleanupKept(item));
+  return { n: removable.length, mb: (removable.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0) / 2 ** 20).toFixed(1) };
+}
+function drawCleanup(manifest, results) {
+  const groups = new Map();
+  for (const item of manifest.items) {
+    if (!groups.has(item.kind)) groups.set(item.kind, []);
+    groups.get(item.kind).push(item);
+  }
+  $('cleanup-body').innerHTML = `<p>${esc(t('ui.cleanup.total', cleanupTotals(manifest.items)))}</p>
+    ${results ? `<p role="status">${esc(t('ui.cleanup.finished', { ok: results.filter(r => r.status === 'ok').length, skipped: results.filter(r => r.status === 'skipped').length, errors: results.filter(r => r.status === 'error').length }))}</p>` : ''}
+    ${[...groups].map(([kind, items]) => `<section class="cleanup-group"><h3>${esc(t('ui.cleanup.kind.' + kind))} · ${esc(t('ui.cleanup.group', { n: items.length, mb: (items.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0) / 2 ** 20).toFixed(1) }))}</h3><ul>${items.map(item => {
+      const result = results?.find(r => r.kind === item.kind && r.target === item.target);
+      return `<li><span>${esc(item.target)}</span><small>${esc(item.reason)}${cleanupKept(item) ? ' · ' + esc(t('ui.cleanup.kept')) : ''}${result ? ' · ' + esc(t('ui.cleanup.status.' + result.status)) + (result.error ? ': ' + esc(result.error) : '') : ''}</small></li>`;
+    }).join('')}</ul></section>`).join('') || `<p class="muted">${esc(t('ui.cleanup.empty'))}</p>`}`;
+  $('cleanup-dialog').querySelector('.dialog-error')?.remove();
+  if (!$('cleanup-dialog').open) $('cleanup-dialog').showModal();
+}
+async function previewCleanup() {
+  drawCleanup(await api('cleanup'));
+}
+async function runCleanup() {
+  const manifest = await api('cleanup');
+  drawCleanup(manifest);
+  if (!confirm(t('ui.cleanup.confirm', cleanupTotals(manifest.items)))) return;
+  try {
+    const result = await api('cleanup', { id: manifest.id });
+    drawCleanup(manifest, result.results);
+    await refresh();
+  } catch (e) {
+    if (e.status === 409) throw new Error(t('ui.cleanup.expired'));
+    throw e;
+  }
+}
+function wireCleanup(prefix) {
+  for (const [suffix, action] of [['preview', previewCleanup], ['now', runCleanup]]) {
+    const button = $(`${prefix}-cleanup-${suffix}`);
+    button.onclick = () => attempt(async () => {
+      button.disabled = true;
+      try { await action(); } finally { button.disabled = false; }
+    });
+  }
+}
+$('close-cleanup').onclick = () => $('cleanup-dialog').close();
+
 function drawState() {
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
+  drawStorage();
   $('mode').textContent = state.demo ? t('ui.header.demo') : 'LIVE · LOCAL';
   $('connection').textContent = t('ui.nav.connected');
   if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
@@ -1285,15 +1346,17 @@ async function drawMemory() {
     <label><input type="checkbox" id="mem-history" ${memoryHistory ? 'checked' : ''}> ${esc(t('ui.mem.history'))}</label>
     <div class="row-input"><button id="mem-export">${esc(t('ui.mem.exportMemory'))}</button><label>${esc(t('ui.mem.import'))}<input type="file" id="mem-import" accept=".json,application/json"></label></div><p id="mem-result" role="status"></p>
     <h3>${esc(t('ui.mem.facts', { project: curProject, n: m.facts.length }))}</h3>
-    <ul class="mem-list">${m.facts.filter(f => f.kind === 'fact').map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${f.id} · ${esc(f.source)} · ${esc(t('ui.mem.' + f.scope))} · ${esc(t('ui.mem.' + f.status))} · ${esc(f.commitSha?.slice(0, 8) || '')} · ${esc(clock(f.at))}</small></span>${f.status === 'active' ? `<button class="icon-btn" data-mem-del="${f.id}" data-mem-revision="${f.revision}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button>` : ''}</li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
+    <ul class="mem-list">${m.facts.filter(f => f.kind === 'fact').map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${esc(f.id)} · ${esc(f.source)} · ${esc(t('ui.mem.' + f.scope))} · ${esc(t('ui.mem.' + f.status))} · ${esc(f.commitSha?.slice(0, 8) || '')} · ${esc(clock(f.at))}</small></span>${f.status === 'active' ? `<button type="button" data-mem-stale="${esc(f.id)}" data-mem-revision="${esc(f.revision)}">${esc(t('ui.mem.stale'))}</button><button class="icon-btn" data-mem-del="${esc(f.id)}" data-mem-revision="${esc(f.revision)}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button>` : ''}</li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
     <div class="row-input"><input id="mem-add" maxlength="300" placeholder="${esc(t('ui.mem.addPlaceholder'))}"><button id="mem-add-btn">${esc(t('ui.mem.add'))}</button></div>
     <h3>${esc(t('ui.mem.session', { name: ses?.name || '—' }))}</h3>
     <textarea id="mem-summary" rows="4" maxlength="1500">${esc(m.summary)}</textarea><button id="mem-summary-save">${esc(t('ui.mem.saveSummary'))}</button>
     <details><summary>${esc(t('ui.mem.log', { n: m.log.length }))}</summary><ul class="mem-log">${m.log.map(l => `<li>${esc(l.text)}</li>`).join('')}</ul></details>
     <h3>${esc(t('ui.mem.backups'))}</h3><p class="muted">${esc(b.dir)}</p>
     <ul class="mem-log">${b.list.slice(0, 5).map(x => `<li>${esc(x.file.split(/[\\/]/).pop())} · ${esc(clock(x.at))} · ${Math.round(x.bytes / 1024)} KB</li>`).join('') || `<li class="muted">${esc(t('ui.mem.noBackup'))}</li>`}</ul>
-    <button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>`;
+    <div class="cleanup-actions"><button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>${cleanupButtons('memory')}</div>`;
   const edit = body => attempt(async () => { await api('memory', { project: curProject, session: curSession, ...body }); await drawMemory(); });
+  wireCleanup('memory');
+  document.querySelectorAll('[data-mem-stale]').forEach(x => x.onclick = () => edit({ stale: Number(x.dataset.memStale), revision: Number(x.dataset.memRevision) }));
   document.querySelectorAll('[data-mem-del]').forEach(x => x.onclick = () => edit({ remove: x.dataset.memDel, revision: Number(x.dataset.memRevision) }));
   $('mem-search').onclick = () => attempt(async () => { memoryQuery = $('mem-query').value; await drawMemory(); });
   $('mem-query').onkeydown = e => { if (e.key === 'Enter') $('mem-search').click(); };
