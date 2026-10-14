@@ -15,6 +15,7 @@ import { collect, kind, safeRel } from './evidence.js';
 import { validatePreview, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
 
 const now = () => new Date().toISOString();
+const tokyo = iso => iso ? new Date(iso).toLocaleString('vi-VN', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '—';
 const cleanTitle = title => title.trim().replace(/\s+/g, ' ');
 const validateTitle = title => {
   if (typeof title !== 'string') throw new Error(msg('srv.team.title_invalid'));
@@ -841,20 +842,32 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // Controller kiểm lại quyết định của Manager: đủ năng lực, còn quota, đang bật. Không đạt thì tự đổi người.
   // busy: member đang chạy việc khác. Người tốt nhất đang bận → so thời điểm xong: chờ họ, hay giao người rảnh làm ngay (null = chờ).
   pickBuilder(job, task, busy = new Set()) {
-    if (job.assignee) return busy.has(job.assignee) ? null : job.assignee; // người dùng chỉ định thì ưu tiên tuyệt đối
+    const pinned = job.assignee || (task.pinned ? task.agent : null), index = job.tasks?.indexOf(task) ?? -1;
+    if (pinned && this.lowQuota(pinned) && this.config.allowAutoReplacePinned === false) throw Object.assign(new Error(msg("srv.team.duoi_nguong_quota_hay_doi_nguoi", { 0: pinned })), { quotaBlock: { role: 'builder', agent: pinned, task: index, resetsAt: this.resetAt(pinned) } });
+    if (job.assignee && !this.lowQuota(job.assignee)) return busy.has(job.assignee) ? null : job.assignee; // người dùng chỉ định thì ưu tiên tuyệt đối
     // Bạn chỉ định riêng task này: chờ người đó rảnh; chỉ đổi người khi họ bị tắt hoặc hết quota.
-    if (task.pinned && this.config.agents.some(a => a.id === task.agent && a.enabled !== false) && !this.lowQuota(task.agent)) return busy.has(task.agent) ? null : task.agent;
+    if (!job.assignee && task.pinned && this.config.agents.some(a => a.id === task.agent && a.enabled !== false) && !this.lowQuota(task.agent)) return busy.has(task.agent) ? null : task.agent;
     const ideal = this.chooseBuilder({ ...job, riskReasons: [...(job.riskReasons || [])] }, { ...task });
-    if (!busy.has(ideal)) return this.chooseBuilder(job, task);
+    const chosen = id => {
+      if (pinned && this.lowQuota(pinned) && task.autoSub !== id) {
+        task.autoSub = id;
+        const resetsAt = this.resetAt(pinned);
+        this.event(job.id, 'controller', id, 'REASSIGN', msg('srv.team.auto_reassign_pinned', { 0: pinned, 1: id, 2: 'builder', 3: tokyo(resetsAt) }), { role: 'builder', from: pinned, to: id, auto: true, pinned: true, task: index, resetsAt });
+      }
+      return id;
+    };
+    if (!busy.has(ideal)) return chosen(this.chooseBuilder(job, task));
     const keep = { effort: task.effort, boosted: task.boosted, risk: job.risk, riskReasons: job.riskReasons };
     let alt; try { alt = this.chooseBuilder(job, task, busy); } catch { alt = null; }
-    if (alt && this.estimate(alt, task) <= this.remainingMinutes(ideal) + this.estimate(ideal, task)) return alt;
+    if (alt && this.estimate(alt, task) <= this.remainingMinutes(ideal) + this.estimate(ideal, task)) return chosen(alt);
     task.effort = keep.effort; task.boosted = keep.boosted; job.risk = keep.risk; job.riskReasons = keep.riskReasons;
     return null;
   }
   chooseBuilder(job, task, busy = new Set()) {
     const members = job.roster || roster(this.config);
-    const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && members.builders.includes(id) && a.enabled !== false && !this.lowQuota(id) && !busy.has(id); };
+    const available = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.lowQuota(id) && !busy.has(id); };
+    const pool0 = members.builders.some(available) ? members.builders : this.config.agents.filter(a => a.enabled !== false && a.provider !== 'antigravity').map(a => a.id);
+    const usable = id => pool0.includes(id) && available(id);
     const level = (id, effort = task.effort) => levelOf(this.agent(id), effort);
     const fits = id => usable(id) && level(id) >= task.difficulty;
     // Chỉ né người sẽ thật sự review/verify việc này: Manager bỏ bước verify thì verifier rảnh để build.
@@ -871,18 +884,49 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     // nên không đẩy task sang member yếu hơn hay ít quota hơn chỉ để né vai trò kiểm.
     if (fits(task.agent) && !load(task.agent) && enough(task.agent)) return task.agent;
     // Ưu tiên người đang rảnh, rồi người không kiêm review/verify (kiêm thì checker() tự đổi người kiểm), rồi người Manager chọn, rồi mạnh nhất còn quota.
-    const pool = members.builders.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || enough(y) - enough(x) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
+    const pool = pool0.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || enough(y) - enough(x) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
     if (fits(task.agent) && (!pool.length || checker(pool[0]))) return task.agent;
     if (pool.length) return pool[0];
     // Người mạnh hết quota/đang tắt: tăng mức suy luận cho người còn quota nếu nhờ đó đủ năng lực.
-    const boost = members.builders.filter(id => usable(id) && effortsOf(this.agent(id)).includes('high') && level(id, 'high') >= task.difficulty)
+    const boost = pool0.filter(id => usable(id) && effortsOf(this.agent(id)).includes('high') && level(id, 'high') >= task.difficulty)
       .sort((x, y) => checker(x) - checker(y) || remaining(y) - remaining(x))[0];
     if (boost) { task.effort = 'high'; task.boosted = true; return boost; }
     // Không ai đủ năng lực: giao cho người mạnh nhất còn quota, và bắt buộc xác nhận khi merge.
-    const strongest = members.builders.filter(usable).sort((x, y) => checker(x) - checker(y) || level(y) - level(x) || remaining(y) - remaining(x))[0];
-    if (!strongest) throw new Error(msg("srv.team.khong_con_builder_nao_bat_va", { 0: task.instruction.slice(0, 200) }));
+    const strongest = pool0.filter(usable).sort((x, y) => checker(x) - checker(y) || level(y) - level(x) || remaining(y) - remaining(x))[0];
+    if (!strongest) {
+      const error = new Error(msg("srv.team.khong_con_builder_nao_bat_va", { 0: task.instruction.slice(0, 200) }));
+      if (pool0.some(id => this.lowQuota(id))) error.quotaBlock = { role: 'builder', agent: task.agent, resetsAt: pool0.map(id => this.resetAt(id)).filter(Boolean).sort()[0] || null };
+      throw error;
+    }
     job.risk = 'high'; job.riskReasons = [...new Set([...(job.riskReasons || []), msg("srv.team.task_do_kho_do_nang_luc", { 0: task.difficulty, 1: strongest, 2: tierOf(this.agent(strongest)) })])];
     return strongest;
+  }
+  pickMember(job, role, opts = {}) {
+    const members = job.roster || roster(this.config), { exclude = [], busy = this.fullAgents(), record = true, preferOtherProvider = [] } = opts;
+    const preferred = 'preferred' in opts ? opts.preferred : role === 'challenger' ? null : job.override?.[role] || job.flow?.[role] || members[role];
+    const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.lowQuota(id) && !exclude.includes(id); };
+    if (usable(preferred) && !busy.has(preferred)) { if (record && job.substitutes) delete job.substitutes[role]; return preferred; }
+    const pinned = !!job.override?.[role], locked = pinned && this.lowQuota(preferred) && this.config.allowAutoReplacePinned === false;
+    const cands = locked ? [] : this.config.agents.filter(a => usable(a.id)).sort((a, b) => busy.has(a.id) - busy.has(b.id) || tiers[tierOf(b)] - tiers[tierOf(a)] || preferOtherProvider.includes(a.provider) - preferOtherProvider.includes(b.provider) || (this.remaining(b.id) ?? 50) - (this.remaining(a.id) ?? 50));
+    if (usable(preferred) && busy.has(preferred) && !cands.some(a => !busy.has(a.id))) return preferred;
+    const cand = cands[0];
+    if (cand) {
+      if (record) {
+        const changed = job.substitutes?.[role]?.to !== cand.id, resetsAt = this.resetAt(preferred);
+        job.substitutes = { ...job.substitutes, [role]: { from: preferred, to: cand.id, at: now(), resetsAt, tier: tierOf(cand), pinned } };
+        if (changed) this.event(job.id, 'controller', cand.id, 'REASSIGN', msg(pinned ? 'srv.team.auto_reassign_pinned' : 'srv.team.auto_reassign', { 0: preferred || '—', 1: cand.id, 2: role, 3: tokyo(resetsAt) }), { role, from: preferred, to: cand.id, auto: true, pinned, resetsAt });
+      }
+      return cand.id;
+    }
+    if (!record) return null;
+    const resets = this.config.agents.filter(a => a.enabled !== false).map(a => ({ agent: a.id, at: this.resetAt(a.id) })).filter(r => r.at).sort((a, b) => a.at.localeCompare(b.at));
+    const earliest = locked ? this.resetAt(preferred) : resets[0]?.at || null, earliestAgent = locked ? preferred : resets[0]?.agent;
+    throw Object.assign(new Error(msg('srv.team.quota_blocked', { 0: role, 1: earliestAgent || preferred || '—', 2: tokyo(earliest) })), { quotaBlock: { role: role === 'challenger' ? 'reviewer' : role, agent: preferred, resetsAt: earliest } });
+  }
+  resetAt(id) {
+    const windows = (this.quota(id).buckets || []).flatMap(b => b.windows || []).filter(w => Date.parse(w.resetsAt) > Date.now());
+    const low = windows.filter(w => Number.isFinite(w.remaining) && w.remaining < (this.config.minRemainingPercent ?? 15));
+    return (low.length ? low : windows).map(w => new Date(w.resetsAt).toISOString()).sort()[0] || null;
   }
   // Builder hết quota giữa chừng: controller (không gọi Leader) chuyển task cho builder khác còn quota, kèm phần đã làm dở
   // trong worktree và các bước cuối của người trước. Không còn ai phù hợp → lỗi gốc, job BLOCKED như cũ.
@@ -1015,13 +1059,24 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   async callOnce(job, agentId, stage, instruction, effort, skills = [], opts = {}) {
     const run = this.runs.get(job.id), signal = run.abort.signal; signal.throwIfAborted();
-    const base = this.agent(agentId); this.assertAvailable(base);
+    const base = this.agent(agentId);
+    try { this.assertAvailable(base); } catch (error) {
+      if (this.lowQuota(agentId)) error.quotaBlock = { role: stageRole[stage] || 'builder', agent: agentId, task: opts.taskIndex ?? null, resetsAt: this.resetAt(agentId) };
+      throw error;
+    }
     const slot = await this.acquire(run, agentId, signal);
     const entry = { agent: agentId, stage, task: opts.taskIndex ?? null, startedAt: now(), est: Math.round(this.estimate(agentId, opts.task)) };
     try {
       job.running = [...(job.running || []), entry]; job.current = job.running[0]; this.save(job);
       entry.slot = slot;
       return await this.invoke(job, agentId, stage, instruction, effort, skills, { ...opts, slot, entry }, base, signal);
+    } catch (error) {
+      if (!error.peerWait && QUOTA_ERROR.test(error.message) && !['implement', 'research'].includes(stage)) {
+        const resetsAt = this.resetAt(agentId);
+        this.markExhausted(agentId);
+        error.quotaBlock = { role: stageRole[stage] || 'builder', agent: agentId, task: opts.taskIndex ?? null, resetsAt };
+      }
+      throw error;
     } finally {
       run.agents.delete(slot === 1 ? agentId : `${agentId}#${slot}`);
       job.running = (job.running || []).filter(r => r !== entry); job.current = job.running[0] || null;
@@ -1252,7 +1307,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (code && batch.some(([t]) => overlap(t, task))) continue;
       // ponytail: có repo liên kết thì task code chạy lần lượt (worktree liên kết dùng chung); tách worktree con cho repo liên kết nếu cần tốc độ.
       if (code && job.linked?.length && batch.length) break;
-      const who = this.pickBuilder(job, task, busy);
+      let who;
+      try { who = this.pickBuilder(job, task, busy); } catch (error) { this.loadMap = null; if (error.quotaBlock) error.quotaBlock.task = i; throw error; }
       if (!who) continue;
       use.set(who, (use.get(who) || 0) + 1); if (use.get(who) >= this.maxJobs(who)) busy.add(who); batch.push([task, i, who]);
     }
@@ -1513,7 +1569,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     await this.checkDiscussions(job);
     if (job.kind === 'research') {
       const single = job.fast || job.tasks.length === 1 && job.rigor !== 'strict';
-      const r = single ? job.reports.filter(x => x.stage === 'research').at(-1) : await this.call(job, members.manager, 'final', msg("srv.team.research_final"));
+      const r = single ? job.reports.filter(x => x.stage === 'research').at(-1) : await this.call(job, this.pickMember(job, 'manager'), 'final', msg("srv.team.research_final"));
       if (single) job.skipped = [...new Set([...(job.skipped || []), 'final'])];
       job.conclusion = { summary: r.summary, conclusion: r.conclusion || r.summary, sources: r.sources || [], confidence: r.confidence || null, openQuestions: r.openQuestions || [] };
       job.status = 'done'; await this.remember(job, single ? null : r.memory); this.event(job.id, single ? r.agent : members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion); return;
@@ -1521,7 +1577,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const stepsF = job.flow?.requested?.steps;
     if (stepsF ? !stepsF.includes('final') : job.fast || job.rigor === 'light') job.skipped = [...new Set([...(job.skipped || []), 'final'])];
     let fin = null;
-    if (!job.skipped?.includes('final')) fin = await this.call(job, members.manager, 'final', msg("srv.team.bao_cao_thay_doi_tests_findings"));
+    if (!job.skipped?.includes('final')) fin = await this.call(job, this.pickMember(job, 'manager'), 'final', msg("srv.team.bao_cao_thay_doi_tests_findings"));
     await this.assertReady(job);
     const check = await this.mergeCheck(job);
     job.changes = { revision: job.revision, added: check.added, removed: check.removed, files: check.paths };
@@ -1582,13 +1638,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // Ai review/verify: flow của Manager → roster; kiểm lại lúc thực thi (đang bật, còn quota). Trùng người đã viết code → tự tìm người
   // khác, ưu tiên khác loại CLI với builder; không còn ai mới giữ người cũ và cảnh báo (assertIndependent).
   checker(job, role, members, impl = job.implementers || [], preferred = job.override?.[role] || job.flow?.[role], record = true) {
-    const usable = x => { const a = this.config.agents.find(a => a.id === x); return !!a && a.enabled !== false && !this.lowQuota(x); };
-    let id = preferred || members[role];
-    if (preferred && !usable(id)) { this.event(job.id, 'controller', members.manager, 'WARNING', msg("srv.team.flow_invalid_member", { 0: id, 1: role, 2: members[role] || '—' })); id = members[role]; }
+    if (preferred && !this.config.agents.some(a => a.id === preferred && a.enabled !== false)) this.event(job.id, 'controller', members.manager, 'WARNING', msg("srv.team.flow_invalid_member", { 0: preferred, 1: role, 2: members[role] || '—' }));
+    let id = this.pickMember(job, role, { preferred: preferred || members[role], record });
+    if (!id) return this.pickMember(job, role, { preferred: preferred || members[role] }); // node review cũng phải chờ quota, không gọi member null
     if (impl.includes(id)) {
       const providers = new Set(impl.map(x => this.config.agents.find(a => a.id === x)?.provider));
-      const cands = [...new Set([members.reviewer, members.verifier, ...members.builders, ...this.config.agents.map(a => a.id)])].filter(x => x && usable(x) && !impl.includes(x));
-      const alt = cands.find(x => !providers.has(this.agent(x).provider)) || cands[0];
+      const alt = this.pickMember(job, role, { preferred: null, exclude: impl, preferOtherProvider: [...providers], record: false });
       if (alt) { this.event(job.id, 'controller', members.manager, 'REROUTE', msg("srv.team.checker_rerouted", { 0: role, 1: id, 2: alt }), { role, from: id, to: alt }); id = alt; }
     }
     if (record) { this.assertIndependent(job, id); job.checkers = { ...(job.checkers || {}), [role]: id }; }
@@ -1600,9 +1655,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // Người phản biện kế hoạch: ưu tiên khác loại CLI với Manager (góc nhìn khác), còn quota, đang bật.
   challenger(job, members) {
     const mgr = this.config.agents.find(a => a.id === members.manager);
-    const ok = id => { const a = this.config.agents.find(a => a.id === id); return a && a.enabled !== false && id !== members.manager && !this.lowQuota(id); };
-    const cands = [...new Set([members.reviewer, members.verifier, ...members.builders])].filter(ok);
-    return cands.find(id => this.agent(id).provider !== mgr?.provider) || cands[0] || null;
+    return this.pickMember(job, 'challenger', { exclude: [members.manager], preferOtherProvider: [mgr?.provider], record: false });
   }
   skip(job, ...steps) { job.skipped = [...new Set([...(job.skipped || []), ...steps])]; }
   escalate(job, members, reason) {
@@ -1633,7 +1686,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     switch (job.stage) {
       case 'plan': {
-        const plan = await this.call(job, members.manager, 'plan', msg("srv.team.phan_tich_muc_tieu_va_chia", { 0: members.builders.join(', ') }));
+        const lead = this.pickMember(job, 'manager');
+        const plan = await this.call(job, lead, 'plan', msg("srv.team.phan_tich_muc_tieu_va_chia", { 0: members.builders.join(', ') }));
         // Lead hỏi lại: dừng chờ Bạn trả lời, câu trả lời được đưa vào lần lập kế hoạch tiếp theo.
         if (plan.status === 'needs_input' && Array.isArray(plan.questions) && plan.questions.length) {
           job.questions = plan.questions.map(String).slice(0, 5); job.status = 'waiting';
@@ -1662,6 +1716,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         }
         job.tasks = plan.tasks; job.taskIndex = 0; job.stage = 'implement';
         if (plan.kind === 'research') for (const t of job.tasks) if (t.kind === 'review') t.done = true; job.planSummary = String(plan.summary || '').slice(0, 3000);
+        if (job.substitutes?.manager?.tier === 'weak') job.planSummary += '\n' + msg('srv.team.lead_temp_weak', { 0: job.substitutes.manager.to, 1: job.substitutes.manager.from });
         if (typeof plan.title === 'string' && cleanTitle(plan.title) && job.titleBy !== 'user') {
           job.title = cleanTitle(plan.title).slice(0, 60); job.titleBy = 'lead';
         }
@@ -1791,6 +1846,20 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (reason) await this.stopPreview(id, reason);
     }
     if (this.closed || this.accountLoginBusy) return;
+    for (const job of this.jobs()) {
+      if (job.status !== 'blocked' || job.blockedReason?.kind !== 'quota' || this.runs.has(job.id)) continue;
+      const { role, task, resetsAt } = job.blockedReason;
+      let available = false;
+      if (role === 'builder') {
+        const pending = job.tasks[task] || { difficulty: 1, instruction: '' }, pinned = job.assignee || (pending.pinned ? pending.agent : null);
+        if (!(pinned && this.lowQuota(pinned) && this.config.allowAutoReplacePinned === false)) {
+          try { available = !!this.chooseBuilder({ ...job, riskReasons: [...(job.riskReasons || [])] }, { ...pending, agent: null }); } catch {}
+        }
+      } else available = !!this.pickMember(job, role, { record: false });
+      if (!(resetsAt && Date.parse(resetsAt) <= Date.now()) && !available) continue;
+      job.status = 'queued'; job.error = null; delete job.blockedReason; job.roster = this.jobRoster(job); this.save(job);
+      this.event(job.id, 'controller', 'team', 'REQUEUE', msg('srv.team.quota_requeue'));
+    }
     const started = [];
     for (;;) {
       const cap = this.capacity(); this.waitingReason = cap.start ? null : cap.reason;
@@ -1802,7 +1871,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   async runJob(job) {
     this.runs.set(job.id, { job: job.id, agents: new Set(), abort: new AbortController() });
-    job.status = 'running'; this.save(job);
+    job.status = 'running'; delete job.blockedReason; this.save(job);
     try {
       await this.step(job);
       const fresh = this.get(job.id);
@@ -1816,12 +1885,18 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       }
       job.messages = fresh.messages;
       if (job.status === 'running') job.status = 'queued';
+      delete job.blockedReason;
       this.save(job);
     } catch (error) {
       const fresh = this.get(job.id);
       if (fresh.status === 'paused' && error.peerReport) { job.status = 'paused'; job.messages = fresh.messages; job.running = []; job.current = null; this.save(job); }
       if (!['paused', 'cancelled'].includes(fresh.status)) {
         job.status = error.peerWait ? 'waiting' : 'blocked'; job.messages = fresh.messages; job.error = redact(error.message).slice(0, 8000); job.running = []; job.current = null;
+        if (!error.peerWait && (error.quotaBlock || QUOTA_ERROR.test(error.message))) {
+          const role = error.quotaBlock?.role || stageRole[job.stage] || 'builder', task = error.quotaBlock?.task ?? (role === 'builder' ? job.taskIndex : null);
+          const agent = error.quotaBlock?.agent ?? (role === 'builder' ? job.tasks[task]?.ranBy || job.tasks[task]?.agent : job.checkers?.[role] || job.substitutes?.[role]?.to || (job.roster || roster(this.config))[role]);
+          job.blockedReason = { kind: 'quota', role, agent, task, resetsAt: error.quotaBlock?.resetsAt ?? this.resetAt(agent), at: now() };
+        } else delete job.blockedReason;
         if (error.peerWait) { job.peerWait = error.thread || true; job.questions = [job.error]; job.reviewed = job.verified = job.tested = null; }
         this.save(job);
         this.event(job.id, 'controller', 'user', error.peerWait ? 'QUESTION' : 'BLOCKER', job.error);
@@ -1971,6 +2046,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         task.agent = agent.id; task.pinned = true;
       } else if (['manager', 'reviewer', 'verifier'].includes(payload.role)) {
         o[payload.role] = agent.id; if (job.checkers) delete job.checkers[payload.role];
+        if (job.substitutes) delete job.substitutes[payload.role];
       } else if (payload.role === 'builder' && payload.from) {
         addBuilder(agent.id); o.drop = [...new Set([...(o.drop || []), payload.from])]; o.add = o.add.filter(x => x !== payload.from);
         for (const t of job.tasks) if (!t.done && t.kind !== 'review' && t.agent === payload.from) Object.assign(t, { agent: agent.id, pinned: true });
@@ -1982,10 +2058,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       }
       job.roster = this.jobRoster(job); job.assignSeq = (job.assignSeq || 0) + 1; this.save(job);
       this.event(id, 'user', agent.id, 'REASSIGN', msg(this.runs.has(id) ? "srv.team.assign_next_turn" : "srv.team.assign_ok", { 0: task ? `T${payload.task + 1}` : payload.role, 1: agent.label || agent.id }), { task: payload.task ?? null, role: payload.role ?? null, agent: agent.id });
+      if (['blocked', 'paused'].includes(job.status) && !this.runs.has(id)) { job.status = 'queued'; job.error = null; delete job.blockedReason; this.save(job); this.kick(); }
     } else if (action === 'reassign') {
       if (!['paused', 'blocked'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_doi_nguoi"));
       if (!(job.roster || roster(this.config)).builders.includes(payload.agent)) throw new Error(msg("srv.team.thanh_vien_nay_khong_thuoc_nhom"));
       job.assignee = payload.agent; this.save(job); this.event(id, 'user', payload.agent, 'REASSIGN', msg("srv.team.chuyen_cac_buoc_implementation_tiep_theo"));
+      if (['blocked', 'paused'].includes(job.status) && !this.runs.has(id)) { job.status = 'queued'; job.error = null; delete job.blockedReason; this.save(job); this.kick(); }
     } else if (action === 'review') {
       if (!['paused', 'blocked', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_review_lai"));
       if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
