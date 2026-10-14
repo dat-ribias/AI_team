@@ -1,3 +1,6 @@
+[Tổng quan dự án](docs/OVERVIEW.md)
+[Lịch sử thay đổi](CHANGELOG.md)
+[Việc còn mở](docs/ROADMAP.md)
 # AI Team Control Room
 
 Dashboard local điều phối một đội AI CLI (Codex, Claude Code, Antigravity/Gemini) trên repo của bạn: Manager lập kế hoạch, Builder làm, Reviewer/Verifier kiểm tra, bạn duyệt merge. Chạy Node.js 24, SQLite có sẵn trong Node và SDK MCP chính thức. Giao diện không cần build, Docker, React hay dịch vụ cloud riêng.
