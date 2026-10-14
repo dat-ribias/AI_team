@@ -67,6 +67,28 @@ function duration(minutes) {
   const m = Math.max(0, Math.round(minutes)), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), r = m % 60;
   return [d && t('ui.time.days', { n: d }), h && t('ui.time.hours', { n: h }), r && t('ui.time.minutes', { n: r })].filter(Boolean).join(' ') || t('ui.time.minutes', { n: 0 });
 }
+function activityInfo(at) {
+  const minutes = Math.max(0, (Date.now() - Date.parse(at)) / 60000);
+  const warn = Number.isFinite(minutes) && minutes > (state?.silenceWarnMin ?? 5);
+  return { warn, text: (warn ? '⚠ ' : '') + t('ui.progress.lastActivity', { time: duration(Number.isFinite(minutes) ? minutes : 0) }) };
+}
+function activityHTML(run, job) {
+  const at = run.lastActivityAt || run.startedAt, info = activityInfo(at);
+  return `<div class="run-activity${info.warn ? ' silence-warn' : ''}" data-activity-at="${esc(at)}"><span data-activity-label>${esc(info.text)}</span><span class="activity-actions" ${info.warn ? '' : 'hidden'}><button type="button" data-activity-check="${esc(run.agent)}">${esc(t('ui.progress.check'))}</button><button type="button" data-activity-pause="${esc(job.id)}">${esc(t('ui.progress.stop'))}</button></span></div>`;
+}
+function updateActivities() {
+  document.querySelectorAll('[data-activity-at]').forEach(el => {
+    const info = activityInfo(el.dataset.activityAt);
+    el.classList.toggle('silence-warn', info.warn);
+    el.querySelector('[data-activity-label]').textContent = info.text;
+    el.querySelector('.activity-actions').hidden = !info.warn;
+  });
+}
+function jobEta(job) {
+  if (job.overMinutes > 0) return t('ui.eta.over', { time: duration(job.overMinutes) });
+  if (job.eta == null) return '';
+  return t(job.eta <= 0 ? 'ui.eta.over' : 'ui.eta', { time: duration(Math.abs(job.eta)) });
+}
 const untilReset = time => { const ms = Date.parse(time) - Date.now(); return Number.isFinite(ms) && ms > 0 ? ' · ' + t('ui.quota.left', { time: duration(ms / 60000) }) : ''; };
 function quotaPercent(q) {
   if ('pct' in q) return q.pct == null ? null : Math.round(q.pct); // server đã lọc theo nhóm model (agy: Gemini vs Claude/GPT)
@@ -261,7 +283,7 @@ function drawState() {
   }
   document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('selected', b.dataset.tab === tab));
   drawSessions(); syncTab();
-  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${j.eta != null ? ' · ' + t('ui.eta', { time: duration(j.eta) }) : ''}` : t('ui.flow.summaryIdle'); }
+  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${jobEta(j) ? ' · ' + jobEta(j) : ''}` : t('ui.flow.summaryIdle'); }
   drawJobsList();
   drawJobsDialog();
   drawFlow();
@@ -428,7 +450,8 @@ let slot = null;
 // Mỗi tab giữ dự án/phiên/việc riêng trên URL (#p=&s=&j=), mở nhiều tab = nhiều phòng điều phối; localStorage chỉ là mặc định cho tab mới.
 const tabHash = new URLSearchParams(location.hash.slice(1));
 let curProject = tabHash.get('p') ?? (store.get('project') || ''), curSession = tabHash.get('s') ?? (store.get('session') || '');
-if (tabHash.get('j')) selected = tabHash.get('j');
+if (tabHash.get('job') || tabHash.get('j')) selected = tabHash.get('job') || tabHash.get('j');
+let linkedJob = tabHash.get('job');
 function syncTab() {
   const q = new URLSearchParams({ p: curProject, s: curSession, ...(selected ? { j: selected } : {}) });
   if (location.hash.slice(1) !== q.toString()) history.replaceState(null, '', '#' + q);
@@ -472,8 +495,8 @@ function slotLive(id) {
   // Codex gửi in_progress rồi completed cho cùng item: giữ bản mới nhất.
   const last = new Map(); for (const e of mine.filter(e => e.type === 'ACTIVITY')) last.set(e.details?.id ? e.details.id + (e.details.command || e.details.text || "") : e.details?.parameters ? e.details.name + JSON.stringify(e.details.parameters) : e.seq, e); // agy: bắt đầu + kết thúc cùng tham số → 1 dòng // id (item_1…) lặp lại giữa các lượt
   const acts = [...last.values()].slice(-40), res = mine.filter(e => ['RESULT', 'REVIEW_RESULT', 'CONCLUSION', 'BLOCKER'].includes(e.type)).at(-1);
-  const cur = job.current?.agent === id ? job.current : null;
-  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${acts.length ? `<div class="live-log">${acts.map((e, i) => actView(e, i === acts.length - 1)).join('')}</div>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
+  const cur = runningOf(job).find(r => r.agent === id);
+  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${cur ? activityHTML(cur, job) : ''}${acts.length ? `<div class="live-log">${acts.map((e, i) => actView(e, i === acts.length - 1)).join('')}</div>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
 }
 const shortCmd = c => String(c || '').replace(/^"?[^"]*powershell(\.exe)?"?\s+(-NoProfile\s+)?-Command\s+/i, '');
 function actView(e, open) {
@@ -666,9 +689,10 @@ function drawInspector() {
     const avg = job.durations?.length ? job.durations.reduce((a, b) => a + b, 0) / job.durations.length / 60000 : null;
     const cur = job.current, elapsed = cur ? (Date.now() - Date.parse(cur.startedAt)) / 60000 : null;
     const runs = runningOf(job);
-    const lines = runs.length ? runs.map(r => t('ui.progress.now', { stage: r.task != null ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${r.task + 1}/${job.tasks.length}` : r.stage, who: names[r.agent] || r.agent, time: duration((Date.now() - Date.parse(r.startedAt)) / 60000) })) : [t('ui.progress.queued')];
-    const eta = job.eta != null ? t('ui.eta', { time: duration(Math.max(1, job.eta)) }) : steps == null ? t('ui.progress.planning') : avg ? t('ui.progress.eta', { time: duration(Math.max(1, avg * steps - (elapsed || 0))), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps });
-    return `<div class="progress-box"><span class="dot green"></span><div>${lines.map(l => `<b>${esc(l)}</b>`).join('<br>')}<br><span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
+    const lines = runs.length ? runs.map(r => `<div class="progress-run"><b>${esc(t('ui.progress.now', { stage: r.task != null ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${r.task + 1}/${job.tasks.length}` : r.stage, who: names[r.agent] || r.agent, time: duration((Date.now() - Date.parse(r.startedAt)) / 60000) }))}</b>${activityHTML(r, job)}</div>`) : [esc(t('ui.progress.queued'))];
+    const predicted = avg * steps - (elapsed || 0);
+    const eta = jobEta(job) || (steps == null ? t('ui.progress.planning') : avg ? predicted <= 0 ? t('ui.eta.over', { time: duration(-predicted) }) : t('ui.progress.eta', { time: duration(predicted), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps }));
+    return `<div class="progress-box"><span class="dot green"></span><div>${lines.join('')}<span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b><button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
@@ -1143,6 +1167,10 @@ async function refresh() {
   if (rendering) { again = true; return; } rendering = true;
   try {
     state = await api('state');
+    if (linkedJob) {
+      const job = state.jobs.find(j => j.id === linkedJob);
+      if (job) { curProject = job.project; curSession = job.sessionId || ''; selected = job.id; linkedJob = null; }
+    }
     if (!selected) selected = state.jobs.find(j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession))?.id;
     if (state.language && state.language !== lang) await loadLanguage(state.language);
     if (eventsOf !== selected) { events = []; eventsOf = selected; }
@@ -1472,6 +1500,20 @@ $('lang-select').onchange = () => attempt(async () => {
   await loadLanguage(next); notice(''); if (state) { drawState(); drawTimeline(); }
 });
 document.addEventListener('click', e => {
+  const check = e.target.closest('[data-activity-check]'), pause = e.target.closest('[data-activity-pause]');
+  if (check) {
+    const job = state.jobs.find(j => j.id === selected), run = runningOf(job).find(r => r.agent === check.dataset.activityCheck);
+    if (run) {
+      if (!$('slot-dialog').open || slot?.current !== run.agent) openSlot(['implement', 'research'].includes(run.stage) ? 'builder' : nodeOfRun(run) || 'manager', run.agent, run.task, job.id);
+      const log = $('slot-live').querySelector('.live-log');
+      if (log) { const last = log.lastElementChild; if (last?.tagName === 'DETAILS') last.open = true; log.scrollTop = log.scrollHeight; log.scrollIntoView({ block: 'nearest' }); }
+      else { $('slot-dialog').close(); filter = run.agent; tab = 'activity'; drawState(); drawTimeline(); $('timeline').scrollTop = $('timeline').scrollHeight; }
+    }
+  }
+  if (pause) attempt(async () => {
+    pause.disabled = true;
+    try { await api(`jobs/${pause.dataset.activityPause}/control`, { action: 'pause' }); await refresh(); } finally { pause.disabled = false; }
+  });
   if (!e.target.closest('.actions-dropdown')) {
     document.querySelectorAll('.actions-dropdown[open]').forEach(d => d.removeAttribute('open'));
   }
@@ -1495,3 +1537,4 @@ document.addEventListener('visibilitychange', () => {
 });
 openStream();
 setInterval(() => { if (!document.hidden) attempt(refresh); }, 10000);
+setInterval(updateActivities, 30000);
