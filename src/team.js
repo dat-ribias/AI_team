@@ -12,6 +12,7 @@ import { run, executable } from './process.js';
 import { runAgent, readQuota } from './providers.js';
 import { scanSkills, skillRoots } from './skills.js';
 import { collect, kind, safeRel } from './evidence.js';
+import { validatePreview, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
 
 const now = () => new Date().toISOString();
 const planTasks = tasks => tasks.map(({ kind, instruction, dependsOn, agent, difficulty, files }) => ({ kind, instruction, dependsOn, agent, difficulty, files }));
@@ -174,6 +175,7 @@ export function validateConfig(config) {
   if (new Set(config.projects.map(p => p.id)).size !== config.projects.length) throw new Error(msg("srv.team.project_id_bi_trung"));
   for (const p of config.projects) {
     if (!p.id || !p.path || !Array.isArray(p.tests)) throw new Error(msg("srv.team.project_can_id_path_tests"));
+    if (p.preview != null) p.preview = validatePreview(p.preview);
     for (const test of p.tests) if (!Array.isArray(test) || !test.length || test.some(v => typeof v !== 'string')) throw new Error(msg("srv.team.test_phai_la_mang_executable_arguments"));
     if (p.readDirs !== undefined && (!Array.isArray(p.readDirs) || p.readDirs.some(d => typeof d !== 'string'))) throw new Error(msg("srv.accounts.read_dir_invalid", { 0: p.id }));
     if (p.access !== undefined) {
@@ -200,12 +202,19 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.memoryStore = new MemoryStore(this.db, redact); this.memoryReaders = new Map();
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
+    this.previewChrome = adapters.findChrome || findChrome;
     try { this.db.exec('ALTER TABLE member_stats ADD COLUMN est REAL'); } catch {}
     try { this.db.exec('ALTER TABLE sessions ADD COLUMN access TEXT'); } catch {}
     // Mỗi công việc đang chạy giữ 1 slot; các task song song trong cùng công việc giữ thêm (extra).
-    this.runs = new Map(); this.extra = 0; this.closed = false; this.refreshing = false; this.waitingReason = null;
+    this.runs = new Map(); this.previews = new Map(); this.extra = 0; this.closed = false; this.refreshing = false; this.waitingReason = null;
     this.cpu = { total: 0, idle: 0 }; this.cpuPercent = 0; this.sampleResources();
     this.orphans = [];
+    const cleanup = [];
+    for (const job of this.jobs()) if (job.preview?.pid || job.preview?.basePid) {
+      for (const pid of [job.preview.pid, job.preview.basePid]) if (pid && alive(pid)) cleanup.push(stopTree(pid).catch(e => this.emit('fault', e)));
+      this.updatePreview(job.id, fresh => { Object.assign(fresh.preview, { status: 'stopped', stoppedReason: 'restart' }); delete fresh.preview.pid; delete fresh.preview.basePid; });
+    }
+    this.previewRecovery = Promise.all(cleanup);
     for (const job of this.jobs()) if (['running', 'queued', 'merging'].includes(job.status)) {
       for (const r of job.running || []) if (r.pid && alive(r.pid)) this.orphans.push({ key: (r.slot || 1) === 1 ? r.agent : `${r.agent}#${r.slot}`, pid: r.pid, until: Date.parse(r.startedAt) + 60 * 60_000 });
       job.status = 'paused'; job.running = []; job.current = null; this.save(job);
@@ -317,7 +326,7 @@ export class Team extends EventEmitter {
   fullAgents() { return new Set(this.config.agents.map(a => a.id).filter(id => this.useOf(id) >= this.maxJobs(id))); }
   capacity() {
     const r = this.config.resources || {}, res = this.sampleResources();
-    const slots = computeSlots({ freeGB: freemem() / 2 ** 30, totalGB: totalmem() / 2 ** 30, running: this.runs.size + this.extra,
+    const slots = computeSlots({ freeGB: freemem() / 2 ** 30, totalGB: totalmem() / 2 ** 30, running: this.runs.size + this.extra + this.previews.size,
       reserveGB: r.reserveGB ?? 4, ramPerAgentGB: r.ramPerAgentGB ?? 1.5, maxAgents: r.maxAgents ?? 3, hardStopRamPercent: r.hardStopRamPercent ?? Math.max(90, this.config.maxRamPercent ?? 90) });
     if (slots.hardStop) return { ...slots, reason: msg("srv.team.ram_cao_cho_tai_nguyen") };
     if (res.cpuPercent > (this.config.maxCpuPercent ?? 90)) return { start: 0, reason: msg("srv.team.cpu_cao_cho_tai_nguyen") };
@@ -565,7 +574,7 @@ export class Team extends EventEmitter {
     const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(job.id);
     if (row) {
       const saved = JSON.parse(row.body); if (saved.status === 'cancelled') return saved;
-      if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; }
+      if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; job.acceptance = null; }
       if (Array.isArray(saved.messages) && saved.messages.length > (job.messages?.length || 0)) { job.messages = saved.messages; if (this.runs.has(job.id)) job.steered = true; }
       // Bạn đổi người (control 'assign') trong lúc việc đang chạy: bản đang chạy lưu đè thì vẫn giữ lựa chọn đó.
       if ((saved.assignSeq || 0) > (job.assignSeq || 0)) {
@@ -591,8 +600,8 @@ export class Team extends EventEmitter {
     return { cpuPercent: this.cpuPercent, ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
   state() {
-    const busy = this.busyAgents(), cap = this.capacity(), used = this.runs.size + this.extra;
-    return { demo: !!this.config.demo, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, eta: this.eta(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
+    const busy = this.busyAgents(), cap = this.capacity(), used = this.runs.size + this.extra + this.previews.size;
+    return { demo: !!this.config.demo, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, eta: this.eta(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
@@ -716,6 +725,28 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         grant: Object.fromEntries(Object.entries(x?.grant || {}).filter(([m, l]) => (m === '*' || ids.includes(m)) && LEVELS.includes(l))) }))
         .filter(x => !/(^|\/)\.\.(\/|$)|^[a-z]:|^\//i.test(x.path) && existsSync(join(wt, x.path))).slice(0, 30);
       return { summary: String(r.summary || ''), draft: { folders, network: keep(r.network?.members), repos, paths, shell: Array.isArray(r.shell) ? keep(r.shell) : current.shell }, networkWhy: String(r.network?.why || ''), notes: (Array.isArray(r.notes) ? r.notes : []).map(String).slice(0, 10) };
+    } finally {
+      slotRun.agents.clear(); this.runs.delete(key);
+      await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
+      this.emit('change'); this.kick();
+    }
+  }
+  async proposePreview(projectId) {
+    const p = this.project(projectId), manager = roster(this.config).manager, key = `preview:${projectId}`, agent = this.agent(manager);
+    if (this.runs.has(key)) throw new Error(msg('srv.preview.busy'));
+    this.assertAvailable(agent);
+    const slotRun = { job: key, agents: new Set(), abort: new AbortController() }, wt = join(this.dataDir, 'worktrees', `${key.replace(':', '-')}-consult-${randomUUID().slice(0, 8)}`);
+    this.runs.set(key, slotRun);
+    try {
+      await git(p.path, ['worktree', 'add', '--detach', wt, 'HEAD']);
+      const slot = await this.acquire(slotRun, manager, slotRun.abort.signal);
+      const prompt = msg('srv.preview.propose_prompt', { 0: projectId, 1: this.config.language || 'vi' }) + '\n' +
+        'Read package.json and scripts in this read-only repository. Propose a web preview command containing {port}; do not edit files or start servers. For API/CLI projects return draft:null and a TODO in notes. Return ONLY JSON: {"summary":"short summary","draft":{"command":"command with {port}","readyPath":"/","routes":[{"name":"home","path":"/"}],"timeoutSec":120,"ttlMin":30},"notes":[]}';
+      let promptFile;
+      if (['antigravity', 'gemini'].includes(agent.provider)) { await this.ensureExclude(wt); mkdirSync(join(wt, '.ai-team'), { recursive: true }); writeFileSync(join(wt, '.ai-team', 'prompt.md'), prompt); promptFile = '.ai-team/prompt.md'; }
+      const r = await this.agentRun(agent, { id: key, project: projectId, goal: 'preview proposal', stage: 'plan', kind: 'research', worktree: wt, promptFile, slot, checks: [], network: false, readDirs: [], researchWeb: false, codexWindowsSandbox: this.config.codexWindowsSandbox }, prompt,
+        { signal: slotRun.abort.signal, onEvent: (type, data) => { if (type === 'RATE_LIMIT') this.observeQuota(manager, data.details); } });
+      return { summary: String(r.summary || ''), draft: validatePreview(r.draft), notes: (Array.isArray(r.notes) ? r.notes : []).map(String).slice(0, 10) };
     } finally {
       slotRun.agents.clear(); this.runs.delete(key);
       await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
@@ -1299,6 +1330,107 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (result.files.length || result.skipped.length) job.evidence = [...(job.evidence || []), { revision, stage, agent: agentId, at: now(), dir, files: result.files, skipped: result.skipped }].slice(-200);
     } catch (e) { this.event(job.id, 'controller', 'user', 'EVIDENCE_WARNING', e.message); }
   }
+  updatePreview(id, update) {
+    const fresh = this.get(id); update(fresh);
+    // Cancellation is immutable to stale worker saves. This synchronous fresh update only changes preview/evidence.
+    if (fresh.status === 'cancelled') { this.db.prepare('UPDATE jobs SET body=? WHERE id=?').run(JSON.stringify(fresh), id); this.emit('change'); }
+    else this.save(fresh);
+    return fresh;
+  }
+  async runPreview(job, afterOnly = false) {
+    let runtime, root, wt, dir, preview, entry;
+    const id = job.id, revision = job.revision;
+    // Only preview/evidence are written to a fresh snapshot; a slow launch must not undo user controls.
+    const update = fn => { const fresh = this.updatePreview(id, fn); Object.assign(job, { preview: fresh.preview, evidence: fresh.evidence, evidenceBytes: fresh.evidenceBytes }); };
+    const current = () => {
+      const fresh = this.get(id);
+      if (runtime.stopped || this.previews.get(id) !== runtime || fresh.revision !== revision || terminal.has(fresh.status) || fresh.status === 'paused') throw new Error('Preview stopped');
+    };
+    try {
+      const p = this.project(job.project), config = validatePreview(p.preview);
+      if (job.kind !== 'code' || !config || this.previews.has(id)) return;
+      if (this.previews.size >= 2 || !this.capacity().start) { this.event(id, 'controller', 'user', 'PREVIEW_WARNING', msg('srv.preview.busy')); return; }
+      runtime = { revision }; runtime.done = new Promise(resolve => { runtime.resolve = resolve; }); this.previews.set(id, runtime);
+      await this.previewRecovery; current();
+      let port;
+      do { port = await freePort(config.portRange, [...this.previews.values()].map(p => p.port).filter(Boolean)); current(); }
+      while ([...this.previews.values()].some(p => p !== runtime && p.port === port));
+      runtime.port = port;
+      root = p.path;
+      const archive = join(this.dataDir, 'evidence', id);
+      dir = `${revision}/preview-controller`; if (existsSync(join(archive, dir))) dir += '-' + randomUUID().slice(0, 8);
+      mkdirSync(join(archive, dir), { recursive: true });
+      entry = { revision, stage: 'preview', agent: 'controller', at: now(), dir, files: [], skipped: [] };
+      const chrome = this.previewChrome();
+      preview = { status: 'running', port, url: `http://localhost:${port}`, routes: config.routes, revision, startedAt: now(), expiresAt: new Date(Date.now() + config.ttlMin * 60_000).toISOString(), screenshots: false };
+      update(fresh => { fresh.preview = preview; });
+      if (!chrome) this.event(id, 'controller', 'user', 'PREVIEW_WARNING', msg('srv.preview.no_chrome'));
+      const capture = async phase => {
+        if (!chrome) return;
+        for (const [i, route] of config.routes.entries()) for (const [size, width, height] of [['desktop', 1280, 800], ['mobile', 390, 844]]) {
+          current();
+          let name = skillDir(route.name).slice(0, 80) || 'home';
+          if (config.routes.slice(0, i).some(r => (skillDir(r.name).slice(0, 80) || 'home') === name)) name += '-' + i;
+          const file = `${phase}-${name}-${size}.png`;
+          await screenshot({ chrome, url: preview.url + route.path, width, height, file: join(archive, dir, file) }); current();
+          entry.files.push({ path: file, bytes: statSync(join(archive, dir, file)).size, type: 'image' });
+        }
+      };
+      if (!afterOnly) {
+        wt = join(this.dataDir, 'worktrees', `${id}-preview-${randomUUID().slice(0, 8)}`);
+        await git(root, ['worktree', 'add', '--detach', wt, job.base]); current();
+        runtime.before = startServer({ command: config.command, cwd: wt, port }); preview.basePid = runtime.before.pid;
+        update(fresh => { fresh.preview = { ...preview }; });
+        try { await waitReady(preview.url + config.readyPath, config.timeoutSec, runtime.before.child); current(); await capture('before'); }
+        finally { await stopTree(runtime.before.pid); runtime.before.pid = null; delete preview.basePid; await git(root, ['worktree', 'remove', '--force', wt]); wt = null; }
+        current();
+      }
+      runtime.after = startServer({ command: config.command, cwd: job.worktree, port }); preview.pid = runtime.after.pid;
+      update(fresh => { fresh.preview = { ...preview }; });
+      await waitReady(preview.url + config.readyPath, config.timeoutSec, runtime.after.child); current();
+      await capture('after'); current();
+      preview.screenshots = !!chrome; preview.startedAt = now(); preview.expiresAt = new Date(Date.now() + config.ttlMin * 60_000).toISOString();
+      runtime.expiresAt = preview.expiresAt;
+      update(fresh => { fresh.preview = { ...preview }; });
+      this.event(id, 'controller', 'user', 'PREVIEW', msg('srv.preview.started', { 0: preview.url, 1: config.ttlMin }));
+    } catch (e) {
+      if (runtime) {
+        await Promise.all([runtime.before?.pid, runtime.after?.pid].filter(Boolean).map(pid => stopTree(pid).catch(() => {})));
+        if (this.previews.get(id) === runtime) this.previews.delete(id);
+      }
+      const error = redact(e.message).slice(0, 2000);
+      if (entry) try {
+        const log = redact([runtime?.before?.log(), runtime?.after?.log(), error].filter(Boolean).join('\n').split(/\r?\n/).slice(-200).join('\n'));
+        writeFileSync(join(this.dataDir, 'evidence', id, dir, 'preview.log'), log);
+        entry.files.push({ path: 'preview.log', bytes: Buffer.byteLength(log), type: 'text' });
+      } catch {}
+      if (!runtime?.stopped) {
+        try { update(fresh => { fresh.preview = { ...preview, revision, status: 'failed', error }; delete fresh.preview.pid; delete fresh.preview.basePid; }); this.event(id, 'controller', 'user', 'PREVIEW_WARNING', msg('srv.preview.failed', { 0: error })); } catch {}
+      }
+    } finally {
+      if (wt && root) await run(['git'], ['-C', root, 'worktree', 'remove', '--force', wt], { allowFailure: true }).catch(() => {});
+      if (entry) try { update(fresh => { fresh.evidence = [...(fresh.evidence || []), entry].slice(-200); fresh.evidenceBytes = (fresh.evidenceBytes || 0) + entry.files.reduce((s, f) => s + f.bytes, 0); }); } catch {}
+      runtime?.resolve();
+    }
+  }
+  async stopPreview(id, reason) {
+    const runtime = this.previews.get(id);
+    if (runtime?.stopping) return runtime.stopping;
+    let job; try { job = this.get(id); } catch {}
+    if (!runtime && !job?.preview?.pid && !job?.preview?.basePid) return;
+    if (runtime) runtime.stopped = true;
+    const stopping = (async () => {
+      const pids = new Set([runtime?.before?.pid, runtime?.after?.pid, job?.preview?.pid, job?.preview?.basePid].filter(Boolean));
+      for (const pid of pids) await stopTree(pid);
+      if (this.previews.get(id) === runtime) this.previews.delete(id);
+      try {
+        this.updatePreview(id, fresh => { if (fresh.preview) { fresh.preview.status = 'stopped'; fresh.preview.stoppedReason = reason; delete fresh.preview.pid; delete fresh.preview.basePid; } });
+        this.event(id, 'controller', 'user', 'PREVIEW', msg('srv.preview.stopped', { 0: reason }));
+      } catch {}
+    })();
+    if (runtime) runtime.stopping = stopping;
+    return stopping;
+  }
   async runTests(job, cwd, revision, tests) {
     const manager = (job.roster || roster(this.config)).manager, signal = this.runs.get(job.id)?.abort.signal;
     for (const test of tests) {
@@ -1370,6 +1502,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     let fin = null;
     if (!job.skipped?.includes('final')) fin = await this.call(job, members.manager, 'final', msg("srv.team.bao_cao_thay_doi_tests_findings"));
     await this.assertReady(job);
+    const check = await this.mergeCheck(job);
+    job.changes = { revision: job.revision, added: check.added, removed: check.removed, files: check.paths };
+    this.save(job); await this.runPreview(job);
+    const fresh = this.get(job.id), steered = job.steered || fresh.messages.length > job.messages.length;
+    Object.assign(job, fresh); if (steered) job.steered = true;
+    if (['paused', 'cancelled'].includes(job.status)) return;
     job.status = 'ready'; await this.remember(job, fin?.memory); this.event(job.id, job.skipped?.includes('final') ? 'controller' : members.manager, 'user', 'READY_FOR_MERGE', msg("srv.team.ready_summary", { 0: (job.skipped || []).join(', ') || '—' }));
   }
   // Cổng rủi ro không dùng AI: lý do buộc phải review/verify (file nhạy cảm, xóa file, diff lớn, rủi ro cao).
@@ -1622,6 +1760,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   // Chạy song song nhiều công việc trong giới hạn slot RAM; mỗi công việc giữ 1 slot, task song song bên trong giữ thêm.
   async tick() {
+    await this.previewRecovery;
+    for (const [id, preview] of this.previews) {
+      let job; try { job = this.get(id); } catch {}
+      const reason = !job ? 'deleted' : terminal.has(job.status) ? job.status : job.revision !== preview.revision ? 'revision' : Date.parse(job.preview?.expiresAt || preview.expiresAt) <= Date.now() ? 'ttl' : preview.after && (preview.after.child.exitCode !== null || preview.after.child.signalCode) ? 'exited' : null;
+      if (reason) await this.stopPreview(id, reason);
+    }
     if (this.closed || this.accountLoginBusy) return;
     const started = [];
     for (;;) {
@@ -1664,6 +1808,17 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   start() { this.interval = setInterval(() => this.tick().catch(e => this.emit('fault', e)), 3000); this.backupTimer = setInterval(() => this.autoBackup(), 3600_000); setImmediate(() => this.autoBackup()); this.sweepGit().catch(e => this.emit('fault', e)); this.kick(); }
   async control(id, action, payload = {}) {
     const job = this.get(id);
+    if (action === 'preview-stop') { await this.stopPreview(id, 'user'); return this.get(id); }
+    if (action === 'accept') {
+      if (job.status !== 'ready' || this.runs.has(id) || payload.revision !== job.revision) throw new Error(msg('srv.preview.accept_invalid'));
+      const paths = new Set((job.evidence || []).filter(e => e.revision === job.revision).flatMap(e => e.files.map(f => `${e.dir}/${f.path}`)));
+      job.acceptance = { revision: job.revision, at: now(), by: 'user', evidence: [...new Set((Array.isArray(payload.evidence) ? payload.evidence : []).filter(p => typeof p === 'string' && paths.has(p)))].slice(0, 20) };
+      this.save(job); this.event(id, 'user', 'team', 'ACCEPTED', msg('srv.preview.accepted', { 0: job.revision.slice(0, 8) })); return job;
+    }
+    if (action === 'preview-start') {
+      if (job.status !== 'ready' || this.runs.has(id) || !this.project(job.project).preview || this.previews.has(id)) throw new Error(msg('srv.preview.accept_invalid'));
+      await this.runPreview(job, true); return this.get(id);
+    }
     if (action === 'score-claim') {
       if (this.runs.has(id) || ['running', 'queued', 'merging'].includes(job.status)) throw new Error('Pause the job before scoring a claim');
       const d = job.discussions?.find(d => d.id === payload.thread), c = d && ledger(d).claims.find(c => c.id === payload.claim);
@@ -1676,6 +1831,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       // Xóa được mọi việc không có tiến trình đang chạy (đang chạy thì Tạm dừng/Hủy trước). Xóa cả worktree, branch và log.
       if (['running', 'queued', 'merging'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.delete_not_finished"));
       if (!payload.noBackup) try { this.backup('before-delete'); } catch (e) { this.emit('fault', e); } // xóa nhầm vẫn còn bản sao lưu
+      await this.stopPreview(id, 'deleted');
       await this.releaseGit(job);
       this.db.prepare('DELETE FROM events WHERE job = ?').run(id); this.db.prepare('DELETE FROM jobs WHERE id = ?').run(id);
       this.emit('change'); return { id, deleted: true };
@@ -1711,6 +1867,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (action === 'pause' || action === 'cancel') {
       if (action === 'cancel') { job.error = null; job.current = null; job.running = []; }
       job.status = action === 'pause' ? 'paused' : 'cancelled'; this.save(job);
+      if (action === 'cancel') await this.stopPreview(id, 'cancelled');
       if (this.runs.has(id)) this.runs.get(id).abort.abort(new DOMException(action === 'cancel' ? msg("srv.team.huy_task_giu_worktree_de_khong") : msg("srv.team.dung_tien_trinh_khi_tiep_tuc"), 'AbortError'));
       this.event(id, 'user', 'team', 'CONTROL', action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
     } else if (action === 'resume') {
@@ -1735,6 +1892,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } else if (action === 'sync') {
       // Base đã đi tiếp: merge base vào branch công việc, rồi bắt buộc test/review/verify lại từ đầu.
       if (!['paused', 'blocked', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_cap_nhat"));
+      await this.stopPreview(id, 'revision'); job.preview = this.get(id).preview; job.acceptance = null;
       const head = await git(this.project(job.project).path, ['rev-parse', `refs/heads/${job.baseBranch}`]);
       for (const l of job.linked || []) if (await git(l.path, ['rev-parse', l.baseBranch]) !== l.base) throw new Error(msg("srv.team.linked_base_moved", { 0: l.project }));
       if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
@@ -1754,6 +1912,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       this.save(job); this.kick();
     } else if (action === 'message') {
       if (typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 20000) throw new Error(msg("srv.team.message_khong_hop_le"));
+      job.acceptance = null;
       const names = await this.attach(job, payload.files);
       job.messages.push({ time: now(), text: payload.message.trim(), ...(names.length ? { attachments: names } : {}) });
       // Steering invalidates a ready-to-merge result; it must go through planning/review again.
@@ -1824,7 +1983,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (const job of this.jobs()) if (['merged', 'done'].includes(job.status) && !job.released) { await this.releaseGit(job); job.released = true; this.save(job); }
     for (const p of this.config.projects) {
       const trees = (await git(p.path, ['worktree', 'list', '--porcelain']).catch(() => '')).split(/\r?\n/).filter(l => l.startsWith('worktree ')).map(l => l.slice(9));
-      for (const wt of trees) if (resolve(wt).toLowerCase().startsWith(resolve(mine).toLowerCase()) && /-(review|consult)-[0-9a-f]{8}$/.test(wt) && !this.runs.has(basename(wt).split('-')[0])) await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
+      for (const wt of trees) if (resolve(wt).toLowerCase().startsWith(resolve(mine).toLowerCase()) && /-(review|consult|preview)-[0-9a-f]{8}$/.test(wt) && !this.runs.has(basename(wt).split('-')[0]) && !this.previews.has(basename(wt).split('-')[0])) await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
       await run(['git'], ['-C', p.path, 'worktree', 'prune'], { allowFailure: true });
     }
   }
@@ -1889,7 +2048,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (typeof idOrJob === 'string' && job.status === 'ready' && !this.runs.has(job.id) && !destination.error) {
       job.mergeTargetCheck = { type: destination.type, branch: destination.branch, tip: destination.tip, revision: job.revision }; this.save(job);
     }
-    return { revision: job.revision, code: job.revision.slice(0, 8), files: rows.length, added, removed, risk: reasons.length ? 'high' : job.risk || 'medium', reasons, needsConfirm: reasons.length > 0,
+    const required = job.kind === 'code' && !!this.project(job.project).preview && this.project(job.project).preview.requireAcceptance !== false;
+    return { revision: job.revision, code: job.revision.slice(0, 8), files: rows.length, added, removed, paths: rows.map(([a, b, path]) => ({ path, added: Number(a) || 0, removed: Number(b) || 0 })), acceptance: { required, ok: !required || job.acceptance?.revision === job.revision, revision: job.acceptance?.revision || null }, risk: reasons.length ? 'high' : job.risk || 'medium', reasons, needsConfirm: reasons.length > 0,
       checks: { tested: job.tested === job.revision, reviewed: job.reviewed === job.revision || !!job.skipped?.includes('review'), reviewSkipped: !!job.skipped?.includes('review'), verified: job.verified === job.revision || !!job.skipped?.includes('verify'), verifySkipped: !!job.skipped?.includes('verify'), baseUnchanged: destination.type !== 'base' || head === job.base && linkedUnchanged, ready: job.status === 'ready' },
       target: destination, evidence: { revision: job.revision, controllerTests, aiChecks, files: (job.evidence || []).filter(e => e.revision === job.revision), warnNoControllerTest: !controllerTests.some(r => r.code === 0) }, pendingMerge };
   }
@@ -1901,6 +2061,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     job.status = 'merging'; this.save(job);
     try {
       await this.assertReady(job);
+      const preview = this.project(job.project).preview;
+      if (preview && preview.requireAcceptance !== false && job.acceptance?.revision !== job.revision) throw new Error(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) }));
       const check = await this.mergeCheck(job, target), destination = check.target;
       if (destination.type === 'base' && !check.checks.baseUnchanged) throw new Error(msg("srv.team.da_co_commit_moi_bam_cap", { 0: job.baseBranch }));
       if (check.needsConfirm && confirm !== check.code) throw new Error(msg("srv.team.rui_ro_cao_nhap_ma_commit", { 0: check.code }));
@@ -1956,6 +2118,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       // ponytail: ff-only sau khi đã kiểm trước nên gần như không thể lỗi; lỗi giữa chừng thì báo rõ repo nào đã merge.
       for (const l of job.linked || []) { const r = await run(['git'], ['-C', l.path, 'merge', '--ff-only', l.revision], { allowFailure: true }); if (r.code !== 0) throw new Error(msg("srv.team.linked_merge_failed", { 0: l.project, 1: job.baseBranch })); }
       job.status = 'merged'; job.pendingMerge = null; job.mergedInto = { branch: destination.branch, commit, mode }; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: commit.slice(0, 8), 1: destination.branch }), job.mergedInto);
+      await this.stopPreview(id, 'merged'); job.preview = this.get(id).preview;
       await this.releaseGit(job).catch(e => this.emit('fault', e));
     } catch (error) { job.status = 'ready'; this.save(job); throw error; }
     finally { this.runs.delete(id); this.kick(); }
@@ -2092,6 +2255,10 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   async close() {
     if (this.dbClosed) return;
     this.closed = true; clearInterval(this.interval); clearInterval(this.backupTimer); for (const r of this.runs.values()) r.abort.abort();
+    await this.previewRecovery;
+    const previews = [...this.previews.entries()];
+    for (const [id] of previews) await this.stopPreview(id, 'close');
+    await Promise.all(previews.map(([, p]) => p.done));
     while (this.runs.size || this.refreshing) await new Promise(r => setTimeout(r, 25));
     this.db.close(); this.dbClosed = true;
   }
