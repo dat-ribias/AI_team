@@ -26,6 +26,7 @@
 </aside>
 <main>
   <nav class="session-tabs" aria-label="sessions"><div id="session-tabs" class="stabs" role="tablist"></div><button id="session-new" data-i18n-aria="ui.session.new" data-i18n-title="ui.session.new">＋</button><button id="session-rename" data-i18n-aria="ui.session.rename" data-i18n-title="ui.session.rename">✎</button><button id="session-tab" data-i18n-aria="ui.session.newTab" data-i18n-title="ui.session.newTab">⧉</button><button id="memory-open" data-i18n-aria="ui.mem.title" data-i18n-title="ui.mem.title">🧠</button></nav>
+  <p id="session-summary" class="session-summary muted"></p>
   <div class="notice stale" id="stale" hidden role="alert" data-i18n="ui.stale"></div>
   <header><div><span class="eyebrow">WORKSPACE / OVERVIEW</span><h1><span data-i18n="ui.header.title"></span> <span class="tag" id="mode">LOCAL</span></h1><p data-i18n="ui.header.subtitle"></p></div><button class="primary" id="create-top" data-i18n="ui.header.newJob"></button></header>
   <div class="notice" id="notice" hidden role="status"></div>
@@ -37,7 +38,8 @@
     </section>
     <div class="work-grid">
       <section class="panel communication"><div class="panel-heading"><div><span class="eyebrow">COMMUNICATION</span><h2 id="conversation-title"></h2></div><div class="chat-tools"><span class="tag" id="event-count"></span><button id="chat-expand" class="icon-btn" data-i18n-aria="ui.chat.expand">⤢</button></div></div><div class="chat-members" id="chat-members"></div>
-        <div class="tabs" role="tablist"><button class="selected" data-tab="messages" data-i18n="ui.tabs.messages"></button><button data-tab="activity" data-i18n="ui.tabs.activity"></button><button data-tab="decisions" data-i18n="ui.tabs.decisions"></button><button data-tab="evidence" data-i18n="ui.evidence.title"></button><button data-tab="all" data-i18n="ui.tabs.all"></button></div>
+        <div class="tabs" role="tablist"><button data-tab="results" data-i18n="ui.results.title"></button><button class="selected" data-tab="messages" data-i18n="ui.tabs.messages"></button><button data-tab="activity" data-i18n="ui.tabs.activity"></button><button data-tab="decisions" data-i18n="ui.tabs.decisions"></button><button data-tab="evidence" data-i18n="ui.evidence.title"></button><button data-tab="all" data-i18n="ui.tabs.all"></button></div>
+        <div id="results-panel" class="timeline results-panel" aria-live="polite" hidden></div>
         <div id="evidence-panel" class="timeline evidence-panel" aria-live="polite" hidden></div>
         <div id="timeline" class="timeline" aria-live="polite"></div>
         <form id="message-form" class="message-form"><label class="sr-only" for="message" data-i18n="ui.message.label"></label><label class="attach-btn icon" data-i18n-aria="ui.attach.add"><input type="file" id="message-files" multiple hidden>📎</label><input id="message" data-i18n-placeholder="ui.message.placeholder" maxlength="20000" required><button type="submit" data-i18n-aria="ui.message.send">↑</button></form><div class="attach-list msg" id="message-attach"></div>

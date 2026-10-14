@@ -217,6 +217,34 @@ Tùy chỉnh trong `team.config.json`: `sensitivePaths` (regex), `largeDiffLines
 
 ## Hồ sơ kiểm tra
 
+### Tab Kết quả
+
+Tab **Kết quả** tự mở khi chọn việc ready/done/merged: mục tiêu và tên phiên, tóm tắt thay đổi, danh sách file/diff, ảnh trước/sau trên desktop/mobile và quyết định tiếp theo. Bằng chứng ghi rõ **Controller chạy**, **AI tự báo**, **Bạn xác nhận**; bằng chứng khác commit hiện tại được đánh dấu **cũ**. Thanh phiên hiện ghi chú và việc mới nhất để dễ nhớ nội dung khi mở lại.
+
+### Cấu hình preview
+
+Sửa JSON preview cạnh tests trong hộp dự án. **Đề xuất** chỉ điền bản nháp của Leader; owner phải bấm **Lưu**. Ví dụ trong `projects[]` của `team.config.json`:
+
+```json
+"preview": {
+  "command": "npm ci && npx ng serve --port {port}",
+  "readyPath": "/",
+  "routes": [{ "name": "Trang chủ", "path": "/" }],
+  "timeoutSec": 120,
+  "ttlMin": 30,
+  "portRange": [4100, 4199],
+  "requireAcceptance": true
+}
+```
+
+Nếu worktree đã có phụ thuộc, có thể dùng `npx ng serve --port {port}`; nếu chưa có `node_modules`, lệnh phải tự cài phụ thuộc như ví dụ `npm ci && ...`. Controller dùng cổng trống 4100–4199, tối đa 2 preview đồng thời và tính vào RAM slot. Sau verify, ảnh trước/sau được chụp ở 1280×800 và 390×844. Đặt `CHROME_PATH` nếu Chrome không ở đường dẫn Windows mặc định; thiếu Chrome thì bỏ chụp và hiện cảnh báo. Preview sau giữ chạy đến hết `ttlMin`, khi revision đổi, merge/cancel hoặc owner bấm Dừng; không khôi phục sau restart. Lỗi preview chỉ tạo cảnh báo/log, không làm fail job.
+
+**Preview chạy code chưa được tin cậy trên máy owner, không phải môi trường cách ly. Không trỏ vào dữ liệu production.** TODO: project không phải web (API/CLI) chưa hỗ trợ.
+
+### Nghiệm thu
+
+Ba mức riêng biệt: **Technical PASS** (test/review/verify đúng revision), **Result Verified** (ảnh kết quả đúng revision), **User Accepted** (owner đã xem và bấm Nghiệm thu). Mở preview để thao tác, xem ảnh rồi **Nghiệm thu**; **Góp ý** gửi qua luồng message/replan và duyệt kế hoạch hiện có. Với project có preview, backend chặn merge khi chưa nghiệm thu revision hiện tại, trừ khi `requireAcceptance: false`. Project không có preview giữ hành vi merge cũ. Sync/rework đổi revision làm nghiệm thu cũ mất hiệu lực.
+
 Builder/verifier lưu ảnh chụp, log quan trọng và report e2e vào `.ai-team/evidence/` trong worktree (được Git exclude). Project có thể thêm `"evidence": ["docs/screenshots", "playwright-report"]` để thu các thư mục tương đối khác. Controller thu sau lượt implement/verify và sau test, giữ cấu trúc thư mục tại `<dataDir>/evidence/<jobId>/<revision>/<stage>-<agent>/` (có hậu tố khi thu nhiều lần).
 
 `evidenceMaxMB` trong cấu hình toàn đội giới hạn tổng dung lượng mỗi job, mặc định 50 MB. File vượt giới hạn bị bỏ qua; controller chặn đường dẫn ngoài worktree, symlink/junction và đường dẫn credential/secret. Log test đầy đủ đã lọc secret cũng được lưu trong giới hạn này; HTML được phục vụ với CSP sandbox chặn script và cô lập origin khỏi dashboard.

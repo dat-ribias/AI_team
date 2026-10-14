@@ -25,6 +25,7 @@ applyTheme(store.get('theme'));
 const clock = time => time ? new Date(time).toLocaleString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo' }) : t('ui.common.unknown');
 let names = {};
 let state, selected, events = [], filter, tab = 'messages', rendering = false, again = false, eventsOf, loginId;
+let resultsSelection;
 let planView = { job: null, version: null };
 async function api(path, data) {
   const r = await fetch('/api/' + path, { method: data ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Team-Request': '1' }, ...(data ? { body: JSON.stringify(data) } : {}) });
@@ -239,7 +240,7 @@ function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
 // Các lượt đang chạy của một công việc (song song); dữ liệu cũ chỉ có job.current.
 const deletable = j => !['running', 'queued', 'merging'].includes(j.status);
 const runningOf = j => j?.status === 'running' ? (j.running?.length ? j.running : j.current ? [j.current] : []) : [];
-const nodeOfRun = r => ({ plan: 'manager', final: 'manager', implement: 'b:' + r.agent, research: 'b:' + r.agent, review: 'reviewer', verify: 'verifier' })[r.stage] || null;
+const nodeOfRun = r => ({ plan: 'manager', challenge: 'manager', final: 'manager', implement: 'b:' + r.agent, research: 'b:' + r.agent, review: 'reviewer', verify: 'verifier' })[r.stage] || null;
 function drawState() {
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
@@ -253,13 +254,25 @@ function drawState() {
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
   ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
+  const resultJob = state.jobs.find(j => j.id === selected);
+  if (resultsSelection !== selected) {
+    resultsSelection = selected;
+    if (['ready', 'done', 'merged'].includes(resultJob?.status)) tab = 'results';
+  }
+  document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('selected', b.dataset.tab === tab));
   drawSessions(); syncTab();
   { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${cut(j.goal, 80)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${j.eta != null ? ' · ' + t('ui.eta', { time: duration(j.eta) }) : ''}` : t('ui.flow.summaryIdle'); }
   drawJobsList();
   drawJobsDialog();
   drawFlow();
   if ($('slot-dialog').open && slot?.current) refreshSlotLive();
-  document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => openSlot(b.dataset.slot, b.dataset.agent || null, b.dataset.task, b.closest('#flow') ? selected : null));
+  document.querySelectorAll('[data-slot]').forEach(b => b.onclick = () => {
+    if (b.dataset.task != null) {
+      const detail = $('inspector').querySelector('[data-task-detail="' + b.dataset.task + '"]');
+      if (detail) { detail.open = true; detail.scrollIntoView({ block: 'nearest' }); detail.querySelector('summary').focus(); return; }
+    }
+    openSlot(b.dataset.slot, b.dataset.agent || null, b.dataset.task, b.closest('#flow') ? selected : null);
+  });
   document.querySelectorAll('[data-bench]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.bench)));
   $('running-label').textContent = t('ui.team.running', { n: state.resources.active });
   const taskProject = $('task-dialog').open ? $('project').value : null;
@@ -431,12 +444,18 @@ function drawSessions() {
   $('session-project').innerHTML = state.projects.map(p => { const n = busyOf(p.id); return `<option value="${esc(p.id)}">${n ? `● ${esc(p.id)} · ${esc(t('ui.nav.agentsRunning', { n }))}` : esc(p.id)}</option>`; }).join('') + `<option value="__add">${esc(t('ui.project.add'))}</option>`;
   $('session-project').classList.toggle('working', state.projects.some(p => p.id !== curProject && busyOf(p.id)));
   $('session-project').value = curProject;
-  $('session-tabs').innerHTML = list.map(x => { const st = sessionState(x.id); return `<button role="tab" class="stab ${x.id === curSession ? 'active' : ''} ${st.cls}" data-session="${esc(x.id)}" title="${esc(x.name + ' · ' + st.label)}"><span class="job-dot-status ${st.dot}"></span>${esc(cut(x.name, 28))}<span class="stab-x" data-session-del="${esc(x.id)}" title="${esc(t('ui.inspector.delete'))}">×</span></button>`; }).join('') || `<span class="muted">${esc(t('ui.session.none'))}</span>`;
+  $('session-tabs').innerHTML = list.map(x => { const st = sessionState(x.id); return `<button role="tab" class="stab ${x.id === curSession ? 'active' : ''} ${st.cls}" data-session="${esc(x.id)}" title="${esc(x.name + ' · ' + st.label + ' · ' + sessionSummary(x))}"><span class="job-dot-status ${st.dot}"></span>${esc(cut(x.name, 28))}<span class="stab-x" data-session-del="${esc(x.id)}" title="${esc(t('ui.inspector.delete'))}">×</span></button>`; }).join('') || `<span class="muted">${esc(t('ui.session.none'))}</span>`;
+  $('session-summary').textContent = sessionSummary(list.find(x => x.id === curSession));
   $('session-tabs').querySelectorAll('[data-session]').forEach(b => { b.onclick = () => { curSession = b.dataset.session; store.set('session', curSession); drawSessions(); selectSessionJob(); }; b.ondblclick = () => $('session-rename').click(); });
   $('session-tabs').querySelectorAll('[data-session-del]').forEach(x => x.onclick = e => { e.stopPropagation();
     const id = x.dataset.sessionDel, n = state.jobs.filter(j => j.sessionId === id).length;
     if (!confirm(t('ui.session.confirmDelete', { n }))) return;
     attempt(async () => { await api(`sessions/${id}/delete`, {}); if (curSession === id) { curSession = ''; selected = undefined; events = []; } await refresh(); }); });
+}
+function sessionSummary(session) {
+  if (!session) return '';
+  const job = state.jobs.find(j => j.project === session.project && j.sessionId === session.id);
+  return [session.notes, job && statusLabel(job.status) + ' · #' + job.id + ' · ' + cut(job.goal, 100)].filter(Boolean).join(' · ');
 }
 // working = có AI thật sự đang chạy; còn lại theo việc mới nhất của phiên.
 function sessionState(id) {
@@ -545,8 +564,10 @@ function drawFlow() {
   place('verifier', 945 + shift, cy, 172);
   place('merge', 1155 + shift, cy, 92);
   const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
+  const challenge = !readonly && (job?.stage === 'challenge' || runningOf(job).some(r => r.stage === 'challenge'));
   const runs = readonly ? [] : runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
-  const active = new Set(job?.status === 'running' && runs.length ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
+  const active = new Set(job?.status === 'running' && runs.length ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', challenge: 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
+  if (challenge) { live.delete('reviewer'); live.add('manager'); active.delete('tests>reviewer'); active.delete('rework'); active.add('user>manager'); }
   const edge = (a, b, cls, label = '') => {
     const A = nodes[a], B = nodes[b]; if (!A || !B) return '';
     const x1 = A.x + A.w, x2 = B.x, mx = (x1 + x2) / 2, on = active.has(`${a}>${b}`) || active.has('b>tests') && b === 'tests' && cls.includes('used');
@@ -563,7 +584,7 @@ function drawFlow() {
     const h = a ? agentHealth(a) : null;
     const cls = [
       (job ? live.has(key) : a?.state === 'working') && 'working',
-      job && !live.has(key) && a?.state === 'working' && 'elsewhere',
+      job && !live.has(key) && a?.state === 'working' && !(challenge && key === 'reviewer') && 'elsewhere',
       filter && filter === agentId && 'filtered',
       agentId === null && 'missing',
       a && !a.enabled && 'disabled',
@@ -591,13 +612,13 @@ function drawFlow() {
     edges += edge('manager', 'b:' + id, used ? 'used' : 'idle', tasks.map(x => `T${x.n}·k${x.difficulty ?? '?'}${x.done ? '✓' : ''}`).join(' '));
     edges += edge('b:' + id, 'tests', used ? 'used' : 'idle');
   }
-  edges += edge('tests', 'reviewer', 'used') + edge('reviewer', 'verifier', 'used') + edge('verifier', 'merge', 'used');
-  edges += `<path class="edge rework ${job?.round ? 'used' : ''} ${active.has('rework') ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round, max: state.limits?.rounds ?? 3 }) : t('ui.flow.rework'))}</text>`;
+  edges += edge('tests', 'reviewer', challenge ? 'idle' : 'used') + edge('reviewer', 'verifier', challenge ? 'idle' : 'used') + edge('verifier', 'merge', 'used');
+  edges += `<path class="edge rework ${job?.round && !challenge ? 'used' : ''} ${active.has('rework') ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round, max: state.limits?.rounds ?? 3 }) : t('ui.flow.rework'))}</text>`;
   // Người review/verify thực tế của job: đã chạy → Manager chọn (flow) → mặc định đội. Bước bị controller ép thêm ghi "bị ép".
   const rvId = job?.checkers?.reviewer || job?.override?.reviewer || job?.flow?.reviewer || r.reviewer, vfId = job?.checkers?.verifier || job?.override?.verifier || job?.flow?.verifier || r.verifier;
   const forced = step => { const o = job?.flow?.overrides?.find(x => x.step === step); return o ? t('ui.flow.forced', { why: o.reasons.join('; ') }) : ''; };
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
-  const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
+  const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', r.manager), challenge ? t('ui.results.challenge', { name: names[runs.find(x => x.stage === 'challenge')?.agent] || names[job?.current?.agent] || '—' }) : skipped('plan') ? t('ui.flow.fastPath') : sub(r.manager), r.manager || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
     + gtasks.map((x, i) => { const who = x.ranBy || x.agent, wait = depsOf(x, i).filter(d => gtasks[d] && !gtasks[d].done).map(d => 'T' + (d + 1)); return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review ' + depsOf(x, i).map(d => 'T' + (d + 1)).join(',') : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
       readonly ? cut(x.instruction, 40) : (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
@@ -605,7 +626,7 @@ function drawFlow() {
     + box('verifier', named('Verify', vfId), skipped('verify') ? t('ui.flow.skipped') : forced('verify') || sub(vfId), vfId || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
   // Mỗi cột là một đợt: task cùng cột chạy song song, cột sau chờ cột trước theo mũi tên.
   const waves = graph ? perCol.map((n, c) => `<text class="edge-label wave" x="${365 + c * colW + 86}" y="${top + 4}" text-anchor="middle">${esc(t(n > 1 ? 'ui.flow.waveParallel' : 'ui.flow.wave', { n: c + 1 }))}</text>`).join('') : '';
-  const planTasks = plan && !graph ? `<ul class="task-list plan-tasks">${job.tasks.map((x, i) => `<li><b>T${i + 1}</b> · ${esc(byId[x.agent]?.label || x.agent || t('ui.flow.notChosen'))}<br>${esc(x.instruction)}</li>`).join('')}</ul>` : '';
+  const planTasks = plan && !graph ? `<ul class="task-list plan-tasks">${job.tasks.map((x, i) => `<li>${taskDetailHTML(job, x, i)}</li>`).join('')}</ul>` : '';
   $('flow').innerHTML = history + planTasks + (builders.length || r.manager || graph ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
   document.querySelectorAll('[data-plan-version]').forEach(b => b.onclick = () => { const version = Number(b.dataset.planVersion); planView.version = version === latest.version ? null : version; drawState(); });
   // CSP cấm style="" trong markup; đặt qua CSSOM để vòng sáng không giật lại từ đầu mỗi lần vẽ lại.
@@ -617,6 +638,11 @@ function drawFlow() {
     return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
   }).join('')}` : ''}`;
   document.querySelectorAll('g[data-slot]').forEach(g => g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } });
+}
+function taskDetailHTML(job, task, i, open = false) {
+  const status = task.done ? 'done' : runningOf(job).some(r => r.task === i) ? 'running' : 'waiting';
+  const context = typeof task.context === 'string' ? task.context : JSON.stringify(task.context || '', null, 2);
+  return `<details data-task-detail="${i}" ${open ? 'open' : ''}><summary tabindex="0">T${i + 1} · ${esc(names[task.ranBy || task.agent] || task.ranBy || task.agent || t('ui.flow.notChosen'))} · ${esc(t('ui.results.task.' + status))} · ${esc(cut(task.instruction, 80))}</summary><p class="task-instruction">${esc(task.instruction)}</p><p class="muted">${esc(t('ui.inspector.difficulty', { n: task.difficulty ?? '?' }))}${task.estMinutes ? ' · ~' + esc(duration(task.estMinutes)) : ''}${task.dependsOn?.length ? ' · ' + esc(t('ui.inspector.after', { list: task.dependsOn.map(d => 'T' + (d + 1)).join(', ') })) : ''}</p>${task.why ? `<p>${esc(task.why)}</p>` : ''}${task.skills?.length ? `<p class="skill-tags">${task.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</p>` : ''}${context ? '<p><b>' + esc(t('ui.results.context')) + '</b></p><pre>' + esc(context) + '</pre>' : ''}${task.files?.length ? '<p><b>' + esc(t('ui.results.files')) + '</b></p><ul>' + task.files.map(f => '<li>' + esc(f) + '</li>').join('') + '</ul>' : ''}${task.contextGaps?.length ? `<p>${esc(t('ui.inspector.contextGaps', { n: task.contextGaps.length }))}</p><ul>${task.contextGaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul>` : ''}</details>`;
 }
 function drawInspector() {
   const job = state.jobs.find(j => j.id === selected);
@@ -646,7 +672,9 @@ function drawInspector() {
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b><button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
-  const tasks = job.tasks.length ? `<ul class="task-list">${job.tasks.map((x, i) => `<li class="${runningOf(job).some(r => r.task === i) ? 'current' : ''} ${x.done ? 'done' : ''}"><b>${x.done ? '✓ ' : ''}T${i + 1} · ${esc(t('ui.inspector.difficulty', { n: x.difficulty ?? '?' }))}${x.estMinutes ? ' · ~' + esc(duration(x.estMinutes)) : ''}${x.dependsOn?.length ? ' · ' + esc(t('ui.inspector.after', { list: x.dependsOn.map(d => 'T' + (d + 1)).join(', ') })) : ''}</b> → ${esc(names[x.ranBy || x.agent] || x.ranBy || x.agent || t('ui.inspector.controllerPicks'))}${x.ranBy && x.agent && x.ranBy !== x.agent ? ` <span class="muted">(${esc(t('ui.inspector.plannedFor', { name: names[x.agent] || x.agent }))})</span>` : ''}${x.why ? `<br><span class="muted">${esc(cut(x.why, 160))}</span>` : ''}${x.skills?.length ? `<br><span class="skill-tags">${x.skills.map(n => `<span class="tag">${esc(n)}</span>`).join(' ')}</span>` : ''}${x.contextGaps?.length ? `<details><summary class="muted">${esc(t('ui.inspector.contextGaps', { n: x.contextGaps.length }))}</summary><ul>${x.contextGaps.map(g => `<li>${esc(g)}</li>`).join('')}</ul></details>` : ''}</li>`).join('')}</ul>` : '';
+  const openTasks = new Set([...$('inspector').querySelectorAll('details[data-task-detail][open]')].map(d => Number(d.dataset.taskDetail)));
+  const tasks = job.tasks.length ? '<ul class="task-list">' + job.tasks.map((x, i) => '<li>' + taskDetailHTML(job, x, i, openTasks.has(i)) + '</li>').join('') + '</ul>' : '';
+
   const openDiscussions = new Set([...$('inspector').querySelectorAll('details[data-discussion][open]')].map(d => d.dataset.discussion));
   const discussions = (job.discussions || []).map(d => `<details data-discussion="${esc(d.id)}" ${openDiscussions.has(d.id) ? 'open' : ''}><summary>${esc(d.id)} · ${esc(d.topic)} · ${esc(t('ui.peer.' + d.status))} (${d.rounds}/2)</summary><p class="muted">${esc(names[d.owner || d.from] || d.owner || d.from)} → ${esc(names[d.to] || d.to)} · ${esc(d.stage)}${d.task != null ? ' / T' + (d.task + 1) : ''}</p><p>${esc(d.claim)}</p>${d.assessment ? `<p><b>${esc(t('ui.peer.independent'))}</b><br>${esc(d.assessment.answer)}</p>` : ''}${(d.claims || []).map(c => `<p><b>${esc(c.id)}</b> · ${esc(c.statement)} · ${esc(c.status)}${c.judgment ? ' · ' + esc(t('ui.peer.' + c.judgment.transition)) : ''} <button data-score-thread="${esc(d.id)}" data-claim="${esc(c.id)}" ${['running','queued','merging'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.peer.score'))}</button></p>`).join('')}${(d.messages || []).map(m => `<p><b>${esc(m.id || '')}${m.replyTo ? ' → ' + esc(m.replyTo) : ''} · ${esc(names[m.by] || m.by)} · ${esc(t('ui.peer.' + m.type))}</b> ${esc((m.claimIds || []).join(', '))}<br>${esc(m.text)}</p>${m.evidence?.length ? `<ul>${m.evidence.map(e => `<li>${esc(e)}</li>`).join('')}</ul>` : ''}<small class="muted">${esc(t('ui.peer.snapshot'))}: ${esc(m.snapshot?.commit?.slice(0, 12) || '—')} / ${esc(m.snapshot?.fingerprint?.slice(0, 12) || m.snapshot?.dirtyHash?.slice(0, 12) || '—')}</small>`).join('')}${d.evidence?.length ? `<ul>${d.evidence.map(e => `<li>${esc(e.id)} · ${esc(e.kind)} · ${esc(t('ui.peer.' + e.status))} · ${esc(e.source)}</li>`).join('')}</ul>` : ''}${d.decision ? `<p><b>${esc(t('ui.peer.' + d.decision.outcome))}</b><br>${esc(d.decision.choice || d.decision.reason)}<br>${esc(d.decision.reason)}</p><ul>${(d.decision.evidence || []).map(e => `<li>${esc(e)}</li>`).join('')}</ul>${d.decision.conditions?.length ? `<p>${esc(t('ui.peer.conditions'))}: ${esc(d.decision.conditions.join('; '))}</p>` : ''}${d.decision.remaining?.length ? `<p>${esc(t('ui.peer.obligations'))}: ${esc(d.decision.remaining.join('; '))}</p>` : ''}` : ''}${d.status !== 'resolved' && (idle || job.status === 'waiting') ? `<button data-obligation="${esc(d.id)}">${esc(t('ui.peer.map'))}</button>` : ''}</details>`).join('');
   const risk = job.risk ? `<p class="muted">${esc(t('ui.inspector.risk'))} <b class="${job.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + job.risk))}</b>${job.riskReasons?.length ? ' · ' + esc(job.riskReasons.join('; ')) : ''}</p>` : '';
@@ -683,8 +711,9 @@ function drawInspector() {
   $('export-job').after(transfer);
   $('inspector').querySelectorAll('.task-list > li').forEach((li, i) => {
     const task = job.tasks[i], point = task.checkpoint;
-    if (point) li.insertAdjacentHTML('beforeend', `<details><summary>${esc(t('ui.mem.checkpoint'))}</summary><p>${esc(point.done)}</p><p>${esc(point.remaining)}</p><p>${esc(point.next)}</p><pre>${esc(point.tests)}</pre>${point.failedAttempts?.length ? `<ul>${point.failedAttempts.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</details>`);
-    if (task.memoryIds?.length) li.insertAdjacentHTML('beforeend', `<small class="muted">${esc(t('ui.mem.used'))}: ${esc(task.memoryIds.join(', '))}</small>`);
+    const detail = li.querySelector('[data-task-detail]');
+    if (point) detail.insertAdjacentHTML('beforeend', `<details><summary>${esc(t('ui.mem.checkpoint'))}</summary><p>${esc(point.done)}</p><p>${esc(point.remaining)}</p><p>${esc(point.next)}</p><pre>${esc(point.tests)}</pre>${point.failedAttempts?.length ? `<ul>${point.failedAttempts.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</details>`);
+    if (task.memoryIds?.length) detail.insertAdjacentHTML('beforeend', `<small class="muted">${esc(t('ui.mem.used'))}: ${esc(task.memoryIds.join(', '))}</small>`);
   });
   if ($('merge')) $('merge').onclick = () => attempt(openMerge);
   if ($('send-answer')) $('send-answer').onclick = () => attempt(async () => { const v = $('answer').value.trim(); if (!v) return; await api(`jobs/${selected}/control`, { action: 'message', message: v }); await refresh(); });
@@ -700,6 +729,62 @@ function controllerTestHTML(id, check) {
 function aiCheckHTML(report) {
   const text = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return `<div class="evidence-record"><span class="tag">${esc(t('ui.evidence.ai'))}</span><p><b>${esc(report.stage)} · ${esc(names[report.agent] || report.agent)} · ${esc(report.verdict || '—')}</b></p>${report.findings?.length ? `<pre>${esc(text(report.findings))}</pre>` : ''}${report.tests ? `<p>${esc(t('ui.evidence.selfTests'))}</p><pre>${esc(text(report.tests))}</pre>` : ''}</div>`;
+}
+let resultsRequest = 0;
+async function drawResults() {
+  const id = selected, request = ++resultsRequest, job = state?.jobs.find(j => j.id === id);
+  $('conversation-title').textContent = t('ui.results.title'); $('chat-members').innerHTML = ''; $('event-count').textContent = '';
+  if (!job) { $('results-panel').textContent = t('ui.evidence.selectJob'); return; }
+  const project = state.projects.find(p => p.id === job.project), session = state.sessions.find(s => s.id === job.sessionId);
+  let changes = job.changes?.revision === job.revision ? job.changes : null, acceptance = { required: !!project?.preview && project.preview.requireAcceptance !== false, ok: job.acceptance?.revision === job.revision }, warning = '';
+  if (job.status === 'ready' && job.kind !== 'research') {
+    try {
+      const check = await api(`jobs/${encodeURIComponent(id)}/merge-check`);
+      changes = { added: check.added, removed: check.removed, files: check.paths || [] };
+      acceptance = check.acceptance || acceptance;
+    } catch (e) { warning = e.message; }
+  }
+  if (request !== resultsRequest || tab !== 'results' || selected !== id || state.jobs.find(j => j.id === id)?.revision !== job.revision) return;
+  const stale = revision => revision !== job.revision ? `<span class="tag">${esc(t('ui.results.stale'))}</span>` : '';
+  const source = key => `<span class="tag">${esc(t('ui.evidence.' + key))}</span>`;
+  const items = job.evidence || [], images = [], other = [];
+  for (const item of items) for (const f of item.files || []) {
+    const file = typeof f === 'string' ? { path: f } : f, path = item.dir + '/' + file.path;
+    const match = item.stage === 'preview' && /^(before|after)-(.+)-(desktop|mobile)\.png$/i.exec(file.path);
+    if (match) images.push({ item, path, phase: match[1], route: match[2], viewport: match[3] });
+    else other.push({ item, file, path });
+  }
+  images.sort((a, b) => a.route.localeCompare(b.route) || a.viewport.localeCompare(b.viewport) || b.phase.localeCompare(a.phase));
+  const shownImages = images.filter(x => x.item.revision === job.revision);
+  const verified = shownImages.some(x => x.phase === 'after' && x.item.agent === 'controller');
+  const technical = job.tested === job.revision && ['review', 'verify'].every(stage => job.skipped?.includes(stage) || job[stage === 'review' ? 'reviewed' : 'verified'] === job.revision);
+  const final = (job.reports || []).filter(r => r.stage === 'final').at(-1);
+  const summary = job.kind === 'research' ? job.conclusion?.conclusion : final?.summary;
+  const reports = ['review', 'verify'].map(stage => (job.reports || []).filter(r => r.stage === stage).at(-1)).filter(Boolean);
+  const checks = job.checkResults || [], preview = job.preview, running = preview?.status === 'running' && preview.revision === job.revision;
+  const configured = job.kind !== 'research' && !!project?.preview;
+  const stats = changes ? t('ui.results.stats', { n: changes.files?.length || 0, added: changes.added ?? '—', removed: changes.removed ?? '—' }) : '—';
+  const level = (key, ok) => `<li class="${ok ? 'evidence-pass' : 'muted'}"><b>${esc(t('ui.results.' + key))}</b><span>${esc(t(ok ? 'ui.results.pass' : 'ui.results.pending'))}</span></li>`;
+  $('results-panel').innerHTML = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(job.goal)}</p><details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
+    <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>
+    <section class="result-section"><h3>${esc(t('ui.results.proof'))}</h3>${preview?.status === 'failed' || preview?.screenshots === false ? `<div class="error-box">${source('controller')} ${stale(preview.revision)}<p>${esc(preview.error || t(preview.screenshots === false ? 'ui.results.noChrome' : 'ui.results.previewFailed'))}</p>${other.filter(x => x.item.stage === 'preview' && x.item.revision === preview.revision && x.file.path.endsWith('preview.log')).map(x => evidenceLink(id, x.path, t('ui.evidence.openLog'))).join(' ')}</div>` : ''}
+    <div class="result-images">${images.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!images.length ? `<p class="muted">${esc(t('ui.results.noImages'))}</p>` : ''}
+    ${checks.map(c => `<div>${stale(c.revision)}<code>${esc(c.revision || '—')}</code>${controllerTestHTML(id, c)}</div>`).join('')}${reports.map(r => `<div>${stale(r.revision)}${aiCheckHTML({ ...r, findings: (r.findings || []).filter(f => !['resolved', 'closed'].includes(f.status) && f.resolved !== true) })}</div>`).join('')}
+    <ul class="evidence-files">${other.map(x => `<li>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)} ${evidenceLink(id, x.path, x.file.path)}</li>`).join('')}</ul>
+    ${job.acceptance ? `<p>${source('user')}${stale(job.acceptance.revision)} ${esc(clock(job.acceptance.at))}</p>` : ''}</section>
+    <section class="result-section"><h3>${esc(t('ui.results.decision'))}</h3><ul class="result-levels">${level('technical', technical)}${level('verified', verified)}${level('accepted', job.acceptance?.revision === job.revision)}</ul>${warning ? `<p class="error-box">${esc(warning)}</p>` : ''}${acceptance.required && !acceptance.ok ? `<p class="error-box">${esc(t('ui.results.acceptRequired'))}</p>` : ''}<div class="controls">${running ? (preview.routes?.length ? preview.routes : [{ name: t('ui.results.openPreview'), path: '/' }]).map((r, i) => `<button type="button" data-result-route="${i}">${esc(t('ui.results.openPreview'))} · ${esc(r.name)}</button>`).join('') + `<button type="button" data-result-control="preview-stop">${esc(t('ui.results.stopPreview'))}</button>` : configured ? `<button type="button" data-result-control="preview-start" ${job.status === 'ready' ? '' : 'disabled'}>${esc(t('ui.results.restartPreview'))}</button>` : ''}<button type="button" data-result-control="accept" ${job.status === 'ready' ? '' : 'disabled'}>${esc(t('ui.results.accept'))}</button><button type="button" id="results-feedback" ${['merged', 'cancelled'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.results.feedback'))}</button>${job.kind !== 'research' ? `<button type="button" id="results-merge" class="primary" ${job.status !== 'ready' || acceptance.required && !acceptance.ok ? 'disabled' : ''}>${esc(t('ui.results.merge'))}</button>` : ''}</div></section>`;
+  $('results-diff').onclick = () => $('view-diff')?.click();
+  $('results-feedback').onclick = () => { $('message').focus(); $('message').scrollIntoView({ block: 'nearest' }); };
+  if ($('results-merge')) $('results-merge').onclick = () => $('merge')?.click();
+  $('results-panel').querySelectorAll('[data-result-route]').forEach(b => b.onclick = () => {
+    const route = preview.routes?.[Number(b.dataset.resultRoute)]?.path || '/';
+    window.open(preview.url.replace(/\/$/, '') + route, '_blank', 'noopener');
+  });
+  $('results-panel').querySelectorAll('[data-result-control]').forEach(b => b.onclick = () => attempt(async () => {
+    const action = b.dataset.resultControl; b.disabled = true;
+    try { await api(`jobs/${encodeURIComponent(id)}/control`, { action, ...(action === 'accept' ? { revision: job.revision, evidence: shownImages.map(x => x.path) } : {}) }); await refresh(); }
+    finally { if (b.isConnected) b.disabled = false; }
+  }));
 }
 let evidenceRequest = 0;
 async function drawEvidence() {
@@ -741,7 +826,7 @@ function mergeTarget() {
 }
 function updateMergeButton() {
   const c = mergeCheck, checks = c?.checks, target = mergeTarget();
-  $('merge-go').disabled = mergeSending || !checks || !['tested', 'reviewed', 'verified', 'baseUnchanged', 'ready'].every(key => checks[key]) || !!c?.target?.error || target.type !== 'base' && (!c?.target || !target.branch) || !!c?.pendingMerge && c.pendingMerge.passed !== true || !!c?.needsConfirm && $('merge-confirm').value.trim() !== String(c.code);
+  $('merge-go').disabled = mergeSending || !checks || c?.acceptance?.required && !c.acceptance.ok || !['tested', 'reviewed', 'verified', 'baseUnchanged', 'ready'].every(key => checks[key]) || !!c?.target?.error || target.type !== 'base' && (!c?.target || !target.branch) || !!c?.pendingMerge && c.pendingMerge.passed !== true || !!c?.needsConfirm && $('merge-confirm').value.trim() !== String(c.code);
 }
 async function refreshMergeCheck() {
   const id = mergeJob, target = mergeTarget(), request = ++mergeRequest;
@@ -750,7 +835,7 @@ async function refreshMergeCheck() {
   const c = await api(`jobs/${encodeURIComponent(id)}/merge-check?target=${encodeURIComponent(target.type)}&branch=${encodeURIComponent(target.branch || '')}`);
   if (request !== mergeRequest || mergeJob !== id || !$('merge-dialog').open) return;
   const job = state.jobs.find(j => j.id === id), branch = c.target?.branch || target.branch || job?.baseBranch;
-  const checks = [[t('ui.merge.tested'), c.checks?.tested], [t(c.checks?.reviewSkipped ? 'ui.merge.reviewSkipped' : 'ui.merge.reviewed'), c.checks?.reviewed], [t(c.checks?.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks?.verified], [t('ui.merge.baseUnchanged', { branch }), c.checks?.baseUnchanged]];
+  const checks = [...(c.acceptance?.required ? [[t('ui.results.accepted'), c.acceptance.ok]] : []), [t('ui.merge.tested'), c.checks?.tested], [t(c.checks?.reviewSkipped ? 'ui.merge.reviewSkipped' : 'ui.merge.reviewed'), c.checks?.reviewed], [t(c.checks?.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks?.verified], [t('ui.merge.baseUnchanged', { branch }), c.checks?.baseUnchanged]];
   const evidence = c.evidence, tests = Array.isArray(evidence?.controllerTests) ? evidence.controllerTests : [], files = Array.isArray(evidence?.files) ? evidence.files.reduce((n, item) => n + (item.files?.length || 0), 0) : evidence?.files ?? 0;
   const p = c.pendingMerge;
   $('merge-check').innerHTML = `<p>${esc(t('ui.merge.summary', { code: c.code, branch, files: c.files, added: c.added, removed: c.removed }))}</p><p>${esc(t('ui.merge.risk'))} <b class="${c.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + c.risk))}</b></p>${c.target?.mode ? `<p>${esc(t('ui.merge.targetMode'))}: <b>${esc(t('ui.merge.targetMode.' + c.target.mode))}</b></p>` : ''}${c.target?.error || target.type !== 'base' && !c.target ? `<p class="error-box" role="alert">${esc(c.target?.error || t('ui.merge.targetUnavailable'))}</p>` : ''}<ul class="check-list">${checks.map(([label, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(label)}</li>`).join('')}${(c.reasons || []).map(reason => `<li class="bad">⚠ ${esc(reason)}</li>`).join('')}</ul>${evidence ? `<section class="merge-evidence"><h3>${esc(t('ui.evidence.title'))} <code>${esc(evidence.revision)}</code></h3><p>${esc(t('ui.evidence.controller'))}: ${esc(t('ui.evidence.testCounts', { pass: tests.filter(x => x.code === 0).length, fail: tests.filter(x => x.code !== 0).length }))} · ${esc(t('ui.evidence.fileCount', { n: files }))}</p>${(evidence.aiChecks || []).map(report => `<p><span class="tag">${esc(t('ui.evidence.ai'))}</span> ${esc(report.stage)} · ${esc(names[report.agent] || report.agent)} · <b>${esc(report.verdict || '—')}</b></p>`).join('')}${evidence.warnNoControllerTest ? `<p class="evidence-warning" role="alert">${esc(t('ui.evidence.noControllerTest'))}</p>` : ''}<button type="button" id="merge-open-evidence">${esc(t('ui.evidence.view'))}</button></section>` : ''}${p ? `<section class="merge-pending"><h3>${esc(t('ui.merge.secondApproval'))}</h3><p><code>${esc(p.commit)}</code> · ${esc(p.target?.branch || p.target || branch)}</p><p class="${p.passed ? 'evidence-pass' : 'evidence-fail'}">${esc(t(p.passed ? 'ui.merge.pendingPassed' : 'ui.merge.pendingFailed'))}</p><div id="merge-pending-tests"></div><pre class="merge-pending-diff">${esc(p.diff || '')}</pre></section>` : ''}`;
@@ -831,7 +916,9 @@ function avatar(id) {
   return `<span class="avatar-wrap"><span class="chat-avatar ${id === 'controller' ? 'sys' : hueClass(id)}" title="${esc(name)}">${esc(letter)}</span>${h ? `<span class="health-dot ${h.cls}" title="${esc(h.title)}"></span>` : ''}</span>`;
 }
 function drawTimeline() {
-  const evidence = tab === 'evidence';
+  const evidence = tab === 'evidence', results = tab === 'results';
+  $('results-panel').hidden = !results;
+  if (results) { $('timeline').hidden = true; $('evidence-panel').hidden = true; attempt(drawResults); return; }
   $('timeline').hidden = evidence; $('evidence-panel').hidden = !evidence;
   if (evidence) { attempt(drawEvidence); return; }
   const filtered = events.filter(e => (!filter || e.from === filter || e.to === filter) && (tab === 'all' || tab === 'activity' && SYSTEM_TYPES.concat('TEST_RESULT', 'CHECKPOINT').includes(e.type) || tab === 'decisions' && DECISION_TYPES.includes(e.type) || tab === 'messages' && !SYSTEM_TYPES.includes(e.type)));
@@ -1260,10 +1347,26 @@ function projectList() {
   const quote = w => /\s/.test(w) ? `"${w}"` : w;
   $('project-list').innerHTML = state.projects.length ? `<b>${esc(t('ui.project.registered'))}</b>${state.projects.map(p => `<div class="project-row"><span><b>${esc(p.id)}</b> · ${esc(p.path)}${p.tests.length ? '' : ' · ' + esc(t('ui.project.noTests'))}</span><button type="button" data-remove-project="${esc(p.id)}">${esc(t('ui.project.remove'))}</button><details class="read-dirs"><summary>${esc(t('ui.project.edit'))}</summary>
     <label>${esc(t('ui.project.tests'))}</label><textarea rows="2" data-tests="${esc(p.id)}">${esc(p.tests.map(c => c.map(quote).join(' ')).join('\n'))}</textarea>
+    <label>${esc(t('ui.results.previewConfig'))}</label><textarea rows="7" data-preview="${esc(p.id)}" aria-label="${esc(t('ui.results.previewConfig'))}">${esc(p.preview ? JSON.stringify(p.preview, null, 2) : '')}</textarea><p class="muted">${esc(t('ui.results.previewHint'))}</p>
+    <div class="controls"><button type="button" data-preview-save="${esc(p.id)}">${esc(t('ui.project.saveChanges'))}</button><button type="button" data-preview-clear="${esc(p.id)}">${esc(t('ui.inspector.delete'))}</button><button type="button" data-preview-propose="${esc(p.id)}">${esc(t('ui.access.propose'))}</button></div><p data-preview-note="${esc(p.id)}" class="muted"></p>
     <label class="profile-check"><input type="checkbox" data-net="${esc(p.id)}" ${p.network ? 'checked' : ''}> ${esc(t('ui.project.network'))}</label>
     <label>${esc(t('ui.project.readDirs'))} (${p.readDirs.length})</label><textarea rows="2" data-dirs="${esc(p.id)}">${esc(p.readDirs.join('\n'))}</textarea>
     <button type="button" data-save-project="${esc(p.id)}">${esc(t('ui.project.saveChanges'))}</button></details></div>`).join('')}` : '';
   const q = (attr, id) => document.querySelector(`[${attr}="${id}"]`);
+  document.querySelectorAll('[data-preview-save], [data-preview-clear]').forEach(b => b.onclick = () => attempt(async () => {
+    const id = b.dataset.previewSave || b.dataset.previewClear;
+    const value = q('data-preview', id).value.trim();
+    const preview = b.dataset.previewClear || !value ? null : JSON.parse(value);
+    await api('projects/' + encodeURIComponent(id) + '/update', { preview }); await refresh(); projectList();
+  }));
+  document.querySelectorAll('[data-preview-propose]').forEach(b => b.onclick = () => attempt(async () => {
+    b.disabled = true;
+    try {
+      const id = b.dataset.previewPropose, result = await api('projects/' + encodeURIComponent(id) + '/preview/propose', {});
+      q('data-preview', id).value = JSON.stringify(result.draft, null, 2);
+      q('data-preview-note', id).textContent = [t('ui.access.proposed'), result.summary, ...(Array.isArray(result.notes) ? result.notes : [result.notes || ''])].join(' · ');
+    } finally { b.disabled = false; }
+  }));
   document.querySelectorAll('[data-save-project]').forEach(b => b.onclick = () => attempt(async () => {
     const id = b.dataset.saveProject;
     const r = await api(`projects/${id}/update`, { tests: q('data-tests', id).value, network: q('data-net', id).checked, readDirs: q('data-dirs', id).value });
