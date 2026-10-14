@@ -861,6 +861,8 @@
   "srv.team.plan_changed": "Kế hoạch đã thay đổi, xem bản mới",
   "srv.team.plan_not_waiting": "Việc không ở trạng thái chờ duyệt kế hoạch",
   "srv.team.plan_approval_invalid": "planApproval phải là boolean",
+  "srv.team.title_invalid": "Tiêu đề phải là chuỗi 1–60 ký tự",
+  "srv.team.renamed": "Đã đổi tên công việc: {0}",
   "ui.ev.PLAN_PROPOSED": "Đề xuất kế hoạch",
   "ui.ev.PLAN_APPROVED": "Duyệt kế hoạch",
   "ui.results.title": "Kết quả",

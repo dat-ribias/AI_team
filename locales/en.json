@@ -861,6 +861,8 @@
   "srv.team.plan_changed": "The plan has changed; view the latest version",
   "srv.team.plan_not_waiting": "The job is not awaiting plan approval",
   "srv.team.plan_approval_invalid": "planApproval must be a boolean",
+  "srv.team.title_invalid": "Title must be 1–60 characters",
+  "srv.team.renamed": "Renamed job: {0}",
   "ui.ev.PLAN_PROPOSED": "Plan proposed",
   "ui.ev.PLAN_APPROVED": "Plan approved",
   "ui.results.title": "Results",

@@ -861,6 +861,8 @@
   "srv.team.plan_changed": "計画が変更されました。最新版を確認してください",
   "srv.team.plan_not_waiting": "このジョブは計画の承認待ちではありません",
   "srv.team.plan_approval_invalid": "planApproval は boolean で指定してください",
+  "srv.team.title_invalid": "タイトルは1〜60文字で指定してください",
+  "srv.team.renamed": "ジョブ名を変更しました: {0}",
   "ui.ev.PLAN_PROPOSED": "計画の提案",
   "ui.ev.PLAN_APPROVED": "計画の承認",
   "ui.results.title": "結果",
