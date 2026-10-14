@@ -8,6 +8,7 @@ import { MemoryStore, fileHash, hash } from './memory.js';
 import { ledger, scopeFiles, question, answer, decide, refreshLedger, obligations, evidence } from './discussions.js';
 import { cpus, totalmem, freemem } from 'node:os';
 import { EventEmitter } from 'node:events';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { run, executable } from './process.js';
 import { runAgent, readQuota } from './providers.js';
 import { scanSkills, skillRoots } from './skills.js';
@@ -72,6 +73,9 @@ const usageTokens = u => {
 // Định tuyến bằng luật (0 token): mode 'fast' | 'full' | 'auto'. Auto chỉ chọn đường nhanh khi mục tiêu ngắn và không có dấu hiệu rủi ro.
 // Lỗi do hết quota/rate limit (khác lỗi code): được phép bàn giao cho builder khác.
 const QUOTA_ERROR = /usage limit|rate.?limit|quota|\b429\b|too many requests|hit your limit|limit reached/i;
+const TRANSIENT_ERROR = /unexpected status (5\d\d)|\b(502|503|504|529)\b[^\n]{0,40}(service unavailable|bad gateway|gateway time-?out|overloaded)|service unavailable|bad gateway|gateway time-?out|overloaded_error|Reconnecting\.\.\. ?\d+\/\d+|stream disconnected|socket hang up|\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b/i;
+const isTransient = (error, signal) => !signal.aborted && !error.peerWait && !QUOTA_ERROR.test(error.message) && TRANSIENT_ERROR.test(error.message);
+const transientStatus = error => /\b5\d\d\b|\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b/i.exec(error.message)?.[0] || TRANSIENT_ERROR.exec(error.message)?.[0];
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 // Phản biện có cấu trúc: chuỗi tự do (kiểu cũ) vẫn nhận, đổi thành object có id để builder/verifier trả lời từng điểm.
 const normFindings = list => (Array.isArray(list) ? list : []).slice(0, 10).map((f, i) => f && typeof f === 'object'
@@ -220,6 +224,7 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.memoryStore = new MemoryStore(this.db, redact); this.memoryReaders = new Map();
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
+    this.providerDowns = new Map();
     this.previewChrome = adapters.findChrome || findChrome;
     try { this.db.exec('ALTER TABLE member_stats ADD COLUMN est REAL'); } catch {}
     try { this.db.exec('ALTER TABLE sessions ADD COLUMN access TEXT'); } catch {}
@@ -808,9 +813,23 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     return values.length ? Math.min(...values) : null;
   }
   lowQuota(id) { const r = this.remaining(id); return r != null && r < (this.config.minRemainingPercent ?? 15); }
+  providerDown(id) {
+    const provider = this.config.agents.find(a => a.id === id)?.provider, down = this.providerDowns.get(provider);
+    return down?.until > Date.now() ? { ...down, provider } : null;
+  }
+  markProviderDown(provider, until, status) { this.providerDowns.set(provider, { until, status }); }
+  unusable(id) { return this.lowQuota(id) || !!this.providerDown(id); }
+  availabilityBlock(id, role, task = null, resetsAt = this.resetAt(id)) {
+    const down = this.providerDown(id), block = { role, agent: id, task, resetsAt };
+    return down ? { transientBlock: { ...block, provider: down.provider } } : { quotaBlock: block };
+  }
+  reassignMessage(from, to, role, pinned, resetsAt) {
+    const down = this.providerDown(from);
+    return down ? msg('srv.team.transient_switch', { provider: down.provider, status: down.status, to }) : msg(pinned ? 'srv.team.auto_reassign_pinned' : 'srv.team.auto_reassign', { 0: from || '—', 1: to, 2: role, 3: tokyo(resetsAt) });
+  }
   assertAvailable(agent) {
     if (agent.enabled === false) throw new Error(msg("srv.team.dang_tat_nhan_viec_ho_so", { 0: agent.id }));
-    if (this.lowQuota(agent.id)) throw new Error(msg("srv.team.duoi_nguong_quota_hay_doi_nguoi", { 0: agent.id }));
+    if (this.unusable(agent.id)) throw new Error(this.providerDown(agent.id) ? msg('srv.team.transient_blocked', { provider: agent.provider, time: tokyo(this.resetAt(agent.id)) }) : msg("srv.team.duoi_nguong_quota_hay_doi_nguoi", { 0: agent.id }));
   }
   skills(refresh = false) {
     if (refresh || !this.skillCache || Date.now() - this.skillCache.at > 60_000) this.skillCache = { at: Date.now(), list: scanSkills(skillRoots(this.config)) };
@@ -830,7 +849,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       model: a.model || 'CLI default', effort: a.effort || 'default', allowedEfforts: effortsOf(a), tier: tierOf(a), maxDifficulty: levelOf(a),
       maxDifficultyWithHighEffort: effortsOf(a).includes('high') ? levelOf(a, 'high') : levelOf(a), quotaRemaining: this.remaining(a.id) ?? 'unknown', mcpServers: Object.keys(a.mcp || {}),
       quotaWindows: (this.quota(a.id).buckets || []).flatMap(b => b.windows.map(w => ({ name: `${b.name}${w.minutes ? ` ${w.minutes}min` : ''}`, remaining: w.remaining, resetsAt: w.resetsAt || w.resetText || null }))).slice(0, 6),
-      speed: this.speed(a), available: a.enabled !== false && !this.lowQuota(a.id) }));
+      speed: this.speed(a), available: a.enabled !== false && !this.unusable(a.id) }));
   }
   // Trung bình 20 lượt gần nhất với đúng model + mức suy luận hiện tại.
   speed(a) {
@@ -843,16 +862,16 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // busy: member đang chạy việc khác. Người tốt nhất đang bận → so thời điểm xong: chờ họ, hay giao người rảnh làm ngay (null = chờ).
   pickBuilder(job, task, busy = new Set()) {
     const pinned = job.assignee || (task.pinned ? task.agent : null), index = job.tasks?.indexOf(task) ?? -1;
-    if (pinned && this.lowQuota(pinned) && this.config.allowAutoReplacePinned === false) throw Object.assign(new Error(msg("srv.team.duoi_nguong_quota_hay_doi_nguoi", { 0: pinned })), { quotaBlock: { role: 'builder', agent: pinned, task: index, resetsAt: this.resetAt(pinned) } });
-    if (job.assignee && !this.lowQuota(job.assignee)) return busy.has(job.assignee) ? null : job.assignee; // người dùng chỉ định thì ưu tiên tuyệt đối
+    if (pinned && this.unusable(pinned) && this.config.allowAutoReplacePinned === false) throw Object.assign(new Error(msg("srv.team.duoi_nguong_quota_hay_doi_nguoi", { 0: pinned })), this.availabilityBlock(pinned, 'builder', index));
+    if (job.assignee && !this.unusable(job.assignee)) return busy.has(job.assignee) ? null : job.assignee; // người dùng chỉ định thì ưu tiên tuyệt đối
     // Bạn chỉ định riêng task này: chờ người đó rảnh; chỉ đổi người khi họ bị tắt hoặc hết quota.
-    if (!job.assignee && task.pinned && this.config.agents.some(a => a.id === task.agent && a.enabled !== false) && !this.lowQuota(task.agent)) return busy.has(task.agent) ? null : task.agent;
+    if (!job.assignee && task.pinned && this.config.agents.some(a => a.id === task.agent && a.enabled !== false) && !this.unusable(task.agent)) return busy.has(task.agent) ? null : task.agent;
     const ideal = this.chooseBuilder({ ...job, riskReasons: [...(job.riskReasons || [])] }, { ...task });
     const chosen = id => {
-      if (pinned && this.lowQuota(pinned) && task.autoSub !== id) {
+      if (pinned && this.unusable(pinned) && task.autoSub !== id) {
         task.autoSub = id;
         const resetsAt = this.resetAt(pinned);
-        this.event(job.id, 'controller', id, 'REASSIGN', msg('srv.team.auto_reassign_pinned', { 0: pinned, 1: id, 2: 'builder', 3: tokyo(resetsAt) }), { role: 'builder', from: pinned, to: id, auto: true, pinned: true, task: index, resetsAt });
+        this.event(job.id, 'controller', id, 'REASSIGN', this.reassignMessage(pinned, id, 'builder', true, resetsAt), { role: 'builder', from: pinned, to: id, auto: true, pinned: true, task: index, resetsAt });
       }
       return id;
     };
@@ -865,7 +884,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   chooseBuilder(job, task, busy = new Set()) {
     const members = job.roster || roster(this.config);
-    const available = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.lowQuota(id) && !busy.has(id); };
+    const available = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.unusable(id) && !busy.has(id); };
     const pool0 = members.builders.some(available) ? members.builders : this.config.agents.filter(a => a.enabled !== false && a.provider !== 'antigravity').map(a => a.id);
     const usable = id => pool0.includes(id) && available(id);
     const level = (id, effort = task.effort) => levelOf(this.agent(id), effort);
@@ -895,7 +914,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const strongest = pool0.filter(usable).sort((x, y) => checker(x) - checker(y) || level(y) - level(x) || remaining(y) - remaining(x))[0];
     if (!strongest) {
       const error = new Error(msg("srv.team.khong_con_builder_nao_bat_va", { 0: task.instruction.slice(0, 200) }));
-      if (pool0.some(id => this.lowQuota(id))) error.quotaBlock = { role: 'builder', agent: task.agent, resetsAt: pool0.map(id => this.resetAt(id)).filter(Boolean).sort()[0] || null };
+      const unavailable = pool0.find(id => this.providerDown(id)) || pool0.find(id => this.lowQuota(id));
+      const index = job.tasks?.indexOf(task) ?? -1;
+      if (unavailable) Object.assign(error, this.availabilityBlock(unavailable, 'builder', index >= 0 ? index : job.taskIndex ?? null, pool0.map(id => this.resetAt(id)).filter(Boolean).sort()[0] || null));
       throw error;
     }
     job.risk = 'high'; job.riskReasons = [...new Set([...(job.riskReasons || []), msg("srv.team.task_do_kho_do_nang_luc", { 0: task.difficulty, 1: strongest, 2: tierOf(this.agent(strongest)) })])];
@@ -904,9 +925,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   pickMember(job, role, opts = {}) {
     const members = job.roster || roster(this.config), { exclude = [], busy = this.fullAgents(), record = true, preferOtherProvider = [] } = opts;
     const preferred = 'preferred' in opts ? opts.preferred : role === 'challenger' ? null : job.override?.[role] || job.flow?.[role] || members[role];
-    const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.lowQuota(id) && !exclude.includes(id); };
+    const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.unusable(id) && !exclude.includes(id); };
     if (usable(preferred) && !busy.has(preferred)) { if (record && job.substitutes) delete job.substitutes[role]; return preferred; }
-    const pinned = !!job.override?.[role], locked = pinned && this.lowQuota(preferred) && this.config.allowAutoReplacePinned === false;
+    const pinned = !!job.override?.[role], locked = pinned && this.unusable(preferred) && this.config.allowAutoReplacePinned === false;
     const cands = locked ? [] : this.config.agents.filter(a => usable(a.id)).sort((a, b) => busy.has(a.id) - busy.has(b.id) || tiers[tierOf(b)] - tiers[tierOf(a)] || preferOtherProvider.includes(a.provider) - preferOtherProvider.includes(b.provider) || (this.remaining(b.id) ?? 50) - (this.remaining(a.id) ?? 50));
     if (usable(preferred) && busy.has(preferred) && !cands.some(a => !busy.has(a.id))) return preferred;
     const cand = cands[0];
@@ -914,16 +935,18 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (record) {
         const changed = job.substitutes?.[role]?.to !== cand.id, resetsAt = this.resetAt(preferred);
         job.substitutes = { ...job.substitutes, [role]: { from: preferred, to: cand.id, at: now(), resetsAt, tier: tierOf(cand), pinned } };
-        if (changed) this.event(job.id, 'controller', cand.id, 'REASSIGN', msg(pinned ? 'srv.team.auto_reassign_pinned' : 'srv.team.auto_reassign', { 0: preferred || '—', 1: cand.id, 2: role, 3: tokyo(resetsAt) }), { role, from: preferred, to: cand.id, auto: true, pinned, resetsAt });
+        if (changed) this.event(job.id, 'controller', cand.id, 'REASSIGN', this.reassignMessage(preferred, cand.id, role, pinned, resetsAt), { role, from: preferred, to: cand.id, auto: true, pinned, resetsAt });
       }
       return cand.id;
     }
     if (!record) return null;
     const resets = this.config.agents.filter(a => a.enabled !== false).map(a => ({ agent: a.id, at: this.resetAt(a.id) })).filter(r => r.at).sort((a, b) => a.at.localeCompare(b.at));
     const earliest = locked ? this.resetAt(preferred) : resets[0]?.at || null, earliestAgent = locked ? preferred : resets[0]?.agent;
-    throw Object.assign(new Error(msg('srv.team.quota_blocked', { 0: role, 1: earliestAgent || preferred || '—', 2: tokyo(earliest) })), { quotaBlock: { role: role === 'challenger' ? 'reviewer' : role, agent: preferred, resetsAt: earliest } });
+    const downAgent = this.providerDown(preferred) ? preferred : this.config.agents.find(a => a.enabled !== false && !exclude.includes(a.id) && this.providerDown(a.id))?.id;
+    throw Object.assign(new Error(downAgent ? msg('srv.team.transient_blocked', { provider: this.agent(downAgent).provider, time: tokyo(earliest) }) : msg('srv.team.quota_blocked', { 0: role, 1: earliestAgent || preferred || '—', 2: tokyo(earliest) })), this.availabilityBlock(downAgent || preferred, role === 'challenger' ? 'reviewer' : role, null, earliest));
   }
   resetAt(id) {
+    const down = this.providerDown(id); if (down) return new Date(down.until).toISOString();
     const windows = (this.quota(id).buckets || []).flatMap(b => b.windows || []).filter(w => Date.parse(w.resetsAt) > Date.now());
     const low = windows.filter(w => Number.isFinite(w.remaining) && w.remaining < (this.config.minRemainingPercent ?? 15));
     return (low.length ? low : windows).map(w => new Date(w.resetsAt).toISOString()).sort()[0] || null;
@@ -935,15 +958,15 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (;;) {
       try { return await this.call(job, who, stage, task.instruction, task.effort, skills, { task, taskIndex: i, worktree: wt }); }
       catch (error) {
-        if (error.peerWait || this.runs.get(job.id)?.abort.signal.aborted || !QUOTA_ERROR.test(error.message)) throw error;
-        this.markExhausted(who);
+        if (error.peerWait || this.runs.get(job.id)?.abort.signal.aborted || !(error.transientBlock || QUOTA_ERROR.test(error.message))) throw error;
+        if (!error.transientBlock) this.markExhausted(who);
         let next; try { next = this.chooseBuilder(job, { ...task, agent: null }, new Set([...this.fullAgents(), ...tried])); } catch { throw error; }
         const lastSteps = this.db.prepare("SELECT body FROM events WHERE job=? ORDER BY seq DESC LIMIT 400").all(job.id).map(r => JSON.parse(r.body))
           .filter(e => e.from === who && e.type === 'ACTIVITY').slice(0, 20).reverse().map(e => String(e.summary).slice(0, 300));
         const at = wt || job.worktree, partialDiff = ((await git(at, ['status', '--porcelain']).catch(() => '')) + '\n\n' + (await git(at, ['diff', 'HEAD']).catch(() => ''))).trim().slice(-12000); // status: cả file mới chưa track
         task.handover = { from: who, reason: redact(error.message).slice(0, 300), partialDiff, lastSteps,
-          note: 'The previous builder stopped mid-task (quota). Its uncommitted changes are already in this worktree (see partialDiff). Continue from there; do not redo or revert finished parts.' };
-        this.event(job.id, 'controller', next, 'HANDOVER', msg("srv.team.handover", { 0: who, 1: i + 1, 2: next }), { from: who, to: next, task: i, diffChars: partialDiff.length });
+          note: `The previous builder stopped mid-task (${error.transientBlock ? 'temporary provider failure' : 'quota'}). Its uncommitted changes are already in this worktree (see partialDiff). Continue from there; do not redo or revert finished parts.` };
+        this.event(job.id, 'controller', next, 'HANDOVER', msg("srv.team.handover", { 0: who, 1: i + 1, 2: next }) + (error.transientBlock ? ': ' + this.reassignMessage(who, next, 'builder', false, error.transientBlock.resetsAt) : ''), { from: who, to: next, task: i, diffChars: partialDiff.length, reason: task.handover.reason });
         tried.add(next); task.ranBy = who = next; job.implementers = [...new Set([...(job.implementers || []), next])]; this.save(job);
       }
     }
@@ -1061,25 +1084,41 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const run = this.runs.get(job.id), signal = run.abort.signal; signal.throwIfAborted();
     const base = this.agent(agentId);
     try { this.assertAvailable(base); } catch (error) {
-      if (this.lowQuota(agentId)) error.quotaBlock = { role: stageRole[stage] || 'builder', agent: agentId, task: opts.taskIndex ?? null, resetsAt: this.resetAt(agentId) };
+      if (this.unusable(agentId)) Object.assign(error, this.availabilityBlock(agentId, stageRole[stage] || 'builder', opts.taskIndex ?? null));
       throw error;
     }
-    const slot = await this.acquire(run, agentId, signal);
-    const entry = { agent: agentId, stage, task: opts.taskIndex ?? null, startedAt: now(), est: Math.round(this.estimate(agentId, opts.task)) };
-    try {
-      job.running = [...(job.running || []), entry]; job.current = job.running[0]; this.save(job);
-      entry.slot = slot;
-      return await this.invoke(job, agentId, stage, instruction, effort, skills, { ...opts, slot, entry }, base, signal);
-    } catch (error) {
-      if (!error.peerWait && QUOTA_ERROR.test(error.message) && !['implement', 'research'].includes(stage)) {
-        const resetsAt = this.resetAt(agentId);
-        this.markExhausted(agentId);
-        error.quotaBlock = { role: stageRole[stage] || 'builder', agent: agentId, task: opts.taskIndex ?? null, resetsAt };
+    const delays = (this.config.transientRetryDelaysMs ?? [60_000, 180_000, 600_000]).slice(0, 3);
+    for (let attempt = 0; ; attempt++) {
+      signal.throwIfAborted();
+      let slot, entry, status;
+      try {
+        slot = await this.acquire(run, agentId, signal);
+        entry = { agent: agentId, stage, task: opts.taskIndex ?? null, startedAt: now(), est: Math.round(this.estimate(agentId, opts.task)), slot };
+        job.running = [...(job.running || []), entry]; job.current = job.running[0]; this.save(job);
+        return await this.invoke(job, agentId, stage, instruction, effort, skills, { ...opts, slot, entry }, base, signal);
+      } catch (error) {
+        if (!isTransient(error, signal)) {
+          if (!error.peerWait && QUOTA_ERROR.test(error.message) && !['implement', 'research'].includes(stage)) {
+            const resetsAt = this.resetAt(agentId);
+            this.markExhausted(agentId);
+            error.quotaBlock = { role: stageRole[stage] || 'builder', agent: agentId, task: opts.taskIndex ?? null, resetsAt };
+          }
+          throw error;
+        }
+        status = transientStatus(error);
+        if (attempt >= delays.length) {
+          const until = Date.now() + (this.config.transientCooldownMs ?? 15 * 60_000);
+          this.markProviderDown(base.provider, until, status);
+          error.transientBlock = { role: stageRole[stage] || 'builder', agent: agentId, provider: base.provider, task: opts.taskIndex ?? null, resetsAt: new Date(until).toISOString() };
+          throw error;
+        }
+      } finally {
+        if (slot) run.agents.delete(slot === 1 ? agentId : `${agentId}#${slot}`);
+        job.running = (job.running || []).filter(r => r !== entry); job.current = job.running[0] || null;
       }
-      throw error;
-    } finally {
-      run.agents.delete(slot === 1 ? agentId : `${agentId}#${slot}`);
-      job.running = (job.running || []).filter(r => r !== entry); job.current = job.running[0] || null;
+      this.save(job);
+      this.event(job.id, 'controller', agentId, 'RETRY', msg('srv.team.transient_retry', { provider: base.provider, status, n: attempt + 1, max: delays.length, min: delays[attempt] / 60_000 }), { provider: base.provider, status, attempt: attempt + 1, max: delays.length, delayMs: delays[attempt], stage, task: opts.taskIndex ?? null });
+      await sleep(delays[attempt], undefined, { signal });
     }
   }
   async invoke(job, agentId, stage, instruction, effort, skills, opts, base, signal) {
@@ -1847,12 +1886,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (this.closed || this.accountLoginBusy) return;
     for (const job of this.jobs()) {
-      if (job.status !== 'blocked' || job.blockedReason?.kind !== 'quota' || this.runs.has(job.id)) continue;
+      if (job.status !== 'blocked' || !['quota', 'transient'].includes(job.blockedReason?.kind) || this.runs.has(job.id)) continue;
       const { role, task, resetsAt } = job.blockedReason;
       let available = false;
       if (role === 'builder') {
         const pending = job.tasks[task] || { difficulty: 1, instruction: '' }, pinned = job.assignee || (pending.pinned ? pending.agent : null);
-        if (!(pinned && this.lowQuota(pinned) && this.config.allowAutoReplacePinned === false)) {
+        if (!(pinned && this.unusable(pinned) && this.config.allowAutoReplacePinned === false)) {
           try { available = !!this.chooseBuilder({ ...job, riskReasons: [...(job.riskReasons || [])] }, { ...pending, agent: null }); } catch {}
         }
       } else available = !!this.pickMember(job, role, { record: false });
@@ -1892,7 +1931,10 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (fresh.status === 'paused' && error.peerReport) { job.status = 'paused'; job.messages = fresh.messages; job.running = []; job.current = null; this.save(job); }
       if (!['paused', 'cancelled'].includes(fresh.status)) {
         job.status = error.peerWait ? 'waiting' : 'blocked'; job.messages = fresh.messages; job.error = redact(error.message).slice(0, 8000); job.running = []; job.current = null;
-        if (!error.peerWait && (error.quotaBlock || QUOTA_ERROR.test(error.message))) {
+        if (!error.peerWait && error.transientBlock) {
+          job.blockedReason = { kind: 'transient', ...error.transientBlock, at: now() };
+          job.error = msg('srv.team.transient_blocked', { provider: error.transientBlock.provider, time: tokyo(error.transientBlock.resetsAt) });
+        } else if (!error.peerWait && (error.quotaBlock || QUOTA_ERROR.test(error.message))) {
           const role = error.quotaBlock?.role || stageRole[job.stage] || 'builder', task = error.quotaBlock?.task ?? (role === 'builder' ? job.taskIndex : null);
           const agent = error.quotaBlock?.agent ?? (role === 'builder' ? job.tasks[task]?.ranBy || job.tasks[task]?.agent : job.checkers?.[role] || job.substitutes?.[role]?.to || (job.roster || roster(this.config))[role]);
           job.blockedReason = { kind: 'quota', role, agent, task, resetsAt: error.quotaBlock?.resetsAt ?? this.resetAt(agent), at: now() };
