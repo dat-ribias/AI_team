@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync, readdirSync, mkdirSync, openSync, closeSync, fstatSync, readSync, writeFileSync, constants } from 'node:fs';
-import { resolve, relative, dirname, extname, isAbsolute, win32 } from 'node:path';
+import { resolve, relative, dirname, basename, extname, isAbsolute, win32 } from 'node:path';
 import { secret } from './transfer.js';
 
 export function safeRel(path) {
@@ -15,6 +15,10 @@ export function kind(path) {
   if (['html', 'htm'].includes(ext)) return 'html';
   if (['log', 'txt', 'md', 'json', 'xml', 'csv'].includes(ext)) return 'text';
   return 'other';
+}
+
+export function browserProfile(path) {
+  return /^(chrome-profile|user-data(?:-dir)?|User Data)$/i.test(basename(path)) || readdirSync(path).includes('Local State');
 }
 
 export function collect({ worktree, paths, dest, maxBytes, usedBytes = 0, exclude }) {
@@ -42,6 +46,10 @@ export function collect({ worktree, paths, dest, maxBytes, usedBytes = 0, exclud
         if (!inside(realpathSync(p))) throw new Error('Evidence path is outside the worktree');
       }
       const stat = lstatSync(source);
+      // Also protect an explicitly requested file inside a profile directory.
+      for (let p = stat.isDirectory() ? source : dirname(source); p !== root; p = dirname(p)) {
+        if (browserProfile(p)) { skipped.push({ path: rel, reason: 'Browser profile' }); return; }
+      }
       if (stat.isDirectory()) { for (const name of readdirSync(source).sort()) visit(`${rel.replace(/\/$/, '')}/${name}`); return; }
       if (!stat.isFile()) { skipped.push({ path: rel, reason: 'Not a regular file' }); return; }
       if (usedBytes + bytes + stat.size > maxBytes) { full = true; skipped.push({ path: rel, reason: 'Evidence size limit exceeded' }); return; }
