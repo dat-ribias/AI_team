@@ -994,6 +994,24 @@ function setMemberView(mode) {
 
 function drawQuota() {
   $('demo-live-link').hidden = !state.demo;
+  const check = state.quotaCheck;
+  $('refresh-quota').textContent = check?.running ? t('ui.quota.checkingProgress', { done: check.done, total: check.total }) : t('ui.members.refreshQuota');
+  $('refresh-quota').disabled = !!check?.running;
+  const quotaChip = a => {
+    const m = check?.members?.[a.id];
+    if (!m) return '';
+    const reason = String(m.reason || '');
+    let text;
+    switch (m.status) {
+      case 'checking': text = t('ui.quota.st.checking'); break;
+      case 'ok': text = t('ui.quota.st.ok') + ' · ' + clock(m.at); break;
+      case 'error': text = t('ui.quota.st.error') + (reason ? ' · ' + reason.slice(0, 80) : ''); break;
+      case 'timeout': text = t('ui.quota.st.timeout'); break;
+      case 'skipped-busy': text = reason === 'no-reader' ? t('ui.quota.st.noReader') : t('ui.quota.st.busy', { time: m.observedAt ? clock(m.observedAt) : '—' }); break;
+      default: return '';
+    }
+    return `<span class="quota-chip quota-chip-${esc(m.status)}"${m.status === 'error' ? ` title="${esc(reason)}"` : ''}>${esc(text)}</span>`;
+  };
 
   // 1. Draw Compact 1-line rows
   $('quota-compact').innerHTML = state.agents.map(a => {
@@ -1035,6 +1053,7 @@ function drawQuota() {
         <div class="compact-sub">${esc(factsShort)}</div>
       </div>
       <div class="compact-col-quota">
+        ${quotaChip(a)}
         <div class="quota-5h-bar">
           <div class="quota-5h-label">
             <span class="quota-5h-title">${esc(t('ui.members.quota5h'))}</span>
@@ -1059,7 +1078,6 @@ function drawQuota() {
             <button class="menu-item" data-check="${esc(a.id)}">⚡ ${esc(t('ui.login.check'))}</button>
             <button class="menu-item" data-profile="${esc(a.id)}">👤 ${esc(t('ui.members.profile'))}</button>
             ${a.provider === 'claude' ? `
-            <button class="menu-item" data-usage="${esc(a.id)}">↻ ${esc(t('ui.members.checkQuota'))}</button>
             <button class="menu-item" data-term="${esc(a.id)}">💻 ${esc(t('ui.members.openTerminal'))}</button>` : ''}
             <button class="menu-item" data-login="${esc(a.id)}">🔑 ${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>
             <div class="actions-menu-divider"></div>
@@ -1079,7 +1097,7 @@ function drawQuota() {
   $('quota-cards').innerHTML = state.agents.map(a => {
     const auth = a.auth || { status: 'unknown' }, connected = ['connected', 'cached'].includes(auth.status);
     const tag = a.provider === 'mock' ? t('ui.members.mock') : a.provider === 'antigravity' ? 'Gemini Pro' : a.provider;
-    const actions = state.demo ? '' : `<button data-check="${esc(a.id)}">${esc(t('ui.login.check'))}</button><button data-profile="${esc(a.id)}">${esc(t('ui.members.profile'))}</button>${a.provider === 'claude' ? `<button data-usage="${esc(a.id)}">${esc(t('ui.members.checkQuota'))}</button><button data-term="${esc(a.id)}">${esc(t('ui.members.openTerminal'))}</button>` : ''}`;
+    const actions = state.demo ? '' : `<button data-check="${esc(a.id)}">${esc(t('ui.login.check'))}</button><button data-profile="${esc(a.id)}">${esc(t('ui.members.profile'))}</button>${a.provider === 'claude' ? `<button data-term="${esc(a.id)}">${esc(t('ui.members.openTerminal'))}</button>` : ''}`;
     const model = a.provider === 'antigravity' && a.model;
     const rawBuckets = model ? a.quota.buckets?.filter(b => String(b.id).startsWith('3p-') !== /^gemini/i.test(model)) : a.quota.buckets;
     const cleanBuckets = dedupeBuckets(rawBuckets || []);
@@ -1102,7 +1120,7 @@ function drawQuota() {
     const sp = a.speed?.samples ? t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall >= 1000 ? Math.round(a.speed.avgTokensPerCall / 1000) + 'K' : a.speed.avgTokensPerCall, n: a.speed.samples }) : t('ui.members.speedUnknown');
     const mcpNames = Object.keys(a.mcp || {});
     const facts = [sp, mcpNames.length && 'MCP: ' + mcpNames.join(', '), t('ui.members.model', { model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ` · ${effortLabel(a.effort)}` : '') }), t('ui.members.tier', { tier: tierLabel(a.tier) }), !a.enabled && t('ui.members.disabled'), a.systemPrompt && t('ui.members.hasPrompt')].filter(Boolean).join(' · ');
-    return `<article class="quota-card" data-agent-card="${esc(a.id)}"><h3>${esc(a.label)} <span class="tag">${esc(tag)}</span></h3><span class="muted">${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}</span><div class="account-state ${connected ? 'connected' : ''}"><i class="dot ${connected ? 'green' : ''}"></i>${esc(auth.message || t('ui.members.notChecked'))}</div>${auth.sharedProfile ? `<span class="muted">${esc(t('ui.members.sharedProfile'))}</span>` : ''}${auth.cli ? `<span class="muted">CLI: ${esc(auth.cli)}</span>` : ''}<div class="member-actions"><button class="${connected ? '' : 'primary'}" data-login="${esc(a.id)}">${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>${actions}</div>${state.demo ? '' : roleChecks(a)}<span class="muted">${esc(facts)}</span><strong>${esc(quotaRemaining(a.quota))}</strong>${a.quota.error ? `<p class="error-box">${esc(a.quota.error)}</p>` : ''}${a.quota.note ? `<p class="muted">${esc(a.quota.note)}</p>` : ''}${a.quota.schemaUnknown ? `<p class="error-box">${esc(t('ui.quota.schemaUnknown'))}</p>` : ''}${windows}<span class="muted">${esc(t('ui.quota.updated', { time: clock(a.quota.checkedAt) }))}</span>${a.quota.raw ? `<details><summary>${esc(t('ui.quota.raw'))}</summary><pre>${esc(JSON.stringify(a.quota.raw, null, 2))}</pre></details>` : ''}</article>`;
+    return `<article class="quota-card" data-agent-card="${esc(a.id)}"><h3>${esc(a.label)} <span class="tag">${esc(tag)}</span></h3><span class="muted">${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}</span><div class="account-state ${connected ? 'connected' : ''}"><i class="dot ${connected ? 'green' : ''}"></i>${esc(auth.message || t('ui.members.notChecked'))}</div>${auth.sharedProfile ? `<span class="muted">${esc(t('ui.members.sharedProfile'))}</span>` : ''}${auth.cli ? `<span class="muted">CLI: ${esc(auth.cli)}</span>` : ''}<div class="member-actions"><button class="${connected ? '' : 'primary'}" data-login="${esc(a.id)}">${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>${actions}</div>${state.demo ? '' : roleChecks(a)}<span class="muted">${esc(facts)}</span><strong>${esc(quotaRemaining(a.quota))}</strong>${quotaChip(a)}${a.quota.error ? `<p class="error-box">${esc(a.quota.error)}</p>` : ''}${a.quota.note ? `<p class="muted">${esc(a.quota.note)}</p>` : ''}${a.quota.schemaUnknown ? `<p class="error-box">${esc(t('ui.quota.schemaUnknown'))}</p>` : ''}${windows}<span class="muted">${esc(t('ui.quota.updated', { time: clock(a.quota.checkedAt) }))}</span>${a.quota.raw ? `<details><summary>${esc(t('ui.quota.raw'))}</summary><pre>${esc(JSON.stringify(a.quota.raw, null, 2))}</pre></details>` : ''}</article>`;
   }).join('');
 
   setMemberView(memberView);
@@ -1131,11 +1149,6 @@ function drawQuota() {
     loginId = b.dataset.login; drawLogin(); $('login-dialog').showModal(); recheckMembers([loginId]);
   });
   document.querySelectorAll('[data-check]').forEach(b => b.onclick = () => attempt(async () => { b.disabled = true; await api(`members/${b.dataset.check}/refresh`, {}); await refresh(); }));
-  document.querySelectorAll('[data-usage]').forEach(b => b.onclick = () => attempt(async () => {
-    b.disabled = true; b.textContent = t('ui.members.checking');
-    try { const r = await api(`members/${b.dataset.usage}/usage`, {}); notice(r.parsed ? '' : t('ui.members.usageFailed', { text: r.text || '—' })); await refresh(); }
-    finally { b.disabled = false; b.textContent = t('ui.members.checkQuota'); }
-  }));
   document.querySelectorAll('[data-term]').forEach(b => b.onclick = () => attempt(async () => { await api(`members/${b.dataset.term}/terminal`, {}); notice(t('ui.members.terminalOpened')); }));
   document.querySelectorAll('[data-profile]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.profile)));
   document.querySelectorAll('[data-role-toggle]').forEach(b => b.onchange = () => attempt(async () => { await api(`members/${b.dataset.roleToggle}/role`, { kind: b.value, on: b.checked }); await refresh(); }));
@@ -1350,7 +1363,7 @@ $('close-memory').onclick = () => $('memory-dialog').close();
 $('overview').onclick = () => view('work');
 $('security-nav').onclick = () => view('security');
 $('quota-nav').onclick = () => attempt(async () => { view('members'); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
-$('refresh-quota').onclick = () => attempt(async () => { await api('quota', {}); notice(t('ui.members.refreshing')); });
+$('refresh-quota').onclick = () => attempt(async () => { const r = await api('quota', {}); notice(r.running && r.total ? t('ui.quota.checkingProgress', { done: r.done, total: r.total }) : t('ui.members.refreshing')); });
 $('add-member').onclick = () => { if (state.demo) { location.href = 'http://127.0.0.1:3333/?members=1&add=1'; return; } providerHint(); $('member-dialog').showModal(); };
 $('member-provider').onchange = providerHint;
 $('close-member').onclick = () => $('member-dialog').close();
