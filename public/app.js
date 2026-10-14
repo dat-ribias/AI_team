@@ -730,21 +730,36 @@ function aiCheckHTML(report) {
   const text = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return `<div class="evidence-record"><span class="tag">${esc(t('ui.evidence.ai'))}</span><p><b>${esc(report.stage)} · ${esc(names[report.agent] || report.agent)} · ${esc(report.verdict || '—')}</b></p>${report.findings?.length ? `<pre>${esc(text(report.findings))}</pre>` : ''}${report.tests ? `<p>${esc(t('ui.evidence.selfTests'))}</p><pre>${esc(text(report.tests))}</pre>` : ''}</div>`;
 }
-let resultsRequest = 0;
+const resultsMergeChecks = new Map();
+let resultsHTML;
+const resultsKey = job => `${job.id}|${job.revision}|${job.status}`;
 async function drawResults() {
-  const id = selected, request = ++resultsRequest, job = state?.jobs.find(j => j.id === id);
+  const id = selected, job = state?.jobs.find(j => j.id === id);
   $('conversation-title').textContent = t('ui.results.title'); $('chat-members').innerHTML = ''; $('event-count').textContent = '';
-  if (!job) { $('results-panel').textContent = t('ui.evidence.selectJob'); return; }
+  if (!job) { resultsHTML = undefined; $('results-panel').textContent = t('ui.evidence.selectJob'); return; }
   const project = state.projects.find(p => p.id === job.project), session = state.sessions.find(s => s.id === job.sessionId);
   let changes = job.changes?.revision === job.revision ? job.changes : null, acceptance = { required: !!project?.preview && project.preview.requireAcceptance !== false, ok: job.acceptance?.revision === job.revision }, warning = '';
+  let checking = false;
   if (job.status === 'ready' && job.kind !== 'research') {
-    try {
-      const check = await api(`jobs/${encodeURIComponent(id)}/merge-check`);
+    const key = resultsKey(job);
+    let cached = resultsMergeChecks.get(key);
+    if (!cached) {
+      cached = {}; resultsMergeChecks.set(key, cached);
+      // Register the pending check before fetching: merge-check itself emits SSE.
+      api(`jobs/${encodeURIComponent(id)}/merge-check`).then(check => { cached.check = check; }, e => { cached.error = e.message; }).finally(() => {
+        cached.done = true;
+        if (tab === 'results' && selected === id && resultsKey(state.jobs.find(j => j.id === id) || {}) === key) attempt(drawResults);
+      });
+    }
+    checking = !cached.done;
+    if (cached.check) {
+      const check = cached.check;
       changes = { added: check.added, removed: check.removed, files: check.paths || [] };
-      acceptance = check.acceptance || acceptance;
-    } catch (e) { warning = e.message; }
+      acceptance.required = check.acceptance?.required ?? acceptance.required;
+    }
+    warning = cached.error || '';
   }
-  if (request !== resultsRequest || tab !== 'results' || selected !== id || state.jobs.find(j => j.id === id)?.revision !== job.revision) return;
+  if (tab !== 'results' || selected !== id) return;
   const stale = revision => revision !== job.revision ? `<span class="tag">${esc(t('ui.results.stale'))}</span>` : '';
   const source = key => `<span class="tag">${esc(t('ui.evidence.' + key))}</span>`;
   const items = job.evidence || [], images = [], other = [];
@@ -763,9 +778,9 @@ async function drawResults() {
   const reports = ['review', 'verify'].map(stage => (job.reports || []).filter(r => r.stage === stage).at(-1)).filter(Boolean);
   const checks = job.checkResults || [], preview = job.preview, running = preview?.status === 'running' && preview.revision === job.revision;
   const configured = job.kind !== 'research' && !!project?.preview;
-  const stats = changes ? t('ui.results.stats', { n: changes.files?.length || 0, added: changes.added ?? '—', removed: changes.removed ?? '—' }) : '—';
+  const stats = checking ? t('ui.members.checking') : changes ? t('ui.results.stats', { n: changes.files?.length || 0, added: changes.added ?? '—', removed: changes.removed ?? '—' }) : '—';
   const level = (key, ok) => `<li class="${ok ? 'evidence-pass' : 'muted'}"><b>${esc(t('ui.results.' + key))}</b><span>${esc(t(ok ? 'ui.results.pass' : 'ui.results.pending'))}</span></li>`;
-  $('results-panel').innerHTML = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(job.goal)}</p><details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
+  const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(job.goal)}</p><details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
     <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>
     <section class="result-section"><h3>${esc(t('ui.results.proof'))}</h3>${preview?.status === 'failed' || preview?.screenshots === false ? `<div class="error-box">${source('controller')} ${stale(preview.revision)}<p>${esc(preview.error || t(preview.screenshots === false ? 'ui.results.noChrome' : 'ui.results.previewFailed'))}</p>${other.filter(x => x.item.stage === 'preview' && x.item.revision === preview.revision && x.file.path.endsWith('preview.log')).map(x => evidenceLink(id, x.path, t('ui.evidence.openLog'))).join(' ')}</div>` : ''}
     <div class="result-images">${images.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!images.length ? `<p class="muted">${esc(t('ui.results.noImages'))}</p>` : ''}
@@ -773,6 +788,7 @@ async function drawResults() {
     <ul class="evidence-files">${other.map(x => `<li>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)} ${evidenceLink(id, x.path, x.file.path)}</li>`).join('')}</ul>
     ${job.acceptance ? `<p>${source('user')}${stale(job.acceptance.revision)} ${esc(clock(job.acceptance.at))}</p>` : ''}</section>
     <section class="result-section"><h3>${esc(t('ui.results.decision'))}</h3><ul class="result-levels">${level('technical', technical)}${level('verified', verified)}${level('accepted', job.acceptance?.revision === job.revision)}</ul>${warning ? `<p class="error-box">${esc(warning)}</p>` : ''}${acceptance.required && !acceptance.ok ? `<p class="error-box">${esc(t('ui.results.acceptRequired'))}</p>` : ''}<div class="controls">${running ? (preview.routes?.length ? preview.routes : [{ name: t('ui.results.openPreview'), path: '/' }]).map((r, i) => `<button type="button" data-result-route="${i}">${esc(t('ui.results.openPreview'))} · ${esc(r.name)}</button>`).join('') + `<button type="button" data-result-control="preview-stop">${esc(t('ui.results.stopPreview'))}</button>` : configured ? `<button type="button" data-result-control="preview-start" ${job.status === 'ready' ? '' : 'disabled'}>${esc(t('ui.results.restartPreview'))}</button>` : ''}<button type="button" data-result-control="accept" ${job.status === 'ready' ? '' : 'disabled'}>${esc(t('ui.results.accept'))}</button><button type="button" id="results-feedback" ${['merged', 'cancelled'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.results.feedback'))}</button>${job.kind !== 'research' ? `<button type="button" id="results-merge" class="primary" ${job.status !== 'ready' || acceptance.required && !acceptance.ok ? 'disabled' : ''}>${esc(t('ui.results.merge'))}</button>` : ''}</div></section>`;
+  if (html !== resultsHTML) { $('results-panel').innerHTML = html; resultsHTML = html; }
   $('results-diff').onclick = () => $('view-diff')?.click();
   $('results-feedback').onclick = () => { $('message').focus(); $('message').scrollIntoView({ block: 'nearest' }); };
   if ($('results-merge')) $('results-merge').onclick = () => $('merge')?.click();
