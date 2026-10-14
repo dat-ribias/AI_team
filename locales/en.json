@@ -943,12 +943,12 @@
   "ui.token.wasteTip": "Unsuccessful or repeated calls consumed tokens. Inspect job {job} and its failure causes.",
   "ui.token.noTips": "No threshold-based suggestion for this period.",
   "ui.token.empty": "No usage in this period. Choose another period or clear filters.",
-  "ui.token.loading": "Loading usage?",
+  "ui.token.loading": "Loading usage…",
   "ui.token.failed": "Could not load usage.",
   "ui.token.retry": "Retry",
   "ui.token.invalidRange": "Choose a valid start and end date.",
   "ui.token.clearJob": "Clear job filter",
-  "ui.token.jobUsage": "{tokens} tokens ? {calls} calls ? {minutes} minutes",
+  "ui.token.jobUsage": "{tokens} tokens · {calls} calls · {minutes} minutes",
   "ui.token.rate": "{rate} tokens/minute",
   "ui.token.partial": "Missing measurements: {tokens} calls without tokens, {durations} without duration"
 }

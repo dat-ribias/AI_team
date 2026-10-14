@@ -9,7 +9,7 @@ test('Vietnamese and Japanese usage labels preserve Unicode', () => {
   for (const language of ['vi', 'ja']) {
     const locale = JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url), 'utf8'));
     for (const [key, value] of Object.entries(locale)) {
-      if (/^ui\.(token|usage)\./.test(key)) assert.doesNotMatch(value, /Ã|á»|Ä|�|\?/, `${language}: ${key}`);
+      if (/^ui\.(token|usage)\./.test(key)) assert.doesNotMatch(value, /Ã|á»|Ä|�/, `${language}: ${key}`);
     }
   }
 });

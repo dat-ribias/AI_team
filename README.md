@@ -317,8 +317,8 @@ Kiểm tra parser/quota, argv không qua shell, timeout tiến trình, pipeline 
 
 Nghiên cứu và nguồn: [RESEARCH.md](RESEARCH.md).
 
-## Th?ng k? Token
+## Thống kê Token
 
-Tab Token t?ng h?p l??t g?i AI theo ng?y, project, phi?n, job, member, stage v? model; c? so s?nh k? tr??c v? xu?t CSV. K? ng?y/tu?n/th?ng d?ng timezone c?u h?nh (m?c ??nh `Asia/Tokyo`), tu?n b?t ??u th? Hai. Ng?y k?t th?c t?y ch?n ???c t?nh h?t ng?y; API d?ng kho?ng `[from, to)`. S? ?o provider kh?ng tr? ???c gi? l? `null`; giao di?n b?o s? l??t thi?u s? ?o, kh?ng t? suy ra token. G?i ? t?i ?u ch? l? v?n b?n, kh?ng ??i c?u h?nh.
+Tab Token tổng hợp lượt gọi AI theo ngày, dự án, phiên, job, member, stage và model; có so sánh với kỳ trước và xuất CSV. Kỳ ngày/tuần/tháng dùng múi giờ cấu hình (mặc định `Asia/Tokyo`), tuần bắt đầu thứ Hai. Ngày kết thúc tùy chọn được tính hết ngày; API dùng khoảng `[from, to)`. Số đo provider không trả được giữ là `null`; giao diện báo số lượt thiếu số đo, không tự suy ra token. Gợi ý tối ưu chỉ là văn bản, không đổi cấu hình.
 
-SQLite `usage_log` l?u ri?ng t?ng l??t g?i AI, k? c? l?i. B?ng n?y **kh?ng b? n?n ho?c d?n c?ng ACTIVITY v? retention event/job**. Retention ri?ng m?c ??nh **365 ng?y**. Backfill t? event c? ch?y m?t l?n v? idempotent. Snapshot `job.durations` c? th? ch? gi? c?c l??t g?n nh?t; d?ng usage trong job ?u ti?n th?ng k? ??y ?? t? API usage.
+SQLite `usage_log` lưu riêng từng lượt gọi AI, kể cả lỗi. Bảng này **không bị nén hoặc dọn cùng ACTIVITY và retention event/job**. Retention riêng mặc định **365 ngày**. Backfill từ event cũ chạy một lần và có tính idempotent: chạy lại không tạo bản ghi trùng. Snapshot `job.durations` có thể chỉ giữ các lượt gần nhất; dòng usage trong job ưu tiên thống kê đầy đủ từ API usage.
