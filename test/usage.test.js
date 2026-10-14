@@ -1,9 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { UsageStore, initializeUsage, normalizeUsage } from '../src/usage.js';
 
 const now = () => new Date('2026-10-14T03:00:00Z');
+test('Vietnamese and Japanese usage labels preserve Unicode', () => {
+  for (const language of ['vi', 'ja']) {
+    const locale = JSON.parse(readFileSync(new URL(`../locales/${language}.json`, import.meta.url), 'utf8'));
+    for (const [key, value] of Object.entries(locale)) {
+      if (/^ui\.(token|usage)\./.test(key)) assert.doesNotMatch(value, /Ã|á»|Ä|�|\?/, `${language}: ${key}`);
+    }
+  }
+});
 function fixture(t, options = {}) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
