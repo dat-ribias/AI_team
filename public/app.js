@@ -996,7 +996,7 @@ function drawQuota() {
   $('demo-live-link').hidden = !state.demo;
   const check = state.quotaCheck;
   $('refresh-quota').textContent = check?.running ? t('ui.quota.checkingProgress', { done: check.done, total: check.total }) : t('ui.members.refreshQuota');
-  $('refresh-quota').disabled = !!check?.running;
+  $('refresh-quota').setAttribute('aria-busy', String(!!check?.running));
   const quotaChip = a => {
     const m = check?.members?.[a.id];
     if (!m) return '';
