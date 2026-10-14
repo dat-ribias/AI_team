@@ -92,11 +92,12 @@ async function allEvents(events, jobId) {
   }
 }
 
-async function planGit(out, { job, dataDir, root, run, git }) {
+async function planGit(out, { job, dataDir, root, run, git, scratchOnly = false }) {
   const ctx = { run, git }, dir = join(dataDir, 'worktrees');
   for (const target of await trees(root, ctx)) if (within(dir, target) && same(dirname(target), dir) && treeName(basename(target), job.id)) {
-    out.items.push(item('worktree', target, bytes(target), 'Finished job worktree', { root, jobId: job.id }));
+    if (!scratchOnly || basename(target).startsWith(`${job.id}-review-`)) out.items.push(item('worktree', target, bytes(target), scratchOnly ? 'Stray review worktree' : 'Finished job worktree', { root, jobId: job.id, ...(scratchOnly ? { scratch: true } : {}) }));
   }
+  if (scratchOnly) return;
   const destination = job.mergedInto?.commit || job.baseBranch;
   for (const target of await branches(root, ctx)) if (branchName(target, job.id)) {
     const keep = !await merged(root, target, destination, ctx);
@@ -104,13 +105,13 @@ async function planGit(out, { job, dataDir, root, run, git }) {
   }
 }
 
-export async function planJob({ job, dataDir, root, run, git, events }) {
-  const out = manifest('Finished job cleanup');
-  if (!terminal(job)) return out;
+export async function planJob({ job, dataDir, root, run, git, events, scratchOnly = false }) {
+  const out = manifest(scratchOnly ? 'Stray review cleanup' : 'Finished job cleanup');
+  if (!terminal(job) && !scratchOnly) return out;
   if (!validId(job.id)) throw new Error('Invalid job id');
-  if (root) await planGit(out, { job, dataDir, root, run, git });
-  for (const linked of job.linked || []) if (linked.path) await planGit(out, { job: { ...job, ...linked, id: job.id, mergedInto: linked.mergedInto }, dataDir, root: linked.path, run, git });
-  if (events) {
+  if (root) await planGit(out, { job, dataDir, root, run, git, scratchOnly });
+  for (const linked of job.linked || []) if (linked.path) await planGit(out, { job: { ...job, ...linked, id: job.id, mergedInto: linked.mergedInto }, dataDir, root: linked.path, run, git, scratchOnly });
+  if (events && !scratchOnly) {
     const rows = await allEvents(events, job.id);
     if (rows.some(e => e.type === 'ACTIVITY')) out.items.push(item('events', job.id, Buffer.byteLength(JSON.stringify(rows)), 'Archive and compact ACTIVITY', { jobId: job.id }));
   }
@@ -175,6 +176,10 @@ function repo(entry, ctx) {
 }
 async function eligible(entry, ctx) {
   if (!entry.jobId) return true;
+  if (entry.scratch) {
+    const busy = ctx.isBusy || ctx.isActive;
+    return entry.kind === 'worktree' && basename(entry.target).startsWith(`${entry.jobId}-review-`) && ctx.jobs?.some(j => j.id === entry.jobId) && typeof busy === 'function' && !await busy(entry.jobId);
+  }
   if (await ctx.isActive?.(entry.jobId)) return false;
   const job = ctx.jobs?.find(j => j.id === entry.jobId);
   return !job || terminal(job);
@@ -260,6 +265,7 @@ export async function apply(plan, ctx) {
             const root = repo(entry, ctx);
             if (!(await trees(root, ctx)).some(p => same(p, target))) throw new Error('Worktree is not registered');
             safePath(target, ctx.dataDir); noLinks(target);
+            if (!await eligible(entry, ctx)) { result.results.push({ ...entry, status: 'skipped' }); save(); continue; }
             const r = await command(root, ['worktree', 'remove', '--force', target], ctx);
             if (r.code !== 0) throw new Error(r.stderr || 'Worktree removal failed');
             const prune = await command(root, ['worktree', 'prune'], ctx);

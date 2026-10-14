@@ -353,6 +353,39 @@ test('controller merge creates exactly one manifest, removes merged trees/branch
   assert.equal(manifests(ctx, job.id).length, 1);
 });
 
+test('merge cleanup persists removal audit and grows event history after reopening', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  for (let i = 0; i < 2; i++) team.event(job.id, 'builder', 'team', 'ACTIVITY', `Extra activity ${i}`);
+  const before = team.events(job.id);
+  await team.merge(job.id); await team.close();
+  ctx.team = new Team(ctx.config, ctx.dataDir); ctx.team.closed = true;
+  const after = ctx.team.events(job.id);
+  assert.ok(after.length > before.length);
+  for (const type of ['MERGED', 'ACTIVITY_SUMMARY', 'CLEANUP_ITEM', 'CLEANUP']) assert.ok(after.some(e => e.type === type), type);
+  assert.equal(after.filter(e => e.type === 'ACTIVITY').length, 0);
+  for (const event of after.filter(e => e.type === 'CLEANUP_ITEM')) assert.ok(manifests(ctx, job.id).some(m => m.id === event.details.manifest && m.results.some(r => r.status === 'ok' && r.target === event.details.target)));
+});
+
+test('sweep removes idle review scratch through a manifest and preserves active or unmerged work', async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  const review = join(ctx.dataDir, 'worktrees', `${job.id}-review-0123abcd`);
+  await git(ctx, ['worktree', 'add', '--detach', review, job.revision]);
+  const plan = await planJob({ ...team.cleanupContext(), root: ctx.root, job, scratchOnly: true });
+  assert.equal(plan.items.length, 1); assert.equal(plan.items[0].target, review);
+  await apply(plan, team.cleanupContext()); assert.ok(existsSync(review));
+  team.runs.set(job.id, { abort: new AbortController(), agents: new Set() });
+  const blocked = await apply({ ...plan, dryRun: false }, team.cleanupContext());
+  assert.equal(blocked.results[0].status, 'skipped');
+  await team.sweepGit(); assert.ok(existsSync(review)); assert.ok(existsSync(job.worktree));
+  team.runs.clear(); await team.sweepGit();
+  assert.equal(existsSync(review), false); assert.ok(existsSync(job.worktree));
+  assert.equal(await git(ctx, ['for-each-ref', '--format=%(refname:short)', `refs/heads/${job.branch}`]), job.branch);
+  assert.ok(manifests(ctx, job.id).some(m => !m.dryRun && m.results.some(r => r.target === review && r.status === 'ok')));
+  job.status = 'done'; team.save(job); await team.sweepGit();
+  assert.equal(existsSync(job.worktree), false); assert.equal(await git(ctx, ['for-each-ref', '--format=%(refname:short)', `refs/heads/${job.branch}`]), job.branch);
+  assert.ok(team.get(job.id).cleanedAt); assert.equal(team.get(job.id).released, true);
+});
+
 test('controller cancel drains the run, keeps unmerged branch and writes cleanedAt for cancelled snapshots', async t => {
   const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
   const abort = new AbortController();
@@ -375,6 +408,43 @@ test('cleanupOnMerge=false retains ACTIVITY and the legacy releaseGit behavior',
   assert.equal(manifests(ctx, job.id).length, 0);
   await ctx.team.cleanup();
   assert.equal(ctx.team.events(job.id).filter(e => e.type === 'ACTIVITY').length, 2);
+});
+
+test('cancel during research finalization drains without self-waiting and rejects stale saves', { timeout: 10000 }, async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  Object.assign(job, { kind: 'research', stage: 'final', fast: true, reports: [{ stage: 'research', agent: 'builder', summary: 'Research conclusion' }] });
+  team.save(job);
+  let release, entered;
+  const gate = new Promise(r => { release = r; }), remembering = new Promise(r => { entered = r; });
+  team.remember = async () => { entered(); await gate; };
+  const running = team.runJob(job);
+  await remembering;
+  const cancelling = team.control(job.id, 'cancel');
+  release();
+  const [, cancelled] = await Promise.all([running, cancelling]);
+  assert.equal(cancelled.status, 'cancelled'); assert.ok(cancelled.cleanedAt);
+  assert.equal(team.runs.has(job.id), false); assert.equal(existsSync(job.worktree), false);
+  assert.equal(team.events(job.id).some(e => e.type === 'CONCLUSION'), false);
+  assert.equal(manifests(ctx, job.id).length, 1);
+  const stale = { ...job, status: 'done', messages: [{ text: 'Stale update' }], cleanedAt: 'old' };
+  assert.deepEqual(team.save(stale), cancelled); assert.deepEqual(stale, cancelled);
+  assert.deepEqual(team.get(job.id), cancelled);
+});
+
+test('cancelled self cleanup yields while the controller drains the run', { timeout: 10000 }, async t => {
+  const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
+  const abort = new AbortController(); let selfCleanup;
+  abort.signal.addEventListener('abort', () => {
+    selfCleanup = team.cleanupJob(job.id, { fromRun: true }).then(result => {
+      assert.equal(result, null); assert.ok(existsSync(job.worktree));
+      team.runs.delete(job.id);
+    });
+  }, { once: true });
+  team.runs.set(job.id, { abort, agents: new Set() });
+  const cancelled = await team.control(job.id, 'cancel'); await selfCleanup;
+  assert.equal(cancelled.status, 'cancelled'); assert.ok(cancelled.cleanedAt);
+  assert.equal(team.runs.has(job.id), false); assert.equal(existsSync(job.worktree), false);
+  assert.deepEqual(team.get(job.id), cancelled); assert.equal(manifests(ctx, job.id).length, 1);
 });
 
 test('research done cleans once and retains cleanedAt through the runJob final save', async t => {

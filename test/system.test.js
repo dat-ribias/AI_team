@@ -702,6 +702,7 @@ test('startup sweep removes stray review worktrees and everything left by finish
   await run(['git'], ['-C', f.path, 'worktree', 'add', '--detach', join(f.data, 'worktrees', `${job.id}-review-0123abcd`), job.revision]);
   await team.sweepGit();
   assert(!(await trees()).includes('-review-')); assert((await trees()).includes(job.worktree), 'a ready job keeps its worktree');
+  await run(['git'], ['-C', f.path, 'merge', '--ff-only', job.revision]);
   team.save({ ...team.get(job.id), status: 'merged' }); await team.sweepGit();
   assert(!(await trees()).includes(f.data)); assert.equal((await run(['git'], ['-C', f.path, 'branch', '--list', 'ai-team/*'])).stdout.trim(), '');
   assert.equal(team.get(job.id).released, true);
