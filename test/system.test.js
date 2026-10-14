@@ -43,7 +43,7 @@ async function settle(team, id, expected, timeoutMs = 20000) {
 async function approvalAgent(agent, task, prompt, opts) {
   if (task.stage === 'plan') return { summary: `Plan round ${task.round}: ${task.messages.map(m => m.text).join('; ')}`,
     kind: /research/i.test(task.goal) ? 'research' : 'code', rigor: 'standard', risk: 'low',
-    tasks: [{ kind: 'implement', agent: 'codex-2', difficulty: 2, instruction: 'Update hello.txt', files: ['hello.txt'], dependsOn: [] }] };
+    tasks: [{ kind: /research/i.test(task.goal) ? 'research' : 'implement', agent: 'codex-2', difficulty: 2, instruction: 'Update hello.txt', files: /research/i.test(task.goal) ? [] : ['hello.txt'], dependsOn: [] }] };
   if (task.stage === 'implement') return runAgent(agent, task, prompt, opts);
   return { summary: 'Checked', status: 'completed', verdict: 'approved', findings: [], objections: [] };
 }
