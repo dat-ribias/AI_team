@@ -3,6 +3,7 @@ import { msg } from './i18n.js';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { executable, childEnv, launch, killTree, run, resolveCommand } from './process.js';
+import { capabilitiesFor } from './capabilities.js';
 // Quy tắc quyền của Claude dùng dạng POSIX: D:\A\B → //d/A/B, /x/y → //x/y.
 export const claudePath = p => '/' + String(p).replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, d) => '/' + d.toLowerCase()).replace(/\/+$/, '');
 const SECRET_FILES = ['.env', '.env.*', '*.pem', '*.key', '*.pfx', '*credentials*', '*secret*', 'id_rsa*'];
@@ -187,6 +188,18 @@ export async function listModels(agent) {
     models: (suggestedModels[agent.provider] || []).map(id => ({ id, label: id })), efforts: agent.provider === 'claude' ? claudeEfforts : [] };
 }
 
+export function sandboxArgs(task, checks = [], writes = task.stage === 'research' && capabilitiesFor(task.kind, 'builder').write.length > 0, noSandbox = false) {
+  return ['--sandbox', noSandbox ? 'danger-full-access' : task.stage === 'implement' || checks.length || writes ? 'workspace-write' : 'read-only', '-c', `sandbox_workspace_write.network_access=${task.network === true || Boolean(task.demoServer)}`];
+}
+export function claudeToolArgs(task, checks = [], web = false, writes = task.stage === 'research' && capabilitiesFor(task.kind, 'builder').write.length > 0) {
+  const args = ['--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default'];
+  if (task.stage !== 'implement') {
+    const edits = writes ? capabilitiesFor(task.kind, 'builder').write.flatMap(prefix => [`Write(${prefix}**)`, `Edit(${prefix}**)`]) : [];
+    args.push('--tools', `Read,Glob,Grep,Bash${writes ? ',Write,Edit' : ''}${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${checks.map(c => `,Bash(${c}),Bash(${c} *)`).join('')}${edits.map(tool => `,${tool}`).join('')}${web ? ',WebSearch,WebFetch' : ''}`);
+  }
+  return args;
+}
+
 export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   signal?.throwIfAborted();
   if (agent.provider === 'mock') {
@@ -213,16 +226,18 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   const args = [];
   // Lệnh check reviewer/verifier được phép chạy (= lệnh tests của project), dạng chuỗi.
   const checks = (task.checks || []).map(c => c.join(' '));
+  const role = task.stage === 'research' ? 'builder' : null;
+  const writes = task.stage === 'research' && capabilitiesFor(task.kind, role).write.length > 0;
   if (agent.provider === 'codex') {
     if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap", { 0: agent.id }));
     // "none" (Windows): bỏ sandbox của Codex → không còn cửa sổ UAC codex-windows-sandbox-setup, đổi lại Codex có toàn quyền của user
     // (đọc/ghi mọi nơi, có mạng). Chỉ còn ràng buộc bằng prompt + kiểm tra worktree của controller. Bật bằng "codexWindowsSandbox": "none".
     const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated', noSandbox = process.platform === 'win32' && winSandbox === 'none';
-    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', '--sandbox', noSandbox ? 'danger-full-access' : task.stage === 'implement' || checks.length ? 'workspace-write' : 'read-only', '-C', task.worktree);
+    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', ...sandboxArgs(task, checks, writes, noSandbox), '-C', task.worktree);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
     // Sandbox Codex: chỉ ghi trong worktree; mạng tắt trừ khi project bật "network": true.
-    args.push('-c', `sandbox_workspace_write.network_access=${task.network === true}`, '-c', `features.web_search=${web}`);
+    args.push('-c', `features.web_search=${web}`);
     // Windows: không bật sandbox thì Codex (approval=never) từ chối mọi lệnh, kể cả lệnh chỉ đọc. "unelevated" không cần quyền admin.
     if (process.platform === 'win32' && !['off', 'none'].includes(winSandbox)) args.push('-c', `windows.sandbox="${winSandbox}"`);
     // MCP bật riêng cho member này (TOML inline qua -c).
@@ -233,8 +248,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (task.sessionId) args.push('resume', task.sessionId);
     args.push('-');
   } else if (agent.provider === 'claude') {
-    args.push('-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default');
-    if (task.stage !== 'implement') args.push('--tools', `Read,Glob,Grep,Bash${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${checks.map(c => `,Bash(${c}),Bash(${c} *)`).join('')}${web ? ',WebSearch,WebFetch' : ''}`);
+    args.push('-p', '--output-format', 'stream-json', '--verbose', ...claudeToolArgs(task, checks, web, writes));
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
     for (const d of task.addDirs || []) args.push('--add-dir', d); // repo liên kết được cấp quyền sửa (acceptEdits áp dụng cả ở đây)
