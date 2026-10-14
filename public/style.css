@@ -92,6 +92,18 @@ body.chat-open::after{content:"";position:fixed;inset:0;background:#080c12bb;z-i
 .row-input{display:flex;gap:8px}.row-input>select,.row-input>input{flex:1;min-width:0}.row-input>button{white-space:nowrap}
 .project-list{margin-top:14px;font-size:12px;display:grid;gap:6px}.project-row{display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--line);border-radius:6px;padding:6px 8px;overflow-wrap:anywhere}.project-row button{font-size:11px;padding:4px 8px}
 .questions{margin:14px 0;padding:12px 14px;border:1px solid var(--amber);border-radius:8px;font-size:13px}.questions ol{margin:8px 0 10px;padding-left:20px;display:grid;gap:4px}.questions textarea{width:100%;background:var(--c0e141b);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font:inherit}.questions .primary{width:100%;margin-top:8px}
+.quota-wait{
+  background:var(--c302b1e);
+  border-left:3px solid var(--amber);
+  overflow-wrap:anywhere;
+  line-height:1.6;
+}
+.quota-wait>b{color:var(--amber)}
+.quota-wait .primary:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+.flow .node.substitute rect:first-of-type{
+  stroke:var(--amber);
+  stroke-dasharray:5 4;
+}
 .chat-msg.question .chat-bubble{border-color:var(--amber);background:var(--c342e22)}.chat-msg.question .chat-type{color:var(--amber)}.status.waiting{color:var(--amber);background:var(--c342e22);border-color:var(--c67593e)}
 .attach-row{display:flex;gap:10px;align-items:center;margin-top:8px}.attach-btn{display:inline-flex!important;align-items:center;gap:6px;margin:0!important;border:1px dashed var(--line);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px}.attach-btn.icon{padding:8px 10px;font-size:15px}.attach-btn:hover{border-color:var(--mint)}
 .attach-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.attach-list.msg{margin:-10px 20px 14px}.attach-list:empty{display:none}.attach-chip{display:inline-flex;gap:6px;align-items:center;font-size:11px;border:1px solid var(--line);border-radius:12px;padding:3px 4px 3px 9px}.attach-chip button{border:0;background:none;padding:0 4px;font-size:13px}
