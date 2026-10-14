@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team } from '../src/team.js';
+import { Accounts } from '../src/accounts.js';
 import { msg } from '../src/i18n.js';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const quota = (remaining = 80) => ({ buckets: [{ id: 'usage', name: 'usage', windows: [{ name: '5h', remaining, minutes: 300 }] }] });
+const untilAbort = signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
 
 function fixture(t, { providers = ['codex', 'codex', 'codex'], ...overrides } = {}, adapters = {}) {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-quota-'));
@@ -47,8 +49,8 @@ test('quota refresh runs three reads in parallel and emits each result immediate
 });
 
 test('a hung member times out without blocking other quotas', async t => {
-  const team = fixture(t, { quotaReadTimeoutSec: 0.2 }, { readQuota: async agent => {
-    if (agent.id === 'codex-1') return new Promise(() => {});
+  const team = fixture(t, { quotaReadTimeoutSec: 0.2 }, { readQuota: async (agent, { signal }) => {
+    if (agent.id === 'codex-1') return untilAbort(signal);
     await wait(20); return quota();
   } });
   const result = await team.refreshQuota();
@@ -103,7 +105,7 @@ test('a second refresh returns current progress without starting duplicate reads
 test('the round deadline times out running and queued members and releases refreshing', async t => {
   const calls = [];
   const team = fixture(t, { providers: ['codex', 'codex', 'codex', 'codex', 'codex'], quotaReadTimeoutSec: 60, quotaRefreshMaxSec: 0.3 },
-    { readQuota: agent => { calls.push(agent.id); return new Promise(() => {}); } });
+    { readQuota: (agent, { signal }) => { calls.push(agent.id); return untilAbort(signal); } });
   const start = performance.now(), result = await team.refreshQuota(), elapsed = performance.now() - start;
   t.diagnostic(`round deadline: ${elapsed.toFixed(1)} ms; started readers: ${calls.length}`);
   assert(elapsed >= 250 && elapsed < 800);
@@ -163,13 +165,97 @@ test('Claude parse failures, exceptions and timeouts preserve observed quotas', 
   for (const [adapter, status] of [
     [async () => ({ parsed: false, text: 'api_key=example-secret-value ' + 'unparsed '.repeat(50) }), 'error'],
     [async () => { throw new Error('adapter failed'); }, 'error'],
-    [() => new Promise(() => {}), 'timeout'],
+    [(_, { signal }) => untilAbort(signal), 'timeout'],
   ]) {
     team.claudeUsage = adapter;
     const result = await team.refreshQuota(), entry = result.members['claude-x'];
     assert.equal(entry.status, status); assert(entry.reason.length <= 200); assert(!entry.reason.includes('example-secret-value'));
     assert.deepEqual(team.quota('claude-x'), observed);
   }
+});
+
+test('member timeouts abort reads and wait for cleanup before reusing slots or refreshing', async t => {
+  let active = 0, peak = 0;
+  const signals = [], events = [];
+  const team = fixture(t, { providers: Array(5).fill('codex'), quotaReadTimeoutSec: 0.03 }, {
+    readQuota: (agent, { signal }) => new Promise((_, reject) => {
+      active++; peak = Math.max(peak, active); signals.push(signal); events.push('start');
+      signal.addEventListener('abort', () => setTimeout(() => {
+        active--; events.push('settled'); reject(signal.reason);
+      }, 40), { once: true });
+    }),
+  });
+  for (let round = 0; round < 2; round++) {
+    const result = await team.refreshQuota();
+    assert.equal(active, 0); assert.equal(team.refreshing, false);
+    assert(Object.values(result.members).every(m => m.status === 'timeout'));
+    assert(signals.every(signal => signal.aborted));
+    assert.equal(events.at(-1), 'settled');
+  }
+  assert.equal(signals.length, 10); assert.equal(peak, 3);
+  t.diagnostic(`two timeout rounds: ${signals.length} aborted reads; peak readers: ${peak}; active after cleanup: ${active}`);
+});
+
+test('the round deadline aborts all active adapters before a new round starts', async t => {
+  const signals = []; let active = 0;
+  const team = fixture(t, { providers: Array(5).fill('codex'), quotaReadTimeoutSec: 60, quotaRefreshMaxSec: 0.04 }, {
+    readQuota: (_, { signal }) => new Promise((_, reject) => {
+      active++; signals.push(signal);
+      signal.addEventListener('abort', () => setTimeout(() => { active--; reject(signal.reason); }, 30), { once: true });
+    }),
+  });
+  const first = team.refreshQuota(); await wait(55);
+  assert.equal(team.refreshing, true);
+  assert.equal((await team.refreshQuota()).running, true); assert.equal(signals.length, 3);
+  const result = await first;
+  assert.equal(active, 0); assert(signals.every(signal => signal.aborted));
+  assert.equal(result.done, 5); assert(Object.values(result.members).every(m => m.status === 'timeout'));
+  team.quotaRead = async () => quota();
+  assert.equal((await team.refreshQuota()).done, 5);
+});
+
+test('closing a team aborts quota reads without waiting for the member timeout', async t => {
+  const signals = [];
+  const team = fixture(t, {}, { readQuota: (_, { signal }) => { signals.push(signal); return untilAbort(signal); } });
+  const refresh = team.refreshQuota(); await wait(10);
+  const start = performance.now(); await team.close(); await refresh;
+  assert(signals.every(signal => signal.aborted)); assert.equal(signals.length, 3);
+  assert.equal(team.refreshing, false); assert.equal(team.dbClosed, true);
+  assert(performance.now() - start < 1000);
+});
+
+test('Accounts.usage reports a fresh parse failure while retaining observed Claude quota', async t => {
+  const team = fixture(t, { providers: ['claude'] });
+  const agent = team.agent('claude-x'), script = join(agent.home, 'usage-fixture.cjs');
+  writeFileSync(script, 'console.log(JSON.stringify({ type: "result", result: "No usage buckets" }));');
+  const accounts = new Accounts(team);
+  t.after(() => accounts.close()); accounts.command = () => [process.execPath, script];
+  team.saveObserved(agent.id, quota(65).buckets);
+  const observed = team.quota(agent.id);
+  const result = await accounts.usage(agent.id);
+  assert.equal(result.parsed, false); assert.deepEqual(result.buckets, []);
+  assert.deepEqual(team.quota(agent.id), observed);
+  team.claudeUsage = (id, opts) => accounts.usage(id, opts);
+  const check = await team.refreshQuota();
+  assert.equal(check.members[agent.id].status, 'error'); assert(check.members[agent.id].reason);
+  assert.deepEqual(team.quota(agent.id), observed);
+  writeFileSync(script, 'console.log(JSON.stringify({ type: "result", result: "Current session 20% used" }));');
+  assert.equal((await accounts.usage(agent.id)).parsed, true);
+  assert.equal(team.quota(agent.id).buckets[0].windows[0].remaining, 80);
+});
+
+test('Accounts.usage forwards abort to the child and rejects before saving observed quota', async t => {
+  const team = fixture(t, { providers: ['claude'] });
+  const agent = team.agent('claude-x'), script = join(agent.home, 'usage-fixture.cjs');
+  writeFileSync(script, 'setInterval(() => {}, 1000);');
+  const accounts = new Accounts(team), controller = new AbortController(), reason = new Error('test cancellation');
+  t.after(() => accounts.close()); accounts.command = () => [process.execPath, script];
+  team.saveObserved(agent.id, quota(65).buckets); const observed = team.quota(agent.id);
+  const pending = accounts.usage(agent.id, { signal: controller.signal });
+  const rejection = assert.rejects(pending, error => error === reason);
+  await wait(100); controller.abort(reason); await rejection;
+  assert.deepEqual(team.quota(agent.id), observed);
+  await assert.rejects(accounts.usage(agent.id, { signal: controller.signal }), error => error === reason);
 });
 
 test('closed teams and account login return null without starting a refresh', async t => {

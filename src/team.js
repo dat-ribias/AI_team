@@ -2266,7 +2266,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const check = this.quotaCheck = { running: true, startedAt: now(), finishedAt: null, total: agents.length, done: 0,
       members: Object.fromEntries(agents.map(a => [a.id, { status: 'checking', at: null }])) };
     let next = 0, stopped = false, refreshTimer, stopReads;
+    const controllers = new Set(), pendingReads = new Set();
     const stoppedRead = new Promise(resolve => { stopReads = resolve; });
+    const abortReads = () => {
+      stopReads(timeout);
+      for (const controller of controllers) controller.abort(new Error('timeout'));
+    };
+    const closeTimer = setInterval(() => { if (this.closed) abortReads(); }, 25);
     const finish = (id, entry) => {
       if (check.members[id].status !== 'checking') return;
       check.members[id] = { ...entry, at: now() }; check.done++; this.emit('change');
@@ -2288,18 +2294,26 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           finish(agent.id, { status: 'skipped-busy', observedAt: this.quota(agent.id).checkedAt || null }); return;
         }
         let timer, result;
-        // ponytail: timeouts do not kill child processes because readQuota does not accept an AbortSignal.
+        const controller = new AbortController(); controllers.add(controller);
+        const pending = Promise.resolve().then(() => {
+          controller.signal.throwIfAborted();
+          return agent.provider === 'claude' ? this.claudeUsage(agent.id, { signal: controller.signal }) : this.quotaRead(agent, { signal: controller.signal });
+        });
+        pendingReads.add(pending);
+        const settled = () => { pendingReads.delete(pending); controllers.delete(controller); };
+        pending.then(settled, settled);
         try {
           result = await Promise.race([
-            Promise.resolve().then(() => agent.provider === 'claude' ? this.claudeUsage(agent.id) : this.quotaRead(agent)),
-            new Promise(resolve => { timer = setTimeout(() => resolve(timeout), (this.config.quotaReadTimeoutSec ?? 60) * 1000); }),
+            pending,
+            new Promise(resolve => { timer = setTimeout(() => { resolve(timeout); controller.abort(new Error('timeout')); }, (this.config.quotaReadTimeoutSec ?? 60) * 1000); }),
             stoppedRead,
           ]);
         } finally { clearTimeout(timer); }
         if (stopped || this.closed) return;
         if (result === timeout) {
           if (agent.provider !== 'claude') save(agent.id, { checkedAt: now(), status: 'unknown', buckets: [], error: 'timeout' });
-          finish(agent.id, { status: 'timeout', reason: 'timeout' }); return;
+          finish(agent.id, { status: 'timeout', reason: 'timeout' });
+          await Promise.race([pending.catch(() => {}), stoppedRead]); return;
         }
         if (agent.provider === 'claude') {
           finish(agent.id, result.parsed ? { status: 'ok' } : { status: 'error', reason: redact(result.text || '').slice(0, 200) });
@@ -2324,11 +2338,15 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         new Promise(resolve => { refreshTimer = setTimeout(resolve, (this.config.quotaRefreshMaxSec ?? 120) * 1000); }),
       ]);
     } finally {
-      stopped = true; stopReads(timeout); clearTimeout(refreshTimer);
+      stopped = true; abortReads(); clearTimeout(refreshTimer); clearInterval(closeTimer);
       try {
         for (const agent of agents) if (check.members[agent.id].status === 'checking') finish(agent.id, { status: 'timeout', reason: 'timeout' });
         this.db.exec('DELETE FROM quota_history WHERE seq NOT IN (SELECT seq FROM quota_history ORDER BY seq DESC LIMIT 10000)');
       } finally {
+        let cleanupTimer;
+        try {
+          await Promise.race([Promise.allSettled([...pendingReads]), new Promise(resolve => { cleanupTimer = setTimeout(resolve, 5000); })]);
+        } finally { clearTimeout(cleanupTimer); }
         check.finishedAt = now(); check.running = false; this.refreshing = false; this.emit('change');
       }
     }

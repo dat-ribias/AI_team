@@ -34,7 +34,7 @@ const token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : randomBy
 if (!existsSync(tokenFile)) writeFileSync(tokenFile, token, { mode: 0o600 });
 const team = new Team(config, dataDir);
 const accounts = new Accounts(team, file, root);
-team.claudeUsage = id => accounts.usage(id);
+team.claudeUsage = (id, opts) => accounts.usage(id, opts);
 const port = config.port || 3333, origin = `http://127.0.0.1:${port}`;
 const cookieName = `team_session_${port}`;
 const clients = new Set();
