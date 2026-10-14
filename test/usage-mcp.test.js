@@ -4,7 +4,50 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { z } from 'zod';
+
+const schema = parse => ({
+  parse,
+  optional() { return schema(value => value === undefined ? undefined : parse(value)); },
+  default(fallback) { return schema(value => parse(value === undefined ? fallback : value)); },
+  describe() { return this; },
+  min() { return this; }, max() { return this; }, int() { return this; },
+});
+const z = {
+  string: () => {
+    let minimum = 0;
+    let maximum = Infinity;
+    const result = schema(value => {
+      if (typeof value !== 'string' || value.length < minimum) throw new TypeError('Expected non-empty string');
+      if (value.length > maximum) throw new TypeError('String too long');
+      return value;
+    });
+    result.min = value => { minimum = value; return result; };
+    result.max = value => { maximum = value; return result; };
+    return result;
+  },
+  enum: values => schema(value => {
+    if (!values.includes(value)) throw new TypeError('Expected enum value');
+    return value;
+  }),
+  boolean: () => schema(value => {
+    if (typeof value !== 'boolean') throw new TypeError('Expected boolean');
+    return value;
+  }),
+  number: () => schema(value => {
+    if (typeof value !== 'number') throw new TypeError('Expected number');
+    return value;
+  }),
+  array: item => schema(value => {
+    if (!Array.isArray(value)) throw new TypeError('Expected array');
+    return value.map(entry => item.parse(entry));
+  }),
+  object: shape => ({
+    parse(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Expected object');
+      return Object.fromEntries(Object.entries(shape).map(([key, schema]) => [key, schema.parse(value[key])]).filter(([, field]) => field !== undefined));
+    },
+  }),
+};
 
 async function fixture() {
   const tools = new Map(), requests = [];
@@ -50,4 +93,11 @@ test('usage_report passes API validation errors back as MCP errors', async () =>
   assert.equal(result.isError, true);
   assert.equal(JSON.parse(result.content[0].text).error, 'Usage from must precede to');
   assert.equal(requests[0].options.method, 'GET');
+});
+
+test('Vietnamese and Japanese locales contain no mojibake markers', () => {
+  for (const locale of ['vi', 'ja']) {
+    const source = readFileSync(new URL(`../locales/${locale}.json`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /Ã|á»|�/, `${locale}.json contains mojibake`);
+  }
 });
