@@ -12,6 +12,7 @@ import { fileHash, MemoryStore, hash } from '../src/memory.js';
 import { ledger, question, answer, decide, refreshLedger } from '../src/discussions.js';
 import { collect, kind, safeRel } from '../src/evidence.js';
 import { msg } from '../src/i18n.js';
+import { validatePreview, previewEnv, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from '../src/preview.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
@@ -466,6 +467,219 @@ async function branchCommit(f, branch, file = 'other.txt', content = 'Target wor
   } finally { await run(['git'], ['-C', f.path, 'worktree', 'remove', '--force', wt]); }
 }
 async function branchTip(f, branch = 'main') { return (await run(['git'], ['-C', f.path, 'rev-parse', `refs/heads/${branch}`])).stdout.trim(); }
+
+const processAlive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+async function previewFixture(t, config = {}) {
+  const f = await fixture();
+  writeFileSync(join(f.path, 'server.js'), `const { createServer } = require('node:http');
+const { spawn } = require('node:child_process');
+const owner = ${process.pid};
+const guard = "setInterval(() => { try { process.kill(" + owner + ", 0); process.kill(" + process.pid + ", 0); } catch { process.exit(); } }, 200); setTimeout(() => process.exit(), 45000).unref();";
+const leaf = spawn(process.execPath, ['-e', guard], { stdio: 'ignore', windowsHide: true });
+setInterval(() => { try { process.kill(owner, 0); process.kill(process.ppid, 0); } catch { process.exit(); } }, 200);
+setTimeout(() => process.exit(), 45000).unref();
+const server = createServer((req, res) => {
+  if (req.url === '/pid') return res.end(JSON.stringify({ pid: process.pid, leaf: leaf.pid }));
+  res.writeHead(req.url === '/' || req.url === '/ready' ? 200 : 404, { 'Content-Type': 'text/html' });
+  res.end('<!doctype html><html><body><h1>Preview fixture</h1></body></html>');
+});
+setTimeout(() => server.listen(Number(process.argv[2]), '127.0.0.1'), Number(process.argv[3]) || 0);
+`);
+  await run(['git'], ['-C', f.path, 'add', 'server.js']);
+  await run(['git'], ['-C', f.path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'preview fixture']);
+  f.config.projects[0].preview = { command: 'node server.js {port}', readyPath: '/ready', timeoutSec: 5, ttlMin: 1, portRange: [4200, 4299], ...config };
+  const result = await branchReady(t, f), pids = new Set();
+  result.job.kind = 'code'; result.team.save(result.job);
+  result.team.previewChrome = () => null;
+  result.team.capacity = () => ({ start: 3 - result.team.runs.size - result.team.previews.size, hardStop: false });
+  t.after(async () => {
+    for (const p of result.team.previews.values()) { if (p.after?.pid) pids.add(p.after.pid); if (p.before?.pid) pids.add(p.before.pid); }
+    await result.team.close();
+    for (const pid of pids) await stopTree(pid);
+    rmSync(f.data, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    rmSync(f.path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  return { ...result, pids };
+}
+
+test('preview configuration validates defaults and only permits minimal environment', { timeout: 60_000 }, () => {
+  assert.equal(validatePreview(null), null); assert.equal(validatePreview(undefined), null);
+  assert.deepEqual(validatePreview({ command: 'npx serve --port {port}' }), { command: 'npx serve --port {port}', readyPath: '/', routes: [{ name: 'home', path: '/' }], timeoutSec: 120, ttlMin: 30, portRange: [4100, 4199], requireAcceptance: true });
+  for (const config of [[], {}, { command: 'node server.js' }, { command: 'x {port}', readyPath: 'x' }, { command: 'x {port}', readyPath: '//other' }, { command: 'x {port}', routes: [] }, { command: 'x {port}', routes: [{ name: 'x', path: 'x' }] }, { command: 'x {port}', timeoutSec: 4 }, { command: 'x {port}', ttlMin: 241 }, { command: 'x {port}', portRange: [5, 4] }, { command: 'x {port}', requireAcceptance: 'true' }]) assert.throws(() => validatePreview(config), new RegExp(msg('srv.preview.invalid_config', { 0: '' }).split(':')[0]));
+  const env = previewEnv(4321);
+  assert.equal(env.PORT, '4321'); assert.equal(env.BROWSER, 'none');
+  assert(Object.keys(env).every(k => /^(path|pathext|systemroot|windir|comspec|temp|tmp|home|userprofile|appdata|localappdata|programfiles|programfiles\(x86\)|port|browser)$/i.test(k)));
+  assert.equal(env.NODE_OPTIONS, undefined);
+});
+
+test('preview starts before/after, checks readyPath and stop kills the entire process tree', { timeout: 60_000 }, async t => {
+  const { f, team, job, pids } = await previewFixture(t);
+  team.previewChrome = findChrome;
+  await team.runPreview(job);
+  const preview = team.get(job.id).preview;
+  assert.equal(preview.status, 'running'); assert.equal(preview.revision, job.revision); assert.equal(preview.basePid, undefined);
+  assert.equal((await fetch(preview.url + '/ready')).status, 200);
+  const processes = await (await fetch(preview.url + '/pid')).json(); pids.add(preview.pid);
+  assert(processAlive(processes.pid)); assert(processAlive(processes.leaf));
+  const trees = (await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout;
+  assert(!trees.includes('-preview-'));
+  assert.equal(team.previews.size, 1);
+  const entry = team.get(job.id).evidence.at(-1);
+  if (findChrome()) {
+    assert.deepEqual(entry.files.map(f => f.path), ['before-home-desktop.png', 'before-home-mobile.png', 'after-home-desktop.png', 'after-home-mobile.png']);
+    mkdirSync('.ai-team/evidence', { recursive: true });
+    for (const file of entry.files) writeFileSync(join('.ai-team/evidence', `backend-${file.path}`), readFileSync(team.evidenceFile(job.id, `${entry.dir}/${file.path}`).file));
+  }
+  await team.control(job.id, 'preview-stop');
+  assert.equal(team.previews.size, 0); assert.equal(team.get(job.id).preview.stoppedReason, 'user');
+  assert(!processAlive(preview.pid)); assert(!processAlive(processes.pid)); assert(!processAlive(processes.leaf));
+  await team.control(job.id, 'preview-start');
+  assert.equal(team.get(job.id).preview.status, 'running');
+  const restarted = team.get(job.id).evidence.at(-1);
+  assert(restarted.files.every(f => f.path.startsWith('after-')));
+  await team.stopPreview(job.id, 'test');
+});
+
+test('preview expires at ttl and revision changes invalidate acceptance and stop the server', { timeout: 60_000 }, async t => {
+  const { team, job, pids } = await previewFixture(t);
+  await team.runPreview(job);
+  let fresh = team.get(job.id), pid = fresh.preview.pid; pids.add(pid);
+  fresh.preview.expiresAt = new Date(Date.now() - 1).toISOString(); team.save(fresh); await team.tick();
+  assert.equal(team.get(job.id).preview.stoppedReason, 'ttl'); assert(!processAlive(pid));
+  await team.control(job.id, 'preview-start');
+  fresh = team.get(job.id); pid = fresh.preview.pid; pids.add(pid);
+  await team.control(job.id, 'accept', { revision: fresh.revision });
+  fresh = team.get(job.id); fresh.revision = fresh.base; team.save(fresh); await team.tick();
+  assert.equal(team.get(job.id).acceptance, null); assert.equal(team.get(job.id).preview.stoppedReason, 'revision'); assert(!processAlive(pid));
+});
+
+test('preview screenshot captures desktop and mobile PNG through CDP', { timeout: 60_000, skip: !findChrome() && 'Chrome not installed' }, async t => {
+  const f = await fixture(), port = await freePort([4200, 4299]), file = join(f.data, 'desktop.png');
+  writeFileSync(join(f.path, 'shot.cjs'), `const http=require('node:http'); setInterval(()=>{try{process.kill(${process.pid},0)}catch{process.exit()}},200); setTimeout(()=>process.exit(),45000).unref(); http.createServer((req,res)=>res.end('<h1>Screenshot</h1>')).listen(process.argv[2]);`);
+  const server = startServer({ command: 'node shot.cjs {port}', cwd: f.path, port });
+  t.after(async () => { await stopTree(server.pid); rmSync(f.data, { recursive: true, force: true }); rmSync(f.path, { recursive: true, force: true }); });
+  await waitReady(`http://localhost:${port}/`, 5, server.child);
+  for (const [name, width, height] of [['desktop', 1280, 800], ['mobile', 390, 844]]) {
+    await screenshot({ chrome: findChrome(), url: `http://localhost:${port}/`, width, height, file });
+    const png = readFileSync(file); assert.equal(png.readUInt32BE(16), width); assert.equal(png.readUInt32BE(20), height);
+    mkdirSync('.ai-team/evidence', { recursive: true }); writeFileSync(join('.ai-team/evidence', `preview-fixture-${name}.png`), png);
+  }
+});
+
+test('accept is revision-bound, filters evidence, gates merge and merged preview is stopped', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t);
+  const check = await team.mergeCheck(job.id);
+  assert.deepEqual(check.acceptance, { required: true, ok: false, revision: null });
+  assert.deepEqual(check.paths, [{ path: 'hello.txt', added: 1, removed: 1 }]);
+  await assert.rejects(team.control(job.id, 'accept', { revision: job.base }), new RegExp(msg('srv.preview.accept_invalid')));
+  await assert.rejects(team.merge(job.id), new RegExp(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) })));
+  assert.equal(team.get(job.id).status, 'ready');
+  await team.runPreview(team.get(job.id));
+  const fresh = team.get(job.id), entry = fresh.evidence.at(-1), valid = entry.files.map(f => `${entry.dir}/${f.path}`);
+  // A synthetic archived file also covers filtering when Chrome is unavailable.
+  entry.files.push({ path: 'owner.png', bytes: 0, type: 'image' }); team.save(fresh); valid.push(`${entry.dir}/owner.png`);
+  const accepted = await team.control(job.id, 'accept', { revision: job.revision, evidence: [...valid, '../outside', 'wrong-revision.png', 42] });
+  assert.deepEqual(accepted.acceptance.evidence, valid); assert.equal(accepted.acceptance.by, 'user');
+  assert(team.events(job.id).some(e => e.type === 'ACCEPTED'));
+  assert.equal((await team.mergeCheck(job.id)).acceptance.ok, true);
+  await team.merge(job.id); assert.equal(team.get(job.id).status, 'merged'); assert.equal(team.get(job.id).preview.stoppedReason, 'merged');
+  await assert.rejects(team.control(job.id, 'accept', { revision: job.revision }));
+});
+
+test('preview acceptance can be disabled and projects without preview retain merge behavior', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t, { requireAcceptance: false });
+  assert.equal((await team.mergeCheck(job.id)).acceptance.required, false); await team.merge(job.id);
+  const plain = await branchReady(t); assert.equal((await plain.team.mergeCheck(plain.job.id)).acceptance.required, false); await plain.team.merge(plain.job.id);
+});
+
+test('preview restart cleans persisted server and baseline PIDs without restoring preview', { timeout: 60_000 }, async t => {
+  const { f, team, job, pids } = await previewFixture(t);
+  await team.runPreview(job); const fresh = team.get(job.id), pid = fresh.preview.pid; pids.add(pid);
+  const base = startServer({ command: 'node server.js {port}', cwd: job.worktree, port: await freePort([4200, 4299], [fresh.preview.port]) }); pids.add(base.pid);
+  fresh.preview.basePid = base.pid; team.save(fresh);
+  // Simulate a crash by closing only SQLite; close() deliberately stops previews.
+  team.previews.clear(); team.db.close(); team.dbClosed = true;
+  const reopened = new Team(f.config, f.data); reopened.closed = true; t.after(() => reopened.close());
+  await reopened.previewRecovery;
+  assert(!processAlive(pid)); assert(!processAlive(base.pid)); assert.equal(reopened.previews.size, 0);
+  assert.equal(reopened.get(job.id).preview.status, 'stopped'); assert.equal(reopened.get(job.id).preview.stoppedReason, 'restart');
+  assert.equal(reopened.get(job.id).preview.pid, undefined); assert.equal(reopened.get(job.id).preview.basePid, undefined);
+  await reopened.close();
+});
+
+test('preview failure archives redacted logs and finish still leaves the job ready with changes', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t, { command: 'node -e "console.error(\'access_token=example\');process.exit(1)" {port}' });
+  job.fast = true; job.status = 'running'; team.save(job);
+  await team.finish(job, team.config.pipeline); team.save(job);
+  const fresh = team.get(job.id), entry = fresh.evidence.at(-1);
+  assert.equal(fresh.status, 'ready'); assert.equal(fresh.preview.status, 'failed'); assert.equal(team.previews.size, 0);
+  assert.deepEqual(fresh.changes, { revision: job.revision, added: 1, removed: 1, files: [{ path: 'hello.txt', added: 1, removed: 1 }] });
+  assert(entry.files.some(f => f.path === 'preview.log'));
+  const log = readFileSync(team.evidenceFile(job.id, `${entry.dir}/preview.log`).file, 'utf8');
+  assert(!log.includes('access_token=example')); assert(log.includes('[REDACTED]'));
+  assert(team.events(job.id).some(e => e.type === 'PREVIEW_WARNING'));
+});
+
+test('preview feedback during startup is preserved and cancellation cannot resurrect the job', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t);
+  const launch = team.runPreview(job);
+  await team.control(job.id, 'message', { message: 'Keep this feedback' }); await launch;
+  assert.equal(team.get(job.id).messages.at(-1).text, 'Keep this feedback');
+  await team.control(job.id, 'cancel');
+  assert.equal(team.get(job.id).status, 'cancelled'); assert.equal(team.previews.size, 0); assert.equal(team.get(job.id).preview.stoppedReason, 'cancelled'); assert.equal(team.get(job.id).preview.pid, undefined);
+});
+
+test('preview finish preserves incoming guidance for runJob to replan', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t, { command: 'node server.js {port} 1500' });
+  job.stage = 'final'; job.fast = true; team.save(job);
+  const finishing = team.runJob(job), until = Date.now() + 5000;
+  while (!team.get(job.id).preview?.basePid && Date.now() < until) await new Promise(r => setTimeout(r, 30));
+  assert(team.get(job.id).preview?.basePid);
+  await team.control(job.id, 'message', { message: 'New guidance during preview' }); await finishing;
+  const fresh = team.get(job.id);
+  assert.equal(fresh.status, 'queued'); assert.equal(fresh.stage, 'plan'); assert.equal(fresh.tested, null);
+  assert.equal(fresh.messages.at(-1).text, 'New guidance during preview');
+});
+
+test('preview without Chrome keeps the server running and feedback revokes acceptance', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t);
+  await team.runPreview(job);
+  const fresh = team.get(job.id);
+  assert.equal(fresh.preview.status, 'running'); assert.equal(fresh.preview.screenshots, false); assert.equal(fresh.preview.error, undefined);
+  assert(team.events(job.id).some(e => e.type === 'PREVIEW_WARNING' && e.summary === msg('srv.preview.no_chrome')));
+  await team.control(job.id, 'accept', { revision: job.revision });
+  await team.control(job.id, 'message', { message: 'Please revise' }); assert.equal(team.get(job.id).acceptance, null);
+});
+
+test('preview readiness timeout is nonfatal and cancel during readiness stops the baseline', { timeout: 60_000 }, async t => {
+  const { team, job } = await previewFixture(t, { readyPath: '/missing' });
+  await team.runPreview(job);
+  assert.equal(team.get(job.id).status, 'ready'); assert.equal(team.get(job.id).preview.status, 'failed'); assert.equal(team.previews.size, 0);
+  const config = team.config.projects[0].preview; config.readyPath = '/ready'; config.command = 'node server.js {port} 2000';
+  const launch = team.runPreview(team.get(job.id));
+  const until = Date.now() + 5000;
+  while (!team.get(job.id).preview.basePid && Date.now() < until) await new Promise(r => setTimeout(r, 30));
+  const pid = team.get(job.id).preview.basePid; assert(pid);
+  await team.control(job.id, 'cancel'); await launch;
+  assert(!processAlive(pid)); assert.equal(team.previews.size, 0); assert.equal(team.get(job.id).preview.stoppedReason, 'cancelled'); assert.equal(team.get(job.id).preview.basePid, undefined);
+});
+
+test('preview enforces two concurrent slots and project proposals remain drafts', { timeout: 60_000 }, async t => {
+  const { f, team, job } = await previewFixture(t);
+  team.previews.set('reserved-1', {}); team.previews.set('reserved-2', {});
+  try { await team.runPreview(job); assert.equal(team.get(job.id).preview, undefined); assert(team.events(job.id).some(e => e.type === 'PREVIEW_WARNING')); }
+  finally { team.previews.clear(); }
+  team.agentRun = async (agent, task, prompt) => { assert.match(prompt, /package\.json/); assert.equal(task.network, false); return { summary: 'Draft preview', draft: { command: 'node server.js {port}' }, notes: ['Review routes'] }; };
+  const original = structuredClone(team.config.projects[0].preview), proposal = await team.proposePreview('test');
+  assert.equal(proposal.draft.command, 'node server.js {port}'); assert.deepEqual(team.config.projects[0].preview, original); assert.equal(team.runs.size, 0);
+  const { Accounts } = await import('../src/accounts.js'), file = join(f.data, 'cfg.json'); writeFileSync(file, '{}');
+  const accounts = new Accounts(team, file, process.cwd(), { commandAvailable: () => true });
+  try {
+    accounts.updateProject('test', { preview: proposal.draft }); assert.equal(team.state().projects[0].preview.requireAcceptance, true);
+    accounts.updateProject('test', { preview: null }); assert.equal(team.state().projects[0].preview, null);
+    assert.throws(() => accounts.updateProject('test', { preview: { command: 'invalid' } }));
+  } finally { await accounts.close(); }
+});
 
 test('local branches, alternate job base and non-checkout base merge leave main unchanged', async t => {
   const f = await fixture(); await run(['git'], ['-C', f.path, 'branch', 'release']);

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync } from 'node:fs';
 import { msg } from './i18n.js';
+import { validatePreview } from './preview.js';
 import { join, isAbsolute, resolve, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -210,6 +211,7 @@ export class Accounts {
     const config = structuredClone(this.team.config), p = config.projects.find(x => x.id === id);
     if (!p) throw new Error(msg("srv.team.project_chua_dang_ky"));
     if ('tests' in input) p.tests = testList(input.tests);
+    if ('preview' in input) p.preview = validatePreview(input.preview);
     const acc = accessOf(p);
     if ('network' in input) { if (typeof input.network !== 'boolean') throw new Error('network: true | false'); acc.network = input.network ? (acc.network.length ? acc.network : ['*']) : []; }
     if ('readDirs' in input) acc.folders = readDirList(input.readDirs).map(path => acc.folders.find(f => f.path === path) || { path, members: ['*'] });
@@ -217,7 +219,7 @@ export class Accounts {
     this.persist(config);
     // Lệnh không tìm thấy trên PATH của máy chạy controller → cảnh báo ngay thay vì đợi lúc test mới lỗi ("npm" vẫn chạy được: tự đổi sang node + npm-cli.js).
     const warnings = p.tests.filter(c => !/[\\/]/.test(c[0]) && executable(c[0]).join() === c[0]).map(c => msg("srv.accounts.test_cmd_warning", { 0: c[0] }));
-    return { id, tests: p.tests, network: acc.network.length > 0, readDirs: acc.folders.map(f => f.path), access: acc, warnings };
+    return { id, tests: p.tests, preview: p.preview || null, network: acc.network.length > 0, readDirs: acc.folders.map(f => f.path), access: acc, warnings };
   }
   // Thư mục tham khảo chỉ đọc: chỉ bạn đặt từ dashboard; agent không tự xin thêm được.
   setReadDirs(id, text) {
