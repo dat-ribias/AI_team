@@ -2152,3 +2152,64 @@ test('per-folder permissions per AI: reviewer view-only, builder edits src but n
   job = await shellTeam.create({ project: 'test', goal: 'Update hello with npm' });
   blocked = await settle(shellTeam, job.id, 'blocked'); assert.match(blocked.error, /npm i/);
 });
+
+
+test('job title: create validates, lead title never overrides owner title, rename, legacy fallback', async t => {
+  const { autoTitle, jobTitle } = await import('../src/team.js');
+  const f = await fixture();
+  let planStarted, releasePlan;
+  const started = new Promise(resolve => { planStarted = resolve; });
+  const released = new Promise(resolve => { releasePlan = resolve; });
+  const team = new Team(f.config, f.data, { runAgent: async (...args) => {
+    if (args[1].stage === 'plan' && args[1].goal === 'Rename during plan') { planStarted(); await released; }
+    const report = await approvalAgent(...args);
+    return args[1].stage === 'plan' ? { ...report, title: '  Lead   T  ' } : report;
+  } }); t.after(() => team.close());
+  const input = { project: 'test', goal: 'First line\nFull goal details', paused: true, planApproval: true };
+  for (const title of ['', '   ', 'x'.repeat(61), 123, null]) {
+    await assert.rejects(team.create({ ...input, title }), { message: msg('srv.team.title_invalid') });
+  }
+  const owner = await team.create({ ...input, title: 'Abc' });
+  assert.equal(owner.title, 'Abc'); assert.equal(owner.titleBy, 'user');
+  const auto = await team.create(input);
+  assert.equal(auto.title, 'First line'); assert.equal(auto.titleBy, 'auto');
+  assert.equal(autoTitle('\n  First   line \nDetails'), 'First line');
+  assert.equal(autoTitle('x'.repeat(61)), 'x'.repeat(59) + '…');
+  assert.equal(autoTitle('x'.repeat(60)), 'x'.repeat(60));
+  for (const end of ['. ', '。', '!', '?']) assert.equal(autoTitle('First' + end + 'x'.repeat(80)), 'First' + end.trim());
+  assert.equal(autoTitle('x'.repeat(60) + '! more'), 'x'.repeat(59) + '…');
+  await team.control(auto.id, 'resume');
+  const planned = await settle(team, auto.id, 'waiting');
+  assert.equal(planned.title, 'Lead T'); assert.equal(planned.titleBy, 'lead');
+  await team.control(owner.id, 'resume');
+  const ownerPlanned = await settle(team, owner.id, 'waiting');
+  assert.equal(ownerPlanned.title, 'Abc'); assert.equal(ownerPlanned.titleBy, 'user');
+  for (const title of ['', 'x'.repeat(61), 123]) {
+    await assert.rejects(team.control(auto.id, 'rename', { title }), { message: msg('srv.team.title_invalid') });
+  }
+  const renamed = await team.control(auto.id, 'rename', { title: '  Owner   title  ' });
+  assert.equal(renamed.title, 'Owner title'); assert.equal(renamed.titleBy, 'user');
+  assert.equal(team.get(auto.id).title, 'Owner title');
+  assert(team.events(auto.id).some(e => e.type === 'CONTROL' && e.from === 'user' && e.to === 'team' && e.summary === msg('srv.team.renamed', { 0: 'Owner title' })));
+  team.save(planned);
+  assert.equal(team.get(auto.id).title, 'Owner title', 'stale saves preserve the owner title');
+  for (const status of ['running', 'merging', 'done', 'merged', 'cancelled']) {
+    const job = team.get(auto.id); job.status = status; team.save(job);
+    const title = 'Renamed ' + status;
+    assert.equal((await team.control(auto.id, 'rename', { title })).title, title);
+    assert.equal(team.get(auto.id).title, title); assert.equal(team.get(auto.id).status, status);
+  }
+  const legacy = team.get(owner.id); delete legacy.title; delete legacy.titleBy;
+  team.db.prepare('UPDATE jobs SET body=? WHERE id=?').run(JSON.stringify(legacy), legacy.id);
+  assert.equal(jobTitle(legacy), 'First line');
+  assert.equal(team.state().jobs.find(j => j.id === legacy.id).title, 'First line');
+  assert.equal(team.get(legacy.id).title, undefined, 'state fallback does not migrate old jobs');
+  const duringPlan = await team.create({ ...input, goal: 'Rename during plan', paused: false });
+  await started;
+  await team.control(duringPlan.id, 'rename', { title: 'Owner during plan' });
+  releasePlan();
+  const afterPlan = await settle(team, duringPlan.id, 'waiting');
+  assert.equal(afterPlan.title, 'Owner during plan'); assert.equal(afterPlan.titleBy, 'user');
+  const exported = await team.exportJob(owner.id);
+  assert(exported.includes('# First line')); assert(exported.includes('## Mục tiêu\n\n' + legacy.goal));
+});

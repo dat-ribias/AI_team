@@ -247,3 +247,12 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 .results-panel pre{max-width:100%;overflow:auto}.results-panel .tag{display:inline-block;margin:2px 4px 2px 0}
 .project-row{flex-wrap:wrap}.project-row>span{flex:1;min-width:0}.project-row>.read-dirs{flex-basis:100%;min-width:0}.project-row .controls{display:flex;flex-wrap:wrap;gap:6px}
 @media(max-width:750px){.results-panel{max-height:none}.result-images img{height:145px}.result-levels li{flex-wrap:wrap}.tabs{overflow-x:auto}.tabs button{flex-shrink:0}.project-row textarea{max-width:100%}}
+
+/* job title list */
+.job-button strong,.job-card-title,.job-title,.result-goal{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;-webkit-line-clamp:unset}
+.job-button small{white-space:nowrap;min-width:0}.job-list-meta{overflow:hidden;text-overflow:ellipsis}.job-button .status{flex-shrink:0;font-size:9px;padding:1px 4px}
+.jobs-dialog-list{gap:6px}.job-card{padding:8px;gap:4px;min-width:0}.job-card-head{flex-wrap:nowrap;gap:8px}.job-card-title{flex:1;font-size:13px}.job-card-head .status,.job-card-head time{flex-shrink:0}.job-card-head time{font-size:10px;white-space:nowrap}
+.job-card-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}.job-card-meta{display:block;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px;color:var(--muted)}
+.job-card-row details{font-size:10px;color:var(--muted);min-width:0}.job-card-row details[open]{flex-basis:100%;order:1}.job-card-row details p{color:var(--text);overflow-wrap:anywhere}.job-card-row summary{cursor:pointer}.job-card-actions{gap:4px;margin:0}.job-card-actions button,.job-card-actions .primary{width:auto;flex:none;font-size:10px;padding:3px 6px;margin:0;white-space:nowrap}
+.job-title{font-size:18px;margin:0 0 8px;cursor:text}.job-title-input{width:100%;font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--mint);padding:5px;margin-bottom:8px}.job-title:focus-visible,.job-card-row summary:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+@media(max-width:640px){#jobs-dialog{padding:12px}.job-card-head{gap:4px}.job-card-row{gap:4px;flex-wrap:nowrap}.job-card-row:has(details[open]){flex-wrap:wrap}.job-card-meta{font-size:9px}.job-card-row details{font-size:9px;flex-shrink:0}.job-card-actions{flex-shrink:0}.job-card-actions button{font-size:9px;padding:2px 4px}.job-card-head .status{font-size:9px}.job-card-head time{font-size:8px;max-width:78px;white-space:normal;text-align:right}}
