@@ -192,6 +192,8 @@ test('agent events update job/run lastActivityAt, throttle saves and expose over
     let saves = 0; const save = team.save.bind(team); team.save = job => { saves++; return save(job); };
     try {
       for (const type of ['ACTIVITY', 'OUTPUT', 'USAGE']) opts.onEvent(type, { summary: 'progress', details: {} });
+      const activity = team.events(job.id).filter(e => e.type === 'ACTIVITY').at(-1);
+      assert.deepEqual(activity.details, { task: 0, stage: initial.stage, startedAt: initial.startedAt });
       assert.equal(saves, 1);
       const active = team.get(job.id); assert(Date.parse(active.lastActivityAt) > Date.parse(initial.startedAt));
       assert.equal(active.running[0].lastActivityAt, active.lastActivityAt);

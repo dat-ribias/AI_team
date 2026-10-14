@@ -72,9 +72,10 @@ function activityInfo(at) {
   const warn = Number.isFinite(minutes) && minutes > (state?.silenceWarnMin ?? 5);
   return { warn, text: (warn ? '⚠ ' : '') + t('ui.progress.lastActivity', { time: duration(Number.isFinite(minutes) ? minutes : 0) }) };
 }
+const activityRunKey = run => JSON.stringify([run.agent, run.task ?? null, run.stage ?? null, run.startedAt ?? null]);
 function activityHTML(run, job) {
   const at = run.lastActivityAt || run.startedAt, info = activityInfo(at);
-  return `<div class="run-activity${info.warn ? ' silence-warn' : ''}" data-activity-at="${esc(at)}"><span data-activity-label>${esc(info.text)}</span><span class="activity-actions" ${info.warn ? '' : 'hidden'}><button type="button" data-activity-check="${esc(run.agent)}">${esc(t('ui.progress.check'))}</button><button type="button" data-activity-pause="${esc(job.id)}">${esc(t('ui.progress.stop'))}</button></span></div>`;
+  return `<div class="run-activity${info.warn ? ' silence-warn' : ''}" data-activity-at="${esc(at)}"><span data-activity-label>${esc(info.text)}</span><span class="activity-actions" ${info.warn ? '' : 'hidden'}><button type="button" data-activity-check="${esc(activityRunKey(run))}" data-activity-job="${esc(job.id)}">${esc(t('ui.progress.check'))}</button><button type="button" data-activity-pause="${esc(job.id)}">${esc(t('ui.progress.stop'))}</button></span></div>`;
 }
 function updateActivities() {
   document.querySelectorAll('[data-activity-at]').forEach(el => {
@@ -489,13 +490,14 @@ function sessionState(id) {
 }
 // Bảng "node đang làm gì": dựng từ events đã có, không gọi thêm AI.
 function slotLive(id) {
-  const job = state.jobs.find(j => j.id === selected);
+  const job = state.jobs.find(j => j.id === (slot?.job || selected));
   if (!id || !job) return '';
-  const mine = events.filter(e => e.from === id);
+  const concurrent = runningOf(job).filter(r => r.agent === id).length > 1;
+  const mine = events.filter(e => e.from === id && (slot?.task == null || e.details?.task === slot.task || e.details?.task == null && !concurrent));
   // Codex gửi in_progress rồi completed cho cùng item: giữ bản mới nhất.
   const last = new Map(); for (const e of mine.filter(e => e.type === 'ACTIVITY')) last.set(e.details?.id ? e.details.id + (e.details.command || e.details.text || "") : e.details?.parameters ? e.details.name + JSON.stringify(e.details.parameters) : e.seq, e); // agy: bắt đầu + kết thúc cùng tham số → 1 dòng // id (item_1…) lặp lại giữa các lượt
   const acts = [...last.values()].slice(-40), res = mine.filter(e => ['RESULT', 'REVIEW_RESULT', 'CONCLUSION', 'BLOCKER'].includes(e.type)).at(-1);
-  const cur = runningOf(job).find(r => r.agent === id);
+  const cur = runningOf(job).find(r => r.agent === id && (slot?.run ? activityRunKey(r) === slot.run : slot?.task == null || r.task === slot.task));
   return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${cur ? activityHTML(cur, job) : ''}${acts.length ? `<div class="live-log">${acts.map((e, i) => actView(e, i === acts.length - 1)).join('')}</div>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
 }
 const shortCmd = c => String(c || '').replace(/^"?[^"]*powershell(\.exe)?"?\s+(-NoProfile\s+)?-Command\s+/i, '');
@@ -518,10 +520,10 @@ function refreshSlotLive() {
   const nlog = el.querySelector('.live-log'); if (nlog) nlog.scrollTop = atEnd ? nlog.scrollHeight : top;
 }
 // Bấm ô trên sơ đồ của một việc → chỉ đổi người cho việc đó (task hoặc vai trò); ngoài sơ đồ việc → đổi vai trò chung của đội.
-function openSlot(kind, current, task, jobId) {
+function openSlot(kind, current, task, jobId, run = null) {
   const job = jobId && state.jobs.find(j => j.id === jobId && !['merged', 'cancelled', 'done'].includes(j.status));
   if (jobId && !job && task != null) return; // việc đã kết thúc: ô task là lịch sử, không đổi được
-  slot = { kind, current, task: job && task != null ? +task : null, job: job?.id || null };
+  slot = { kind, current, task: job && task != null ? +task : null, job: job?.id || null, run };
   $('slot-live').innerHTML = slotLive(current); const lg = $('slot-live').querySelector('.live-log'); if (lg) lg.scrollTop = lg.scrollHeight;
   $('slot-title').textContent = t(current || kind !== 'builder' ? 'ui.slot.title' : 'ui.slot.addBuilderTitle', { role: roleLabel(kind) });
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
@@ -1502,12 +1504,12 @@ $('lang-select').onchange = () => attempt(async () => {
 document.addEventListener('click', e => {
   const check = e.target.closest('[data-activity-check]'), pause = e.target.closest('[data-activity-pause]');
   if (check) {
-    const job = state.jobs.find(j => j.id === selected), run = runningOf(job).find(r => r.agent === check.dataset.activityCheck);
+    const job = state.jobs.find(j => j.id === check.dataset.activityJob), run = runningOf(job).find(r => activityRunKey(r) === check.dataset.activityCheck);
     if (run) {
-      if (!$('slot-dialog').open || slot?.current !== run.agent) openSlot(['implement', 'research'].includes(run.stage) ? 'builder' : nodeOfRun(run) || 'manager', run.agent, run.task, job.id);
+      if (!$('slot-dialog').open || slot?.current !== run.agent || slot?.job !== job.id || slot?.run !== activityRunKey(run)) openSlot(['implement', 'research'].includes(run.stage) ? 'builder' : nodeOfRun(run) || 'manager', run.agent, run.task, job.id, activityRunKey(run));
       const log = $('slot-live').querySelector('.live-log');
       if (log) { const last = log.lastElementChild; if (last?.tagName === 'DETAILS') last.open = true; log.scrollTop = log.scrollHeight; log.scrollIntoView({ block: 'nearest' }); }
-      else { $('slot-dialog').close(); filter = run.agent; tab = 'activity'; drawState(); drawTimeline(); $('timeline').scrollTop = $('timeline').scrollHeight; }
+      else if (slot.task == null) { $('slot-dialog').close(); filter = run.agent; tab = 'activity'; drawState(); drawTimeline(); $('timeline').scrollTop = $('timeline').scrollHeight; }
     }
   }
   if (pause) attempt(async () => {
