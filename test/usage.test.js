@@ -173,6 +173,45 @@ test('token-weighted waste covers all failed outcomes plus explicitly redone cal
   assert.equal(db.prepare('SELECT count(*) AS n FROM usage_log').get().n, 7);
 });
 
+test('markReworked only marks successful build calls in the job and is idempotent', t => {
+  const { store, db } = fixture(t);
+  for (const stage of ['implement', 'research', 'fix', 'plan', 'review', 'verify', 'final']) store.recordCall(call(stage, { stage }));
+  for (const result of ['timeout', 'aborted', 'error', 'blocked']) store.recordCall(call(result, { result }));
+  store.recordCall(call('other-job', { job: 'j2' }));
+  assert.equal(store.markReworked('j1'), 3);
+  assert.deepEqual(db.prepare('SELECT sourceKey FROM usage_log WHERE reworked=1 ORDER BY id').all().map(r => r.sourceKey), ['implement', 'research', 'fix']);
+  const totals = store.report().totals;
+  assert.equal(totals.wastedCalls, 7); assert.equal(totals.wastedTokens, 700); assert.equal(totals.wasteRatio, 7 / 12);
+  assert.equal(store.markReworked('j1'), 0);
+  assert.deepEqual(store.report().totals, totals);
+  store.recordCall(call('replacement', { redoOf: 'implement' }));
+  assert.equal(store.report().totals.wastedCalls, 7, 'redoOf must not count an already reworked call twice');
+});
+
+test('backfill review rejection marks preceding successful builds once across reopen', t => {
+  const { db, store } = fixture(t, { backfill: false });
+  const event = legacy(db);
+  const completed = (stage, result = 'ok') => {
+    event('TASK_ASSIGNMENT', { stage }, '2026-10-14T00:59:00Z', 'controller', 'a1');
+    event('USAGE', { total_tokens: 10 }); event('RESULT', { result });
+  };
+  for (const stage of ['plan', 'implement', 'research', 'fix', 'verify', 'final']) completed(stage);
+  completed('implement', 'error');
+  event('REVIEW_REQUEST', { stage: 'review' }, '2026-10-14T00:59:00Z', 'controller', 'a1');
+  event('USAGE', { total_tokens: 10 }); event('REVIEW_RESULT', { verdict: 'changes_requested' });
+  event('REVIEW_REQUEST', { stage: 'review' }, '2026-10-14T00:59:00Z', 'controller', 'a1');
+  event('USAGE', { total_tokens: 10 }); event('REVIEW_RESULT', { verdict: 'changes_requested' });
+  completed('implement');
+  assert.equal(store.backfill(), 10);
+  const rows = db.prepare('SELECT stage, result, reworked FROM usage_log ORDER BY id').all();
+  assert.deepEqual(rows.map(r => r.reworked), [0, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
+  assert.equal(store.report().totals.wastedCalls, 4);
+  assert.equal(store.report().totals.wastedTokens, 40);
+  assert.equal(new UsageStore(db, { now }).initialization.backfilled, 0);
+  assert.deepEqual(db.prepare('SELECT stage, result, reworked FROM usage_log ORDER BY id').all(), rows);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM usage_log').get().n, 10);
+});
+
 test('every grouping is supported and empty reports have finite metrics', t => {
   const { store } = fixture(t);
   assert.equal(store.report().totals.tokensPerMinute, 0); assert.equal(store.report().totals.wasteRatio, 0);

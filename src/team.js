@@ -1550,6 +1550,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       node.verdict = r.verdict;
       if (r.verdict === 'approved') { node.done = true; return; }
       if ((node.attempts = (node.attempts || 0) + 1) > 2) return 'escalate';
+      usageFor(this.db, { timezone: this.config.timezone, retentionDays: this.config.usageRetentionDays }).markReworked(job.id);
       const fix = { kind: 'implement', auto: true, fixOf: i, agent: authors[0] || null, difficulty: Math.max(...deps.map(t => t.difficulty || 2)), estMinutes: 10,
         files: [...new Set(deps.flatMap(t => t.files || []))], dependsOn: [...node.dependsOn], skills: [],
         instruction: msg("srv.team.fix_node", { 0: node.dependsOn.map(d => 'T' + (d + 1)).join(', '), 1: i + 1 }),
@@ -1743,6 +1744,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           job.questions = open.slice(0, 5).map(f => `${f.id}: ${f.claim}${f.evidence ? ' — ' + f.evidence : ''}`.slice(0, 600)); job.status = 'waiting';
           this.event(job.id, 'controller', 'user', 'QUESTION', `${msg("srv.team.disagreement_needs_human")}\n${job.questions.join('\n')}`); break;
         }
+        usageFor(this.db, { timezone: this.config.timezone, retentionDays: this.config.usageRetentionDays }).markReworked(job.id);
         if (job.fast) { this.escalate(job, members, msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round })); break; }
         this.event(job.id, 'controller', members.manager, 'REWORK_REQUEST', msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round }));
         job.skipped = []; job.stage = 'plan'; job.planReason = 'rework';

@@ -134,6 +134,11 @@ export class UsageStore {
     return this.db.prepare('SELECT * FROM usage_log WHERE sourceKey=?').get(sourceKey);
   }
 
+  markReworked(job) {
+    return Number(this.db.prepare(`UPDATE usage_log SET reworked=1
+      WHERE job=? AND result='ok' AND reworked=0 AND stage IN ('implement','research','fix')`).run(text(job)).changes);
+  }
+
   backfill() {
     if (this.db.prepare("SELECT value FROM usage_meta WHERE key='events-backfill-v1'").get()) return 0;
     const tables = new Set(this.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r => r.name));
@@ -188,6 +193,7 @@ export class UsageStore {
         } else {
           const call = pending.get(key) || { job: row.job, agent, seq: row.seq, details: {}, usage: [] };
           save(call, { seq: row.seq, event }); pending.delete(key);
+          if (event.type === 'REVIEW_RESULT' && event.details?.verdict === 'changes_requested') this.markReworked(row.job);
         }
       }
       for (const call of pending.values()) if (call.usage.length) save(call);
