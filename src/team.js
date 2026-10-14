@@ -219,6 +219,7 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.memoryStore = new MemoryStore(this.db, redact); this.memoryReaders = new Map();
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
+    this.claudeUsage = adapters.claudeUsage || null;
     this.previewChrome = adapters.findChrome || findChrome;
     try { this.db.exec('ALTER TABLE member_stats ADD COLUMN est REAL'); } catch {}
     try { this.db.exec('ALTER TABLE sessions ADD COLUMN access TEXT'); } catch {}
@@ -624,6 +625,7 @@ export class Team extends EventEmitter {
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
+      quotaCheck: this.quotaCheck || null,
       resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, slots: used + cap.start, active: used, waitingReason: this.waitingReason },
     };
   }
@@ -2257,29 +2259,80 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     await Promise.race([this.refreshQuota().catch(() => {}), new Promise(r => setTimeout(r, 30_000))]);
   }
   async refreshQuota() {
-    if (this.refreshing || this.closed || this.accountLoginBusy) return; this.refreshing = true;
-    try {
-      for (const agent of this.config.agents) {
-        if (this.closed) break;
-        // Đang chạy việc: chỉ Codex không có sqlite_home mới đọc quota song song (SQLite riêng); còn lại hoãn, không mở chồng.
-        if (this.isBusy(agent.id) && (agent.provider !== 'codex' || this.sqliteOverride(agent.id))) continue;
-        let q;
+    if (this.closed || this.accountLoginBusy) return null;
+    if (this.refreshing) return this.quotaCheck;
+    this.refreshing = true;
+    const agents = [...this.config.agents], timeout = Symbol('timeout');
+    const check = this.quotaCheck = { running: true, startedAt: now(), finishedAt: null, total: agents.length, done: 0,
+      members: Object.fromEntries(agents.map(a => [a.id, { status: 'checking', at: null }])) };
+    let next = 0, stopped = false, refreshTimer, stopReads;
+    const stoppedRead = new Promise(resolve => { stopReads = resolve; });
+    const finish = (id, entry) => {
+      if (check.members[id].status !== 'checking') return;
+      check.members[id] = { ...entry, at: now() }; check.done++; this.emit('change');
+    };
+    const save = (id, q) => {
+      this.db.prepare('INSERT OR REPLACE INTO quotas VALUES (?,?)').run(id, JSON.stringify(q));
+      this.db.prepare('INSERT INTO quota_history (agent,body) VALUES (?,?)').run(id, JSON.stringify(q));
+    };
+    const read = async agent => {
+      try {
+        if (agent.provider === 'mock') throw new Error(msg('srv.team.demo_khong_co_quota_that'));
         if (agent.provider === 'claude') {
           const prev = this.quota(agent.id);
-          if (!prev.observed) { q = { status: 'unknown', buckets: [], note: msg("srv.team.claude_cli_chua_co_lenh_doc") }; this.db.prepare('INSERT OR REPLACE INTO quotas VALUES (?,?)').run(agent.id, JSON.stringify(q)); this.emit('change'); }
-          continue;
+          if (!prev.observed) this.db.prepare('INSERT OR REPLACE INTO quotas VALUES (?,?)').run(agent.id, JSON.stringify({ status: 'unknown', buckets: [], note: msg('srv.team.claude_cli_chua_co_lenh_doc') }));
+          if (this.isBusy(agent.id) || !this.claudeUsage) {
+            finish(agent.id, { status: 'skipped-busy', observedAt: prev.checkedAt || null, ...(!this.claudeUsage ? { reason: 'no-reader' } : {}) }); return;
+          }
+        } else if (this.isBusy(agent.id) && (agent.provider !== 'codex' || this.sqliteOverride(agent.id))) {
+          finish(agent.id, { status: 'skipped-busy', observedAt: this.quota(agent.id).checkedAt || null }); return;
         }
+        let timer, result;
+        // ponytail: timeouts do not kill child processes because readQuota does not accept an AbortSignal.
         try {
-          if (agent.provider === 'mock') throw new Error(msg("srv.team.demo_khong_co_quota_that"));
-          const result = await this.quotaRead(agent);
-          q = { ...scrub(result), checkedAt: now(), status: result.buckets.some(b => b.windows.some(w => w.remaining != null)) ? 'available' : 'unknown' };
-        } catch (e) { q = { checkedAt: now(), status: 'unknown', buckets: [], error: redact(e.message).slice(0, 1000) }; }
-        this.db.prepare('INSERT OR REPLACE INTO quotas VALUES (?,?)').run(agent.id, JSON.stringify(q));
-        this.db.prepare('INSERT INTO quota_history (agent,body) VALUES (?,?)').run(agent.id, JSON.stringify(q));
-        this.emit('change');
+          result = await Promise.race([
+            Promise.resolve().then(() => agent.provider === 'claude' ? this.claudeUsage(agent.id) : this.quotaRead(agent)),
+            new Promise(resolve => { timer = setTimeout(() => resolve(timeout), (this.config.quotaReadTimeoutSec ?? 60) * 1000); }),
+            stoppedRead,
+          ]);
+        } finally { clearTimeout(timer); }
+        if (stopped || this.closed) return;
+        if (result === timeout) {
+          if (agent.provider !== 'claude') save(agent.id, { checkedAt: now(), status: 'unknown', buckets: [], error: 'timeout' });
+          finish(agent.id, { status: 'timeout', reason: 'timeout' }); return;
+        }
+        if (agent.provider === 'claude') {
+          finish(agent.id, result.parsed ? { status: 'ok' } : { status: 'error', reason: redact(result.text || '').slice(0, 200) });
+        } else {
+          const q = { ...scrub(result), checkedAt: now(), status: result.buckets.some(b => b.windows.some(w => w.remaining != null)) ? 'available' : 'unknown' };
+          save(agent.id, q); finish(agent.id, { status: 'ok' });
+        }
+      } catch (e) {
+        if (stopped || this.closed) return;
+        const reason = redact(e?.message || String(e));
+        if (agent.provider !== 'claude') save(agent.id, { checkedAt: now(), status: 'unknown', buckets: [], error: reason.slice(0, 1000) });
+        finish(agent.id, { status: 'error', reason: reason.slice(0, 200) });
       }
-      this.db.exec('DELETE FROM quota_history WHERE seq NOT IN (SELECT seq FROM quota_history ORDER BY seq DESC LIMIT 10000)');
-    } finally { this.refreshing = false; }
+    };
+    const worker = async () => {
+      while (!stopped && !this.closed && next < agents.length) await read(agents[next++]);
+    };
+    try {
+      this.emit('change');
+      await Promise.race([
+        Promise.allSettled(Array.from({ length: Math.min(3, agents.length) }, worker)),
+        new Promise(resolve => { refreshTimer = setTimeout(resolve, (this.config.quotaRefreshMaxSec ?? 120) * 1000); }),
+      ]);
+    } finally {
+      stopped = true; stopReads(timeout); clearTimeout(refreshTimer);
+      try {
+        for (const agent of agents) if (check.members[agent.id].status === 'checking') finish(agent.id, { status: 'timeout', reason: 'timeout' });
+        this.db.exec('DELETE FROM quota_history WHERE seq NOT IN (SELECT seq FROM quota_history ORDER BY seq DESC LIMIT 10000)');
+      } finally {
+        check.finishedAt = now(); check.running = false; this.refreshing = false; this.emit('change');
+      }
+    }
+    return check;
   }
   async close() {
     if (this.dbClosed) return;

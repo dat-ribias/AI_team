@@ -34,6 +34,7 @@ const token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : randomBy
 if (!existsSync(tokenFile)) writeFileSync(tokenFile, token, { mode: 0o600 });
 const team = new Team(config, dataDir);
 const accounts = new Accounts(team, file, root);
+team.claudeUsage = id => accounts.usage(id);
 const port = config.port || 3333, origin = `http://127.0.0.1:${port}`;
 const cookieName = `team_session_${port}`;
 const clients = new Set();
@@ -138,7 +139,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && sessionRename) return send(res, 200, team.renameSession(sessionRename[1], (await body(req)).name));
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/comparisons') return send(res, 201, await team.createComparison(await body(req, 160e6)));
-    if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
+    if (req.method === 'POST' && url.pathname === '/api/quota') {
+      const p = team.refreshQuota(); p.catch(e => console.error(e.message));
+      return send(res, 202, { refreshing: true, ...(team.quotaCheck ? { done: team.quotaCheck.done, total: team.quotaCheck.total, running: team.quotaCheck.running } : {}) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
     const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer|evidence|evidence-file))?$/.exec(url.pathname);
     if (match) {
