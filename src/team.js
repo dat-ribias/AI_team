@@ -93,16 +93,29 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { re
 const normFindings = list => (Array.isArray(list) ? list : []).slice(0, 10).map((f, i) => f && typeof f === 'object'
   ? { ...f, id: String(f.id || `F${i + 1}`).slice(0, 20), claim: String(f.claim || f.problem || f.summary || '').slice(0, 1000), impact: ['high', 'medium', 'low'].includes(f.impact) ? f.impact : 'medium' }
   : { id: `F${i + 1}`, claim: String(f).slice(0, 1000), impact: 'medium' });
-// Tóm tắt các vòng sửa khi chạm giới hạn: finding mới xuất hiện sau khi owner bổ sung phạm vi được tính là 'owner', còn lại là lỗi builder.
+// Chỉ giữ nguồn khi cùng ID và claim đầy đủ; thứ tự báo cáo không chứng minh nguồn.
+const reworkFindings = (reports, scopeAdds = []) => {
+  const seen = new Map();
+  return reports.map((r, i) => !['review', 'verify'].includes(r.stage) ? [] : normFindings(r.findings).map(f => {
+    const key = JSON.stringify([f.id, f.claim]), prior = seen.get(key);
+    const source = prior || { first: i, origin: 'unknown', originReason: '', scopeAddId: '' };
+    const reason = typeof f.originReason === 'string' ? f.originReason.trim().slice(0, 1000) : '';
+    if (source.origin === 'unknown' && reason) {
+      if (f.origin === 'builder' && typeof f.evidence === 'string' && f.evidence.trim()) Object.assign(source, { origin: 'builder', originReason: reason });
+      if (f.origin === 'owner' && typeof f.scopeAddId === 'string' && scopeAdds.some(s => s.id === f.scopeAddId && Number.isInteger(s.reports) && s.reports >= 0 && s.reports <= source.first)) Object.assign(source, { origin: 'owner', originReason: reason, scopeAddId: f.scopeAddId });
+    }
+    seen.set(key, source);
+    return { ...f, origin: source.origin, originReason: source.originReason, scopeAddId: source.scopeAddId };
+  }));
+};
+// Tóm tắt các vòng sửa khi chạm giới hạn, giữ unknown cho dữ liệu thiếu bằng chứng.
 export function reworkDigest(job, limit) {
   const reports = job.reports || [], scopeAdds = job.scopeAdds || [], rounds = [];
-  let prev = -1;
+  const findings = reworkFindings(reports, scopeAdds);
   reports.forEach((r, i) => {
     if (r.stage === 'test' && String(r.summary || '').startsWith('Test failed')) { rounds.push({ n: rounds.length + 1, stage: 'test', agent: r.agent || 'controller', verdict: 'failed', summary: r.summary, findings: [] }); return; }
     if (!['review', 'verify'].includes(r.stage)) return;
-    const before = new Set(prev >= 0 ? normFindings(reports[prev].findings).map(f => f.id) : []), scoped = scopeAdds.some(s => prev < s.reports && s.reports <= i);
-    rounds.push({ n: rounds.length + 1, stage: r.stage, agent: r.agent, verdict: r.verdict, findings: normFindings(r.findings).map(f => ({ id: f.id, claim: f.claim.length > 120 ? f.claim.slice(0, 120) + '…' : f.claim, impact: f.impact, origin: !before.has(f.id) && scoped ? 'owner' : 'builder', open: false })) });
-    prev = i;
+    rounds.push({ n: rounds.length + 1, stage: r.stage, agent: r.agent, verdict: r.verdict, findings: findings[i].map(f => ({ id: f.id, claim: f.claim.length > 120 ? f.claim.slice(0, 120) + '…' : f.claim, impact: f.impact, origin: f.origin, open: false })) });
   });
   const last = rounds.at(-1), open = last && last.stage !== 'test' ? last.findings : [];
   open.forEach(f => { f.open = true; });
@@ -110,12 +123,16 @@ export function reworkDigest(job, limit) {
 }
 export function reworkSummaryText(d) {
   const lines = [msg('srv.team.rework_digest_head', { limit: d.limit, scope: d.scopeAdds })];
+  let lastStart = 1;
   for (const r of d.rounds) {
+    lastStart = lines.length;
     lines.push(msg('srv.team.rework_digest_round', { n: r.n, who: r.agent, stage: r.stage, verdict: r.verdict }));
-    for (const f of r.findings) lines.push(`  - [${f.id}] ${f.claim} (${msg(f.origin === 'owner' ? 'srv.team.rework_origin_owner' : 'srv.team.rework_origin_builder')}${f.open ? ', ' + msg('srv.team.rework_still_open') : ''})`);
+    for (const f of r.findings) lines.push(`  - [${f.id}] ${f.claim} (${msg(f.origin === 'owner' ? 'srv.team.rework_origin_owner' : f.origin === 'builder' ? 'srv.team.rework_origin_builder' : 'srv.team.rework_origin_unknown')}${f.open ? ', ' + msg('srv.team.rework_still_open') : ''})`);
   }
   const text = lines.join('\n');
-  return text.length > 7000 ? text.slice(0, 6999) + '…' : text;
+  if (text.length <= 7000) return text;
+  const last = lines.slice(lastStart).join('\n');
+  return lines.slice(0, lastStart).join('\n').slice(0, 6997 - last.length) + '\n…\n' + last;
 }
 const RISKY = /auth|login|password|passwd|(?:access|api|auth|refresh|jwt|bearer)[ _-]?token|secret|credential|permission|quyền|bảo mật|security|migrat|database|schema|\bdb\b|xóa (?:dữ liệu|data|bảng|db|database|tài khoản|user)|delete (?:data|table|user|account|database)|drop (?:table|database|column)|deploy|production|payment|thanh toán|refactor|kiến trúc|architecture|toàn bộ|whole project|nhiều file|many files|rewrite|viết lại/i;
 const RESEARCHY = /^(?!.*\b(fix|sửa|implement|thêm|add|tạo|create|update|cập nhật|đổi|change)\b).*(review|kiểm tra|nghiên cứu|so sánh|điều tra|tìm hiểu|giải thích|đánh giá|research|investigate|compare|explain|audit|analy[sz]e|phân tích|tại sao|why)/is;
@@ -675,6 +692,7 @@ export class Team extends EventEmitter {
       if (saved.titleBy === 'user' && !rename) { job.title = saved.title; job.titleBy = 'user'; }
       if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; job.acceptance = null; }
       if (Array.isArray(saved.messages) && saved.messages.length > (job.messages?.length || 0)) { job.messages = saved.messages; if (this.runs.has(job.id)) job.steered = true; }
+      if ((saved.scopeAdds?.length || 0) > (job.scopeAdds?.length || 0)) job.scopeAdds = saved.scopeAdds;
       // Bạn đổi người (control 'assign') trong lúc việc đang chạy: bản đang chạy lưu đè thì vẫn giữ lựa chọn đó.
       if ((saved.assignSeq || 0) > (job.assignSeq || 0)) {
         Object.assign(job, { assignSeq: saved.assignSeq, override: saved.override, roster: saved.roster, checkers: saved.checkers });
@@ -1234,6 +1252,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       // Task phụ thuộc (vd. tổng hợp sau T1, T2) cần chính kết quả của các task trước, không chỉ tên việc.
       ...(opts.task?.dependsOn?.length ? { inputs: this.inputsOf(job, opts.task.dependsOn).map(brief) } : {}), ...(opts.task?.handover ? { handover: opts.task.handover } : {}), ...(opts.task?.files?.length ? { files: opts.task.files } : {}), ...(job.round ? { lastChecks } : {}) };
     else if (['review', 'verify'].includes(stage)) scoped = { acceptance: job.planSummary, diff: opts.ranges ? opts.ranges.map(([a, b]) => `${a}..${b}`).join(' + ') : `${job.base}..${job.revision}`,
+      findingOrigins: { note: 'Use origin unknown unless supported by evidence. For owner, cite a recorded scopeAddId and explain in originReason how that addition caused this finding; a later timestamp, reused ID or keywords are not evidence. A finding present before the cited addition cannot originate from it. For builder, provide code/check evidence and originReason. Keep the same ID and exact claim when reporting the same unresolved finding.', scopeAdds: (job.scopeAdds || []).map(s => ({ ...s, message: job.messages[s.message]?.text })) },
       ...(opts.ranges ? { scope: 'Review ONLY this part of the job: the listed commit ranges (other tasks are reviewed separately).', taskContext: opts.task?.context || undefined } : {}),
       changedFiles: job.kind === 'research' ? undefined : (await Promise.all((opts.ranges || [[job.base, job.revision]]).map(([a, b]) => git(job.worktree, ['diff', '--stat', a, b])))).join('\n').split('\n').slice(-40).join('\n'),
       tests: job.kind === 'research' ? undefined : job.tested === job.revision ? 'all configured test commands passed on this revision' : 'not run',
@@ -1250,7 +1269,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const memory = stage === 'assess' ? null : await this.memoryContext(job, stage === 'final', opts.task || (['implement', 'research', 'review', 'verify'].includes(stage) ? { instruction, files: [] } : null), opts.worktree || job.worktree);
     if (opts.task && memory) opts.task.memoryIds = memory.records.map(r => r.id);
     const context = JSON.stringify({ ...common, ...(memory ? { memory } : {}), ...scoped });
-    const finding = '{"id":"F1","claim":"what is wrong","failsWhen":"input or condition that breaks it","evidence":"file:line or command output","check":"how to confirm","impact":"high|medium|low"}';
+    const finding = '{"id":"F1","claim":"what is wrong","failsWhen":"input or condition that breaks it","evidence":"file:line or command output","check":"how to confirm","impact":"high|medium|low"' + (['review', 'verify'].includes(stage) ? ',"origin":"owner|builder|unknown","scopeAddId":"recorded scope addition id, only for owner","originReason":"evidence explaining the source; unknown if unproven"' : '') + '}';
     let shape = stage === 'challenge' ? `{"summary":"one sentence","status":"completed","objections":[${finding}]}`
       : stage === 'plan'
       ? `{"summary":"at most 2 sentences: approach and delegation rationale; do not restate the goal","title":"short job title ≤60 chars in the goal's language","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task","context":"files:lines, symbols, callers/callees and pitfalls the builder needs","files":["paths this task edits"],"dependsOn":[],"estMinutes":10}],"reviewSkills":["optional skills for the reviewer/verifier"],"flow":{"reviewer":"optional member id","verifier":"optional member id","steps":["optional subset of review,verify,final"]},"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
@@ -1406,6 +1425,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     job.durations = [...(job.durations || []), Date.now() - started].slice(-20);
     // Đo thật tốc độ và token mỗi lượt để Lead cân nhắc nhanh-nhưng-tốn hay rẻ-nhưng-chậm; est để học hệ số ETA.
     this.db.prepare('INSERT INTO member_stats (agent, model, effort, stage, ms, tokens, at, est) VALUES (?,?,?,?,?,?,?,?)').run(agentId, agent.model || '', agent.effort || '', stage, Date.now() - started, tokens, now(), opts.task?.estMinutes || null);
+    if (['review', 'verify'].includes(stage)) report.findings = reworkFindings([...job.reports, { stage, findings: report.findings }], job.scopeAdds).at(-1);
     const entry = { ...scrub(report), agent: agentId, stage, revision: job.revision, ...(opts.taskIndex != null ? { task: opts.taskIndex } : {}) };
     job.reports.push(entry);
     this.event(job.id, agentId, stage === 'final' ? 'user' : agentId === members.manager ? 'controller' : members.manager, stage === 'review' ? 'REVIEW_RESULT' : 'RESULT', report.summary, report);
@@ -2027,7 +2047,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         const limit = (this.config.maxReworkRounds ?? 3) + (job.scopeAdds?.length || 0) + (job.extraRounds || 0);
         if (job.round + 1 > limit) {
           job.reworkDigest = reworkDigest(job, limit);
-          const open = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).filter(f => f.impact === 'high');
+          const open = job.reworkDigest.rounds.at(-1)?.stage === 'test' ? [] : normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).filter(f => f.impact === 'high');
           if (!open.length) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest));
           job.error = msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest);
           job.questions = open.slice(0, 5).map(f => `${f.id}: ${f.claim}${f.evidence ? ' — ' + f.evidence : ''}`.slice(0, 600)); job.status = 'waiting';
@@ -2254,7 +2274,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const names = await this.attach(job, payload.files);
       job.messages.push({ time: now(), text: payload.message.trim(), ...(names.length ? { attachments: names } : {}) });
       // Đã có plan (trừ trả lời cổng duyệt plan / câu hỏi của teammate) = owner bổ sung phạm vi: nới giới hạn vòng sửa +1.
-      if ((job.plans?.length || job.tasks.length) && !job.planGate && !job.peerWait) (job.scopeAdds ||= []).push({ at: now(), round: job.round, reports: job.reports.length });
+      if ((job.plans?.length || job.tasks.length) && !job.planGate && !job.peerWait) (job.scopeAdds ||= []).push({ id: randomUUID(), at: now(), round: job.round, reports: job.reports.length, message: job.messages.length - 1 });
       // Steering invalidates a ready-to-merge result; it must go through planning/review again.
       if (job.status === 'ready') { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); job.planGate = null; job.reviewed = job.verified = job.tested = null; }
       if (job.status === 'waiting') { if (!job.peerWait) { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); } job.planGate = null; job.questions = null; delete job.peerWait; }
