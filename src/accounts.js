@@ -265,12 +265,14 @@ export class Accounts {
   }
   async models(id) { return listModels(this.team.agent(id)); }
   // Nút "Kiểm tra quota": gửi /usage như gõ tay rồi đọc phần trăm. Có thể tốn một lượt nhỏ nếu CLI coi đó là prompt.
-  async usage(id) {
+  async usage(id, { signal } = {}) {
+    signal?.throwIfAborted();
     const agent = this.team.agent(id);
     if (agent.provider !== 'claude') throw new Error(msg("srv.accounts.chi_dung_cho_thanh_vien_claude"));
     if (this.team.isBusy(id)) throw new Error(msg("srv.accounts.thanh_vien_dang_chay_viec_thu"));
     const result = await run(this.command(agent), ['-p', '--output-format', 'stream-json', '--verbose', '--tools', '', '--no-session-persistence'],
-      { env: childEnv(agent), cwd: agent.home, input: '/usage', allowFailure: true, timeoutMs: 120_000 });
+      { env: childEnv(agent), cwd: agent.home, input: '/usage', allowFailure: true, timeoutMs: 120_000, signal });
+    signal?.throwIfAborted();
     let resultText = '', assistantText = '';
     let limitsReport = null;
     for (const line of result.stdout.split(/\r?\n/)) {
@@ -350,7 +352,7 @@ export class Accounts {
     if (!buckets.length) {
       try {
         const token = JSON.parse(readFileSync(join(agent.home, '.credentials.json'), 'utf8')).claudeAiOauth?.accessToken;
-        const res = token && await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(15000) });
+        const res = token && await fetch('https://api.anthropic.com/api/oauth/usage', { headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000) });
         if (res && !res.ok) text += `\n[oauth/usage HTTP ${res.status}]`;
         const u = res?.ok ? await res.json() : {};
         for (const [key, id2, name, minutes] of [['five_hour', 'claude-session', 'Current session', 300], ['seven_day', 'claude-weekly', 'Current week (all models)', 10080]]) {
@@ -360,9 +362,9 @@ export class Accounts {
         }
       } catch (e) { text += `\n[oauth/usage: ${e.message}]`; }
     }
+    signal?.throwIfAborted();
     if (buckets.length) this.team.saveObserved(id, buckets);
-    const quota = this.team.quota(id);
-    return { parsed: buckets.length > 0 || !!quota.observed, buckets, text: redact(text || result.stderr || result.stdout).trim().slice(0, 3000) };
+    return { parsed: buckets.length > 0, buckets, text: redact(text || result.stderr || result.stdout).trim().slice(0, 3000) };
   }
   openTerminal(id) {
     const agent = this.team.agent(id); this.assertLoginAllowed(agent);

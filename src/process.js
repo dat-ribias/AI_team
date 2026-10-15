@@ -69,13 +69,16 @@ export function childEnv(agent) {
   return env;
 }
 
+// 128 = process does not exist or has already exited; consider it killed.
+export function taskkillSucceeded(code) { return code === 0 || code === 128; }
+
 export async function killTree(child) {
   if (!child?.pid) return;
   if (process.platform === 'win32') {
     if (child.exitCode !== null || child.signalCode) return;
     await new Promise((resolve, reject) => {
       const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
-      killer.on('error', reject); killer.on('close', code => code === 0 ? resolve() : reject(new Error(`taskkill failed (${code})`)));
+      killer.on('error', reject); killer.on('close', code => taskkillSucceeded(code) ? resolve() : reject(new Error(`taskkill failed (${code})`)));
     });
   } else {
     try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
@@ -111,8 +114,19 @@ export function run(command, args = [], options = {}) {
     const aborted = () => stop(options.signal.reason);
     options.signal?.addEventListener('abort', aborted, { once: true });
     if (options.signal?.aborted) aborted();
-    const timer = setTimeout(() => stop('Process timed out'), options.timeoutMs || 30 * 60_000);
+    const timer = setTimeout(() => {
+      const error = new Error('Process timed out'); error.timeout = 'max'; stop(error);
+    }, options.timeoutMs || 30 * 60_000);
+    let idleTimer, closed = false;
+    const resetIdle = () => {
+      clearTimeout(idleTimer);
+      if (options.idleTimeoutMs && !closed && !stopping) idleTimer = setTimeout(() => {
+        const error = new Error(`Agent silent for ${options.idleTimeoutMs / 60_000} min`); error.timeout = 'idle'; stop(error);
+      }, options.idleTimeoutMs);
+    };
+    resetIdle();
     function chunk(stream, value) {
+      resetIdle();
       if (stream === 'stdout') stdout = (stdout + value).slice(-2_000_000);
       else stderr = (stderr + value).slice(-32_000);
       buffers[stream] += value;
@@ -129,7 +143,7 @@ export function run(command, args = [], options = {}) {
     child.stdin.on('error', error => { if (error.code !== 'EPIPE') stop(error.message); });
     child.on('error', error => { failure = error; });
     child.on('close', async code => {
-      clearTimeout(timer); options.signal?.removeEventListener('abort', aborted);
+      closed = true; clearTimeout(timer); clearTimeout(idleTimer); options.signal?.removeEventListener('abort', aborted);
       await termination;
       for (const stream of ['stdout', 'stderr']) {
         chunk(stream, decoders[stream].end());

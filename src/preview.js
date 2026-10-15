@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { killTree } from './process.js';
 import { msg } from './i18n.js';
+import { DEMO } from './capabilities.js';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 export function validatePreview(p) {
@@ -28,9 +29,9 @@ export function previewEnv(port) {
   for (const [key, value] of Object.entries(process.env)) if (allowed.has(key.toLowerCase())) env[key] = value;
   return { ...env, PORT: String(port), BROWSER: 'none' };
 }
-export function startServer({ command, cwd, port }) {
+export function startServer({ command, cwd, port, env: extraEnv }) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(msg('srv.preview.invalid_config', { 0: 'port' }));
-  const cmd = command.replaceAll('{port}', String(port)), env = previewEnv(port);
+  const cmd = command.replaceAll('{port}', String(port)), env = { ...previewEnv(port), ...extraEnv };
   const child = process.platform === 'win32'
     ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', cmd], { cwd, env, windowsHide: true, windowsVerbatimArguments: true })
     : spawn('/bin/sh', ['-c', cmd], { cwd, env, detached: true });
@@ -70,6 +71,30 @@ export async function stopTree(pid) {
   if (!pid) return;
   try { await killTree({ pid, exitCode: null }); }
   catch (error) { try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') return; } if (error.code !== 'ESRCH') throw error; }
+}
+export async function startDemoServer({ command, cwd, portRange, exclude = [], maxMinutes = DEMO.maxMinutes, readyPath = '/', timeoutSec = 120 }) {
+  if (!Number.isFinite(maxMinutes) || maxMinutes <= 0) throw new Error('Invalid demo server lifetime');
+  const port = await freePort(portRange, [...DEMO.reservedPorts, ...exclude]);
+  const dataDir = mkdtempSync(join(tmpdir(), 'ai-team-demo-'));
+  let server, timer, stopping;
+  const stop = () => stopping ||= (async () => {
+    clearTimeout(timer);
+    try { await stopTree(server?.pid); }
+    finally {
+      for (let attempt = 0; ; attempt++) {
+        try { rmSync(dataDir, { recursive: true, force: true }); break; }
+        catch (error) { if (attempt >= 20 || !['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error; await delay(100); }
+      }
+    }
+  })();
+  const url = `http://127.0.0.1:${port}`, lifetime = Math.min(maxMinutes, DEMO.maxMinutes) * 60_000;
+  const stopsAt = new Date(Date.now() + lifetime).toISOString();
+  try {
+    server = startServer({ command: command.replaceAll('{dataDir}', dataDir), cwd, port, env: { DATA_DIR: dataDir } });
+    timer = setTimeout(() => { stop().catch(error => { server.child.previewError = error; }); }, lifetime); timer.unref();
+    await waitReady(url + readyPath, timeoutSec, server.child);
+    return { url, port, dataDir, pid: server.pid, stopsAt, stop };
+  } catch (error) { await stop(); throw error; }
 }
 export function findChrome() {
   const candidates = [process.env.CHROME_PATH];

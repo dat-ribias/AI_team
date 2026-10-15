@@ -1,3 +1,6 @@
+[Tổng quan dự án](docs/OVERVIEW.md)
+[Lịch sử thay đổi](CHANGELOG.md)
+[Việc còn mở](docs/ROADMAP.md)
 # AI Team Control Room
 
 Dashboard local điều phối một đội AI CLI (Codex, Claude Code, Antigravity/Gemini) trên repo của bạn: Manager lập kế hoạch, Builder làm, Reviewer/Verifier kiểm tra, bạn duyệt merge. Chạy Node.js 24, SQLite có sẵn trong Node và SDK MCP chính thức. Giao diện không cần build, Docker, React hay dịch vụ cloud riêng.
@@ -294,7 +297,9 @@ Codex và Claude có thêm hai công cụ MCP `team_memory.memory_search` / `mem
 
 Mặc định CLI vẫn mở phiên mới. Có thể thử `"resumeCodexTasks": true` trong cấu hình: Codex dùng `exec resume` khi tiếp tục cùng task implement, cùng tài khoản/profile, worktree, slot và quyền. Đổi các điều kiện đó sẽ mở phiên mới; review/verify luôn có ngữ cảnh riêng. Đây là tối ưu thử nghiệm, không chuyển phiên CLI giữa máy hoặc tài khoản.
 
-- **Sao lưu**: `VACUUM INTO` vào `backupDir` (mặc định `<dataDir>/backups`), tự động mỗi ngày và trước khi xóa việc/phiên, giữ `backupKeep` bản (14). Tắt bằng `"backup": false`. Khôi phục: dừng server, chép bản sao lưu đè lên `team.sqlite`.
+- **Sao lưu**: `VACUUM INTO` vào `backupDir` (mặc định `<dataDir>/backups`), tự động mỗi ngày và trước khi xóa việc/phiên. `maxBackups` là số nguyên ≥1 (mặc định `backupKeep ?? 14`), `maxBackupMB` là số ≥0 (mặc định 2048 MiB); dọn theo cả hai giới hạn, luôn giữ bản mới nhất. Tắt bằng `"backup": false`. Khôi phục: dừng server, chép bản sao lưu đè lên `team.sqlite`.
+- **Dọn dẹp**: `cleanupOnMerge` là boolean (mặc định `true`): khi merge, hủy hoặc nghiên cứu xong, dừng preview, gỡ worktree của việc và chỉ xóa branch `ai-team/*` đã merge; branch chưa merge được giữ. ACTIVITY được archive JSON gzip đầy đủ vào evidence trước khi thay bằng một ACTIVITY_SUMMARY. `cleanupOnMerge: false` giữ hành vi gỡ Git cũ khi merge và không nén event của việc merged.
+- **Lưu trữ**: `retentionDays` là số >0 (mặc định 30 ngày) cho evidence của việc đã kết thúc. Dọn khi khởi động và mỗi 24 giờ, gồm worktree/branch sót của việc đã kết thúc, backup, evidence hết hạn, Chrome profile và session CLI quá 30 ngày; giữ UUID session của việc chưa kết thúc. Mọi lần dọn ghi manifest tại `<dataDir>/cleanup`, chỉ xóa trong dataDir và thư mục session CLI của member. Dashboard cảnh báo dataDir >1 GiB hoặc ổ trống <10 GB; “Xem trước dọn dẹp” dùng GET `/api/cleanup`, “Dọn ngay” dùng POST cùng id manifest mới nhất (hết hạn sau 10 phút).
 - **Xuất**: nút "Xuất" ở việc → file Markdown (mục tiêu, kế hoạch, báo cáo, trao đổi, diff).
 - **Xuất/nhập memory**: trong 🧠, tải JSON chứa các fact và lịch sử, rồi nhập vào dự án trên máy khác. UID giúp tránh trùng; xung đột được đếm và giữ bản hiện có. Ghi chú riêng của job thiếu job tương ứng được đánh dấu `stale`. Gói này không chứa lịch sử CLI, tóm tắt phiên hoặc cấu hình tài khoản.
 - **Chuyển việc đang làm**: tạm dừng việc, bấm "Chuyển máy" để xuất JSON gồm Git bundle, file sửa dở (cả binary/file mới/xóa), checkpoint, báo cáo và memory. Máy đích cần repo ở đúng base commit; nhập JSON qua 🧠. Job mới được tạo ở trạng thái tạm dừng, Manager kiểm tra code và lập kế hoạch tiếp; tests/review/duyệt cũ không được dùng để merge. Bundle và file sửa dở mỗi loại tối đa 50 MiB; hiện hỗ trợ một repo. Gói không xuất đăng nhập/quyền/phiên CLI; các đường dẫn credential thông dụng bị từ chối cả trong lịch sử Git. Gói vẫn chứa code và lịch sử repo, nên chỉ chia sẻ với nơi được phép nhận code đó.
@@ -316,3 +321,9 @@ npm test
 Kiểm tra parser/quota, argv không qua shell, timeout tiến trình, pipeline Git thật, chặn thay đổi sau approval, merge có điều kiện, persistence, pause/resume/reassign, test failure và config không hợp lệ. Test dùng agent giả; chất lượng AI thật chỉ đánh giá được qua job thật.
 
 Nghiên cứu và nguồn: [RESEARCH.md](RESEARCH.md).
+
+## Thống kê Token
+
+Tab Token tổng hợp lượt gọi AI theo ngày, dự án, phiên, job, member, stage và model; có so sánh với kỳ trước và xuất CSV. Kỳ ngày/tuần/tháng dùng múi giờ cấu hình (mặc định `Asia/Tokyo`), tuần bắt đầu thứ Hai. Ngày kết thúc tùy chọn được tính hết ngày; API dùng khoảng `[from, to)`. Số đo provider không trả được giữ là `null`; giao diện báo số lượt thiếu số đo, không tự suy ra token. Gợi ý tối ưu chỉ là văn bản, không đổi cấu hình.
+
+SQLite `usage_log` lưu riêng từng lượt gọi AI, kể cả lỗi. Bảng này **không bị nén hoặc dọn cùng ACTIVITY và retention event/job**. Retention riêng mặc định **365 ngày**. Backfill từ event cũ chạy một lần và có tính idempotent: chạy lại không tạo bản ghi trùng. Snapshot `job.durations` có thể chỉ giữ các lượt gần nhất; dòng usage trong job ưu tiên thống kê đầy đủ từ API usage.

@@ -67,6 +67,29 @@ function duration(minutes) {
   const m = Math.max(0, Math.round(minutes)), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), r = m % 60;
   return [d && t('ui.time.days', { n: d }), h && t('ui.time.hours', { n: h }), r && t('ui.time.minutes', { n: r })].filter(Boolean).join(' ') || t('ui.time.minutes', { n: 0 });
 }
+function activityInfo(at) {
+  const minutes = Math.max(0, (Date.now() - Date.parse(at)) / 60000);
+  const warn = Number.isFinite(minutes) && minutes > (state?.silenceWarnMin ?? 5);
+  return { warn, text: (warn ? '⚠ ' : '') + t('ui.progress.lastActivity', { time: duration(Number.isFinite(minutes) ? minutes : 0) }) };
+}
+const activityRunKey = run => JSON.stringify([run.agent, run.task ?? null, run.stage ?? null, run.startedAt ?? null]);
+function activityHTML(run, job) {
+  const at = run.lastActivityAt || run.startedAt, info = activityInfo(at);
+  return `<div class="run-activity${info.warn ? ' silence-warn' : ''}" data-activity-at="${esc(at)}"><span data-activity-label>${esc(info.text)}</span><span class="activity-actions" ${info.warn ? '' : 'hidden'}><button type="button" data-activity-check="${esc(activityRunKey(run))}" data-activity-job="${esc(job.id)}">${esc(t('ui.progress.check'))}</button><button type="button" data-activity-pause="${esc(job.id)}">${esc(t('ui.progress.stop'))}</button></span></div>`;
+}
+function updateActivities() {
+  document.querySelectorAll('[data-activity-at]').forEach(el => {
+    const info = activityInfo(el.dataset.activityAt);
+    el.classList.toggle('silence-warn', info.warn);
+    el.querySelector('[data-activity-label]').textContent = info.text;
+    el.querySelector('.activity-actions').hidden = !info.warn;
+  });
+}
+function jobEta(job) {
+  if (job.overMinutes > 0) return t('ui.eta.over', { time: duration(job.overMinutes) });
+  if (job.eta == null) return '';
+  return t(job.eta <= 0 ? 'ui.eta.over' : 'ui.eta', { time: duration(Math.abs(job.eta)) });
+}
 const untilReset = time => { const ms = Date.parse(time) - Date.now(); return Number.isFinite(ms) && ms > 0 ? ' · ' + t('ui.quota.left', { time: duration(ms / 60000) }) : ''; };
 function quotaPercent(q) {
   if ('pct' in q) return q.pct == null ? null : Math.round(q.pct); // server đã lọc theo nhóm model (agy: Gemini vs Claude/GPT)
@@ -243,9 +266,180 @@ function svgText({ text, x, y, cls, maxW, baseSize = 12, minSize = 7.8 }) {
 const deletable = j => !['running', 'queued', 'merging'].includes(j.status);
 const runningOf = j => j?.status === 'running' ? (j.running?.length ? j.running : j.current ? [j.current] : []) : [];
 const nodeOfRun = r => ({ plan: 'manager', challenge: 'manager', final: 'manager', implement: 'b:' + r.agent, research: 'b:' + r.agent, review: 'reviewer', verify: 'verifier' })[r.stage] || null;
+// ---- Token: isolated usage report view ----
+let tokenFilter = { period: 'today', project: '', session: '', job: '', from: '', to: '' }, tokenRequest = 0, tokenReports, tokenTimezone;
+const tokenNumber = value => value == null ? '—' : Number(value).toLocaleString(LOCALE_TAG[lang], { maximumFractionDigits: 1 });
+const tokenShift = (day, count) => new Date(Date.parse(day + 'T00:00:00Z') + count * 86400000).toISOString().slice(0, 10);
+function tokenDay(date, timezone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date).map(p => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+function tokenRange(timezone, now = new Date()) {
+  const today = tokenDay(now, timezone);
+  let from = today, to = tokenShift(today, 1);
+  if (tokenFilter.period === 'week') { from = tokenShift(today, -((new Date(today + 'T00:00:00Z').getUTCDay() + 6) % 7)); to = tokenShift(from, 7); }
+  if (tokenFilter.period === 'month') { from = today.slice(0, 7) + '-01'; const end = new Date(from + 'T00:00:00Z'); end.setUTCMonth(end.getUTCMonth() + 1); to = end.toISOString().slice(0, 10); }
+  if (tokenFilter.period === 'custom') { from = tokenFilter.from; to = tokenFilter.to ? tokenShift(tokenFilter.to, 1) : ''; }
+  return { from, to };
+}
+const tokenJobCache = new Map();
+function tokenJobLink(job) {
+  const key = `${job.id}:${job.usage?.calls}:${job.usage?.tokens}:${job.status}`, cached = tokenJobCache.get(key);
+  if (!cached && job.createdAt) {
+    tokenJobCache.set(key, {});
+    api('usage?' + new URLSearchParams({ job: job.id, from: job.createdAt, to: new Date().toISOString(), groupBy: 'job' })).then(report => {
+      const totals = report.totals; tokenJobCache.set(key, totals);
+      document.querySelectorAll('[data-token-job]').forEach(link => { if (link.dataset.tokenJob === job.id && link.closest('.token-job-usage')) link.textContent = t('ui.token.jobUsage', { tokens: tokenNumber(totals.tokens), calls: tokenNumber(totals.calls), minutes: tokenNumber(totals.unknownDurationCalls ? null : totals.durationMs / 60000) }); });
+    }).catch(() => {});
+  }
+  const ms = cached?.durationMs != null && !cached.unknownDurationCalls ? cached.durationMs : null;
+  return `<p class="token-job-usage"><a href="#token" data-token-job="${esc(job.id)}">${esc(t('ui.token.jobUsage', { tokens: tokenNumber(cached?.tokens ?? job.usage?.tokens), calls: tokenNumber(cached?.calls ?? job.usage?.calls), minutes: tokenNumber(ms == null ? null : ms / 60000) }))}</a></p>`;
+}
+document.addEventListener('click', e => {
+  const link = e.target.closest('[data-token-job]');
+  if (!link) return;
+  e.preventDefault();
+  const job = state.jobs.find(j => j.id === link.dataset.tokenJob);
+  tokenFilter.job = link.dataset.tokenJob; tokenFilter.project = job?.project || ''; tokenFilter.session = job?.sessionId || '';
+  if (job?.createdAt) { const timezone = tokenTimezone || state.usageTimezone || state.timezone || 'Asia/Tokyo'; tokenFilter.period = 'custom'; tokenFilter.from = tokenDay(new Date(job.createdAt), timezone); tokenFilter.to = tokenDay(new Date(), timezone); }
+  view('token');
+});
+function tokenCSV(rows) {
+  return rows.map(row => row.map(value => '"' + String(value ?? '').replace(/"/g, '""') + '"').join(',')).join('\r\n');
+}
+function tokenExport() {
+  if (!tokenReports) return;
+  const rows = [['from', 'to', 'timezone', 'groupBy', 'key', 'tokens', 'calls', 'durationMs', 'tokensPerMinute', 'wasteRatio', 'unknownTokenCalls', 'unknownDurationCalls']];
+  for (const report of Object.values(tokenReports)) for (const row of [{ key: 'total', ...report.totals }, ...report.groups]) rows.push([report.from, report.to, report.timezone, report.groupBy, row.key, row.tokens, row.calls, row.durationMs, row.tokensPerMinute, row.wasteRatio, row.unknownTokenCalls, row.unknownDurationCalls]);
+  const url = URL.createObjectURL(new Blob(['\uFEFF', tokenCSV(rows)], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a'); link.href = url; link.download = 'usage.csv'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function tokenRanking(report) {
+  const jobGroup = report.groupBy === 'job';
+  return `<section class="panel token-ranking"><h3>${esc(t('ui.token.' + report.groupBy))}</h3><div class="token-table-wrap"><table><thead><tr>${['name', 'tokens', 'minutes', 'calls', ...(jobGroup ? ['fixes'] : [])].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${[...report.groups].sort((a, b) => b.tokens - a.tokens).map(row => {
+    const job = jobGroup && state.jobs.find(j => j.id === row.key);
+    const label = job ? job.goal : report.groupBy === 'agent' ? names[row.key] || row.key : row.key;
+    return `<tr><th scope="row">${jobGroup ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(label || t('ui.common.unknown'))}</a>` : esc(label || t('ui.common.unknown'))}${job ? `<small>${esc(row.key)}</small>` : ''}</th><td>${tokenNumber(row.tokens)}</td><td>${tokenNumber(row.durationMs / 60000)}</td><td>${tokenNumber(row.calls)}</td>${jobGroup ? `<td>${tokenNumber(job ? job.round ?? null : null)}</td>` : ''}</tr>`;
+  }).join('') || `<tr><td colspan="${jobGroup ? 5 : 4}">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
+}
+async function drawToken() {
+  if (!state) return;
+  const request = ++tokenRequest, root = $('token-view'); tokenReports = null;
+  const timezone = tokenTimezone || state.usageTimezone || state.timezone || 'Asia/Tokyo';
+  const range = tokenRange(timezone), projects = state.projects, sessions = state.sessions.filter(s => !tokenFilter.project || s.project === tokenFilter.project);
+  root.innerHTML = `<div class="panel token-toolbar"><div class="panel-heading"><h2 id="token-title">${esc(t('ui.token.title'))}</h2><button id="token-export" disabled>${esc(t('ui.token.csv'))}</button></div><form id="token-form" class="token-filters"><label>${esc(t('ui.token.period'))}<select id="token-period">${['today', 'week', 'month', 'custom'].map(k => `<option value="${k}" ${tokenFilter.period === k ? 'selected' : ''}>${esc(t('ui.token.' + k))}</option>`).join('')}</select></label><label>${esc(t('ui.task.project'))}<select id="token-project"><option value="">${esc(t('ui.token.all'))}</option>${projects.map(p => `<option value="${esc(p.id)}" ${p.id === tokenFilter.project ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select></label><label>${esc(t('ui.token.session'))}<select id="token-session"><option value="">${esc(t('ui.token.all'))}</option>${sessions.map(s => `<option value="${esc(s.id)}" ${s.id === tokenFilter.session ? 'selected' : ''}>${esc(s.name || s.id)}</option>`).join('')}</select></label><label ${tokenFilter.period !== 'custom' ? 'hidden' : ''}>${esc(t('ui.token.from'))}<input id="token-from" type="date" value="${esc(tokenFilter.from)}" required></label><label ${tokenFilter.period !== 'custom' ? 'hidden' : ''}>${esc(t('ui.token.to'))}<input id="token-to" type="date" value="${esc(tokenFilter.to)}" required></label><button type="submit">${esc(t('ui.token.apply'))}</button></form><p class="token-range muted">${esc(range.from)} – ${esc(range.to)} · ${esc(timezone)} · ${esc(t('ui.token.exclusive'))}</p>${tokenFilter.job ? `<p class="token-range">${esc(t('ui.token.job'))}: ${esc(tokenFilter.job)} <button id="token-clear-job">${esc(t('ui.token.clearJob'))}</button></p>` : ''}</div><div id="token-data" aria-live="polite" aria-busy="true">${esc(t('ui.token.loading'))}</div>`;
+  $('token-period').onchange = e => { tokenFilter.period = e.target.value; if (tokenFilter.period === 'custom') { tokenFilter.from ||= range.from; tokenFilter.to ||= tokenShift(range.to, -1); } drawToken(); };
+  $('token-project').onchange = e => { tokenFilter.project = e.target.value; tokenFilter.session = ''; tokenFilter.job = ''; drawToken(); };
+  $('token-session').onchange = e => { tokenFilter.session = e.target.value; tokenFilter.job = ''; drawToken(); };
+  for (const key of ['from', 'to']) { $('token-' + key).disabled = tokenFilter.period !== 'custom'; $('token-' + key).onchange = e => { tokenFilter[key] = e.target.value; }; }
+  $('token-form').onsubmit = e => { e.preventDefault(); drawToken(); };
+  $('token-export').onclick = tokenExport;
+  if ($('token-clear-job')) $('token-clear-job').onclick = () => { tokenFilter.job = ''; drawToken(); };
+  try {
+    if (!range.from || !range.to || range.from >= range.to) throw new Error(t('ui.token.invalidRange'));
+    const query = { ...range, project: tokenFilter.project, session: tokenFilter.session, job: tokenFilter.job };
+    const get = (groupBy, dates = {}) => api('usage?' + new URLSearchParams({ ...query, ...dates, groupBy }));
+    const reports = await Promise.all(['day', 'job', 'agent', 'stage', 'model'].map(k => get(k)));
+    if (request !== tokenRequest) return;
+    if (reports[0].timezone && reports[0].timezone !== timezone) { tokenTimezone = reports[0].timezone; return drawToken(); }
+    const daily = reports[0], days = [...daily.groups].sort((a, b) => a.key.localeCompare(b.key)), members = new Map();
+    // Fetch real member totals within each day's bounds; never distribute totals by guesswork.
+    for (let i = 0; i < days.length; i += 4) {
+      const batch = await Promise.all(days.slice(i, i + 4).map(day => get('agent', { from: day.key, to: tokenShift(day.key, 1) })));
+      if (request !== tokenRequest) return;
+      batch.forEach((report, n) => members.set(days[i + n].key, report.groups));
+    }
+    tokenReports = Object.fromEntries(reports.map(r => [r.groupBy, r]));
+    const totals = daily.totals, change = daily.change || {}, colors = ['#3182ce', '#d69e2e', '#38a169', '#805ad5', '#dd6b20', '#d53f8c'];
+    const agents = reports[2].groups.map(r => r.key).sort(), color = id => colors[agents.indexOf(id) % colors.length];
+    const max = Math.max(1, ...days.map(d => d.tokens));
+    const comparison = (value, points = false) => value == null ? t('ui.token.noBaseline') : `${value > 0 ? '+' : ''}${tokenNumber(value)}${points ? ' ' + t('ui.token.points') : '%'} ${t('ui.token.previous')}`;
+    const cards = [['tokens', tokenNumber(totals.tokens), change.tokensPercent], ['calls', tokenNumber(totals.calls), change.callsPercent], ['minutes', tokenNumber(totals.durationMs / 60000), change.durationPercent], ['waste', tokenNumber(totals.wasteRatio * 100) + '%', change.wasteRatioPoints]];
+    const stage = reports[3].groups.find(r => r.key === 'review'), wasted = [...reports[1].groups].sort((a, b) => b.wastedTokens - a.wastedTokens)[0];
+    const tips = [];
+    if (totals.tokens && stage?.tokens / totals.tokens > .4) tips.push(t('ui.token.reviewTip'));
+    if (totals.wastedCalls) tips.push(t('ui.token.wasteTip', { job: wasted?.key || '—' }));
+    // SVG presentation attributes render under CSP without inline styles or flex sizing.
+    const column = day => {
+      let y = 180;
+      const bars = (members.get(day.key) || []).map(row => {
+        const height = row.tokens / max * 180; y -= height;
+        return `<rect x="0" y="${y}" width="46" height="${height}" fill="${color(row.key)}"><title>${esc(day.key + ' · ' + (names[row.key] || row.key) + ': ' + tokenNumber(row.tokens))}</title></rect>`;
+      }).join('');
+      return `<div class="token-column"><span>${tokenNumber(day.tokens)}</span><svg class="token-stack" viewBox="0 0 46 180" preserveAspectRatio="none" aria-hidden="true">${bars}</svg><small>${esc(day.key.slice(5))}</small></div>`;
+    };
+    $('token-data').innerHTML = `<div class="token-totals">${cards.map(([k, value, delta]) => `<div class="metric"><span>${esc(t('ui.token.' + k))}</span><strong>${esc(value)}</strong><small>${esc(comparison(delta, k === 'waste'))}</small></div>`).join('')}</div><p class="token-range muted">${esc(t('ui.token.rate', { rate: tokenNumber(totals.tokensPerMinute) }))}${totals.unknownTokenCalls || totals.unknownDurationCalls ? ' · ' + esc(t('ui.token.partial', { tokens: totals.unknownTokenCalls, durations: totals.unknownDurationCalls })) : ''}</p><section class="panel token-chart-panel"><h3>${esc(t('ui.token.daily'))}</h3><div class="token-legend">${agents.map(id => `<span><svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="${color(id)}"/></svg>${esc(names[id] || id)}</span>`).join('')}</div><div class="token-chart" role="img" aria-label="${esc(t('ui.token.daily'))}">${days.map(column).join('') || `<p>${esc(t('ui.token.empty'))}</p>`}</div><details><summary>${esc(t('ui.token.chartData'))}</summary><div class="token-table-wrap"><table><thead><tr>${['day', 'agent', 'tokens'].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${days.flatMap(day => (members.get(day.key) || []).map(row => `<tr><td>${esc(day.key)}</td><td>${esc(names[row.key] || row.key || t('ui.common.unknown'))}</td><td>${tokenNumber(row.tokens)}</td></tr>`)).join('')}</tbody></table></div></details></section><div class="token-rankings">${reports.slice(1).map(tokenRanking).join('')}</div><section class="panel token-tips"><h3>${esc(t('ui.token.tips'))}</h3>${(tips.length ? tips : [t('ui.token.noTips')]).map(tip => `<p>${esc(tip)}</p>`).join('')}</section>`;
+    $('token-data').setAttribute('aria-busy', 'false'); $('token-export').disabled = false;
+  } catch (e) {
+    if (request !== tokenRequest) return;
+    $('token-data').innerHTML = `<p class="error-box">${esc(t('ui.token.failed'))} ${esc(e.message)}</p><button id="token-retry">${esc(t('ui.token.retry'))}</button>`;
+    $('token-data').setAttribute('aria-busy', 'false'); $('token-retry').onclick = drawToken;
+  }
+}
+function drawStorage() {
+  const storage = state.storage, box = $('storage-warn');
+  box.hidden = !(storage?.warn?.dataDir || storage?.warn?.disk);
+  if (box.hidden) { box.innerHTML = ''; return; }
+  const messages = [];
+  if (storage.warn.dataDir) messages.push(t('ui.storage.dataDir', { gb: (storage.dataDirBytes / 2 ** 30).toFixed(1) }));
+  if (storage.warn.disk) messages.push(t('ui.storage.disk', { gb: (storage.freeBytes / 2 ** 30).toFixed(1) }));
+  box.innerHTML = `<span>${esc(messages.join(' '))}</span><div class="cleanup-actions">${cleanupButtons('storage')}</div>`;
+  wireCleanup('storage');
+}
+function cleanupButtons(prefix) {
+  return `<button type="button" id="${esc(prefix)}-cleanup-preview">${esc(t('ui.cleanup.preview'))}</button><button type="button" id="${esc(prefix)}-cleanup-now">${esc(t('ui.cleanup.now'))}</button>`;
+}
+const cleanupKept = item => /unmerged|kept/i.test(item.reason || '');
+function cleanupTotals(items) {
+  const removable = items.filter(item => !cleanupKept(item));
+  return { n: removable.length, mb: (removable.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0) / 2 ** 20).toFixed(1) };
+}
+function drawCleanup(manifest, results) {
+  const groups = new Map();
+  for (const item of manifest.items) {
+    if (!groups.has(item.kind)) groups.set(item.kind, []);
+    groups.get(item.kind).push(item);
+  }
+  $('cleanup-body').innerHTML = `<p>${esc(t('ui.cleanup.total', cleanupTotals(manifest.items)))}</p>
+    ${results ? `<p role="status">${esc(t('ui.cleanup.finished', { ok: results.filter(r => r.status === 'ok').length, skipped: results.filter(r => r.status === 'skipped').length, errors: results.filter(r => r.status === 'error').length }))}</p>` : ''}
+    ${[...groups].map(([kind, items]) => `<section class="cleanup-group"><h3>${esc(t('ui.cleanup.kind.' + kind))} · ${esc(t('ui.cleanup.group', { n: items.length, mb: (items.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0) / 2 ** 20).toFixed(1) }))}</h3><ul>${items.map(item => {
+      const result = results?.find(r => r.kind === item.kind && r.target === item.target);
+      return `<li><span>${esc(item.target)}</span><small>${esc(item.reason)}${cleanupKept(item) ? ' · ' + esc(t('ui.cleanup.kept')) : ''}${result ? ' · ' + esc(t('ui.cleanup.status.' + result.status)) + (result.error ? ': ' + esc(result.error) : '') : ''}</small></li>`;
+    }).join('')}</ul></section>`).join('') || `<p class="muted">${esc(t('ui.cleanup.empty'))}</p>`}`;
+  $('cleanup-dialog').querySelector('.dialog-error')?.remove();
+  if (!$('cleanup-dialog').open) $('cleanup-dialog').showModal();
+}
+async function previewCleanup() {
+  drawCleanup(await api('cleanup'));
+}
+async function runCleanup() {
+  const manifest = await api('cleanup');
+  drawCleanup(manifest);
+  if (!confirm(t('ui.cleanup.confirm', cleanupTotals(manifest.items)))) return;
+  try {
+    const result = await api('cleanup', { id: manifest.id });
+    drawCleanup(manifest, result.results);
+    await refresh();
+  } catch (e) {
+    if (e.status === 409) throw new Error(t('ui.cleanup.expired'));
+    throw e;
+  }
+}
+function wireCleanup(prefix) {
+  for (const [suffix, action] of [['preview', previewCleanup], ['now', runCleanup]]) {
+    const button = $(`${prefix}-cleanup-${suffix}`);
+    button.onclick = () => attempt(async () => {
+      button.disabled = true;
+      try { await action(); } finally { button.disabled = false; }
+    });
+  }
+}
+$('close-cleanup').onclick = () => $('cleanup-dialog').close();
+
 function drawState() {
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
+  drawStorage();
   $('mode').textContent = state.demo ? t('ui.header.demo') : 'LIVE · LOCAL';
   $('connection').textContent = t('ui.nav.connected');
   if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
@@ -263,7 +457,7 @@ function drawState() {
   }
   document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('selected', b.dataset.tab === tab));
   drawSessions(); syncTab();
-  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${jobTitle(j)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${j.eta != null ? ' · ' + t('ui.eta', { time: duration(j.eta) }) : ''}` : t('ui.flow.summaryIdle'); }
+  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${jobTitle(j)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${jobEta(j) ? ' · ' + jobEta(j) : ''}` : t('ui.flow.summaryIdle'); }
   drawJobsList();
   drawJobsDialog();
   drawFlow();
@@ -425,7 +619,8 @@ let slot = null;
 // Mỗi tab giữ dự án/phiên/việc riêng trên URL (#p=&s=&j=), mở nhiều tab = nhiều phòng điều phối; localStorage chỉ là mặc định cho tab mới.
 const tabHash = new URLSearchParams(location.hash.slice(1));
 let curProject = tabHash.get('p') ?? (store.get('project') || ''), curSession = tabHash.get('s') ?? (store.get('session') || '');
-if (tabHash.get('j')) selected = tabHash.get('j');
+if (tabHash.get('job') || tabHash.get('j')) selected = tabHash.get('job') || tabHash.get('j');
+let linkedJob = tabHash.get('job');
 function syncTab() {
   const q = new URLSearchParams({ p: curProject, s: curSession, ...(selected ? { j: selected } : {}) });
   if (location.hash.slice(1) !== q.toString()) history.replaceState(null, '', '#' + q);
@@ -463,14 +658,15 @@ function sessionState(id) {
 }
 // Bảng "node đang làm gì": dựng từ events đã có, không gọi thêm AI.
 function slotLive(id) {
-  const job = state.jobs.find(j => j.id === selected);
+  const job = state.jobs.find(j => j.id === (slot?.job || selected));
   if (!id || !job) return '';
-  const mine = events.filter(e => e.from === id);
+  const concurrent = runningOf(job).filter(r => r.agent === id).length > 1;
+  const mine = events.filter(e => e.from === id && (slot?.task == null || e.details?.task === slot.task || e.details?.task == null && !concurrent));
   // Codex gửi in_progress rồi completed cho cùng item: giữ bản mới nhất.
   const last = new Map(); for (const e of mine.filter(e => e.type === 'ACTIVITY')) last.set(e.details?.id ? e.details.id + (e.details.command || e.details.text || "") : e.details?.parameters ? e.details.name + JSON.stringify(e.details.parameters) : e.seq, e); // agy: bắt đầu + kết thúc cùng tham số → 1 dòng // id (item_1…) lặp lại giữa các lượt
   const acts = [...last.values()].slice(-40), res = mine.filter(e => ['RESULT', 'REVIEW_RESULT', 'CONCLUSION', 'BLOCKER'].includes(e.type)).at(-1);
-  const cur = job.current?.agent === id ? job.current : null;
-  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${acts.length ? `<div class="live-log">${acts.map((e, i) => actView(e, i === acts.length - 1)).join('')}</div>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
+  const cur = runningOf(job).find(r => r.agent === id && (slot?.run ? activityRunKey(r) === slot.run : slot?.task == null || r.task === slot.task));
+  return `<b>${esc(t(cur ? 'ui.slot.liveNow' : 'ui.slot.liveIdle', { stage: cur?.stage || '', time: cur ? duration((Date.now() - Date.parse(cur.startedAt)) / 60000) : '' }))}</b>${cur ? activityHTML(cur, job) : ''}${acts.length ? `<div class="live-log">${acts.map((e, i) => actView(e, i === acts.length - 1)).join('')}</div>` : ''}${res ? `<p class="muted">${esc(t('ui.slot.lastResult'))}</p><div class="chat-bubble">${esc(cut(res.summary, 800))}</div>` : ''}`;
 }
 const shortCmd = c => String(c || '').replace(/^"?[^"]*powershell(\.exe)?"?\s+(-NoProfile\s+)?-Command\s+/i, '');
 function actView(e, open) {
@@ -492,10 +688,10 @@ function refreshSlotLive() {
   const nlog = el.querySelector('.live-log'); if (nlog) nlog.scrollTop = atEnd ? nlog.scrollHeight : top;
 }
 // Bấm ô trên sơ đồ của một việc → chỉ đổi người cho việc đó (task hoặc vai trò); ngoài sơ đồ việc → đổi vai trò chung của đội.
-function openSlot(kind, current, task, jobId) {
+function openSlot(kind, current, task, jobId, run = null) {
   const job = jobId && state.jobs.find(j => j.id === jobId && !['merged', 'cancelled', 'done'].includes(j.status));
   if (jobId && !job && task != null) return; // việc đã kết thúc: ô task là lịch sử, không đổi được
-  slot = { kind, current, task: job && task != null ? +task : null, job: job?.id || null };
+  slot = { kind, current, task: job && task != null ? +task : null, job: job?.id || null, run };
   $('slot-live').innerHTML = slotLive(current); const lg = $('slot-live').querySelector('.live-log'); if (lg) lg.scrollTop = lg.scrollHeight;
   $('slot-title').textContent = t(current || kind !== 'builder' ? 'ui.slot.title' : 'ui.slot.addBuilderTitle', { role: roleLabel(kind) });
   $('slot-member').innerHTML = (current ? '' : `<option value="">${esc(t('ui.slot.none'))}</option>`) + state.agents.map(a => {
@@ -671,9 +867,10 @@ function drawInspector() {
     const avg = job.durations?.length ? job.durations.reduce((a, b) => a + b, 0) / job.durations.length / 60000 : null;
     const cur = job.current, elapsed = cur ? (Date.now() - Date.parse(cur.startedAt)) / 60000 : null;
     const runs = runningOf(job);
-    const lines = runs.length ? runs.map(r => t('ui.progress.now', { stage: r.task != null ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${r.task + 1}/${job.tasks.length}` : r.stage, who: names[r.agent] || r.agent, time: duration((Date.now() - Date.parse(r.startedAt)) / 60000) })) : [t('ui.progress.queued')];
-    const eta = job.eta != null ? t('ui.eta', { time: duration(Math.max(1, job.eta)) }) : steps == null ? t('ui.progress.planning') : avg ? t('ui.progress.eta', { time: duration(Math.max(1, avg * steps - (elapsed || 0))), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps });
-    return `<div class="progress-box"><span class="dot green"></span><div>${lines.map(l => `<b>${esc(l)}</b>`).join('<br>')}<br><span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
+    const lines = runs.length ? runs.map(r => `<div class="progress-run"><b>${esc(t('ui.progress.now', { stage: r.task != null ? `${t(research ? 'ui.kind.research' : 'ui.kind.code')} T${r.task + 1}/${job.tasks.length}` : r.stage, who: names[r.agent] || r.agent, time: duration((Date.now() - Date.parse(r.startedAt)) / 60000) }))}</b>${activityHTML(r, job)}</div>`) : [esc(t('ui.progress.queued'))];
+    const predicted = avg * steps - (elapsed || 0);
+    const eta = jobEta(job) || (steps == null ? t('ui.progress.planning') : avg ? predicted <= 0 ? t('ui.eta.over', { time: duration(-predicted) }) : t('ui.progress.eta', { time: duration(predicted), n: steps, avg: duration(avg) }) : t('ui.progress.noEta', { n: steps }));
+    return `<div class="progress-box"><span class="dot green"></span><div>${lines.join('')}<span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b><button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
@@ -686,7 +883,7 @@ function drawInspector() {
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<h2 class="job-title" data-rename tabindex="0" role="button" title="${esc(t('ui.jobs.renameHint'))}">${esc(jobTitle(job))}</h2><details data-inspector-goal ${goalOpen ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details>${badge(job)}${quotaWait}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  $('inspector').innerHTML = `<h2 class="job-title" data-rename tabindex="0" role="button" title="${esc(t('ui.jobs.renameHint'))}">${esc(jobTitle(job))}</h2><details data-inspector-goal ${goalOpen ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details>${badge(job)}${tokenJobLink(job)}${quotaWait}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   if ($('quota-replace')) $('quota-replace').onclick = () => openSlot(br.role, br.agent, br.task ?? undefined, job.id);
   const heading = $('inspector').querySelector('[data-rename]');
   const rename = () => {
@@ -803,7 +1000,7 @@ async function drawResults() {
   const configured = job.kind !== 'research' && !!project?.preview;
   const stats = checking ? t('ui.members.checking') : changes ? t('ui.results.stats', { n: changes.files?.length || 0, added: changes.added ?? '—', removed: changes.removed ?? '—' }) : '—';
   const level = (key, ok) => `<li class="${ok ? 'evidence-pass' : 'muted'}"><b>${esc(t('ui.results.' + key))}</b><span>${esc(t(ok ? 'ui.results.pass' : 'ui.results.pending'))}</span></li>`;
-  const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(jobTitle(job))}</p><details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
+  const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(jobTitle(job))}</p>${tokenJobLink(job)}<details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
     <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>
     <section class="result-section"><h3>${esc(t('ui.results.proof'))}</h3>${preview?.status === 'failed' || preview?.screenshots === false ? `<div class="error-box">${source('controller')} ${stale(preview.revision)}<p>${esc(preview.error || t(preview.screenshots === false ? 'ui.results.noChrome' : 'ui.results.previewFailed'))}</p>${other.filter(x => x.item.stage === 'preview' && x.item.revision === preview.revision && x.file.path.endsWith('preview.log')).map(x => evidenceLink(id, x.path, t('ui.evidence.openLog'))).join(' ')}</div>` : ''}
     <div class="result-images">${images.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!images.length ? `<p class="muted">${esc(t('ui.results.noImages'))}</p>` : ''}
@@ -1003,6 +1200,24 @@ function setMemberView(mode) {
 
 function drawQuota() {
   $('demo-live-link').hidden = !state.demo;
+  const check = state.quotaCheck;
+  $('refresh-quota').textContent = check?.running ? t('ui.quota.checkingProgress', { done: check.done, total: check.total }) : t('ui.members.refreshQuota');
+  $('refresh-quota').setAttribute('aria-busy', String(!!check?.running));
+  const quotaChip = a => {
+    const m = check?.members?.[a.id];
+    if (!m) return '';
+    const reason = String(m.reason || '');
+    let text;
+    switch (m.status) {
+      case 'checking': text = t('ui.quota.st.checking'); break;
+      case 'ok': text = t('ui.quota.st.ok') + ' · ' + clock(m.at); break;
+      case 'error': text = t('ui.quota.st.error') + (reason ? ' · ' + reason.slice(0, 80) : ''); break;
+      case 'timeout': text = t('ui.quota.st.timeout'); break;
+      case 'skipped-busy': text = reason === 'no-reader' ? t('ui.quota.st.noReader') : t('ui.quota.st.busy', { time: m.observedAt ? clock(m.observedAt) : '—' }); break;
+      default: return '';
+    }
+    return `<span class="quota-chip quota-chip-${esc(m.status)}"${m.status === 'error' ? ` title="${esc(reason)}"` : ''}>${esc(text)}</span>`;
+  };
 
   // 1. Draw Compact 1-line rows
   $('quota-compact').innerHTML = state.agents.map(a => {
@@ -1044,6 +1259,7 @@ function drawQuota() {
         <div class="compact-sub">${esc(factsShort)}</div>
       </div>
       <div class="compact-col-quota">
+        ${quotaChip(a)}
         <div class="quota-5h-bar">
           <div class="quota-5h-label">
             <span class="quota-5h-title">${esc(t('ui.members.quota5h'))}</span>
@@ -1068,7 +1284,6 @@ function drawQuota() {
             <button class="menu-item" data-check="${esc(a.id)}">⚡ ${esc(t('ui.login.check'))}</button>
             <button class="menu-item" data-profile="${esc(a.id)}">👤 ${esc(t('ui.members.profile'))}</button>
             ${a.provider === 'claude' ? `
-            <button class="menu-item" data-usage="${esc(a.id)}">↻ ${esc(t('ui.members.checkQuota'))}</button>
             <button class="menu-item" data-term="${esc(a.id)}">💻 ${esc(t('ui.members.openTerminal'))}</button>` : ''}
             <button class="menu-item" data-login="${esc(a.id)}">🔑 ${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>
             <div class="actions-menu-divider"></div>
@@ -1088,7 +1303,7 @@ function drawQuota() {
   $('quota-cards').innerHTML = state.agents.map(a => {
     const auth = a.auth || { status: 'unknown' }, connected = ['connected', 'cached'].includes(auth.status);
     const tag = a.provider === 'mock' ? t('ui.members.mock') : a.provider === 'antigravity' ? 'Gemini Pro' : a.provider;
-    const actions = state.demo ? '' : `<button data-check="${esc(a.id)}">${esc(t('ui.login.check'))}</button><button data-profile="${esc(a.id)}">${esc(t('ui.members.profile'))}</button>${a.provider === 'claude' ? `<button data-usage="${esc(a.id)}">${esc(t('ui.members.checkQuota'))}</button><button data-term="${esc(a.id)}">${esc(t('ui.members.openTerminal'))}</button>` : ''}`;
+    const actions = state.demo ? '' : `<button data-check="${esc(a.id)}">${esc(t('ui.login.check'))}</button><button data-profile="${esc(a.id)}">${esc(t('ui.members.profile'))}</button>${a.provider === 'claude' ? `<button data-term="${esc(a.id)}">${esc(t('ui.members.openTerminal'))}</button>` : ''}`;
     const model = a.provider === 'antigravity' && a.model;
     const rawBuckets = model ? a.quota.buckets?.filter(b => String(b.id).startsWith('3p-') !== /^gemini/i.test(model)) : a.quota.buckets;
     const cleanBuckets = dedupeBuckets(rawBuckets || []);
@@ -1111,7 +1326,7 @@ function drawQuota() {
     const sp = a.speed?.samples ? t('ui.members.speed', { time: duration(a.speed.avgMinutesPerCall), tokens: a.speed.avgTokensPerCall >= 1000 ? Math.round(a.speed.avgTokensPerCall / 1000) + 'K' : a.speed.avgTokensPerCall, n: a.speed.samples }) : t('ui.members.speedUnknown');
     const mcpNames = Object.keys(a.mcp || {});
     const facts = [sp, mcpNames.length && 'MCP: ' + mcpNames.join(', '), t('ui.members.model', { model: (a.model || t('ui.profile.modelDefault')) + (a.effort ? ` · ${effortLabel(a.effort)}` : '') }), t('ui.members.tier', { tier: tierLabel(a.tier) }), !a.enabled && t('ui.members.disabled'), a.systemPrompt && t('ui.members.hasPrompt')].filter(Boolean).join(' · ');
-    return `<article class="quota-card" data-agent-card="${esc(a.id)}"><h3>${esc(a.label)} <span class="tag">${esc(tag)}</span></h3><span class="muted">${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}</span><div class="account-state ${connected ? 'connected' : ''}"><i class="dot ${connected ? 'green' : ''}"></i>${esc(auth.message || t('ui.members.notChecked'))}</div>${auth.sharedProfile ? `<span class="muted">${esc(t('ui.members.sharedProfile'))}</span>` : ''}${auth.cli ? `<span class="muted">CLI: ${esc(auth.cli)}</span>` : ''}<div class="member-actions"><button class="${connected ? '' : 'primary'}" data-login="${esc(a.id)}">${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>${actions}</div>${state.demo ? '' : roleChecks(a)}<span class="muted">${esc(facts)}</span><strong>${esc(quotaRemaining(a.quota))}</strong>${a.quota.error ? `<p class="error-box">${esc(a.quota.error)}</p>` : ''}${a.quota.note ? `<p class="muted">${esc(a.quota.note)}</p>` : ''}${a.quota.schemaUnknown ? `<p class="error-box">${esc(t('ui.quota.schemaUnknown'))}</p>` : ''}${windows}<span class="muted">${esc(t('ui.quota.updated', { time: clock(a.quota.checkedAt) }))}</span>${a.quota.raw ? `<details><summary>${esc(t('ui.quota.raw'))}</summary><pre>${esc(JSON.stringify(a.quota.raw, null, 2))}</pre></details>` : ''}</article>`;
+    return `<article class="quota-card" data-agent-card="${esc(a.id)}"><h3>${esc(a.label)} <span class="tag">${esc(tag)}</span></h3><span class="muted">${esc(auth.account?.email || a.quota.account?.email || rolesText(a.id))}</span><div class="account-state ${connected ? 'connected' : ''}"><i class="dot ${connected ? 'green' : ''}"></i>${esc(auth.message || t('ui.members.notChecked'))}</div>${auth.sharedProfile ? `<span class="muted">${esc(t('ui.members.sharedProfile'))}</span>` : ''}${auth.cli ? `<span class="muted">CLI: ${esc(auth.cli)}</span>` : ''}<div class="member-actions"><button class="${connected ? '' : 'primary'}" data-login="${esc(a.id)}">${esc(t(state.demo ? 'ui.members.loginLive' : connected ? 'ui.members.relogin' : 'ui.login.start'))}</button>${actions}</div>${state.demo ? '' : roleChecks(a)}<span class="muted">${esc(facts)}</span><strong>${esc(quotaRemaining(a.quota))}</strong>${quotaChip(a)}${a.quota.error ? `<p class="error-box">${esc(a.quota.error)}</p>` : ''}${a.quota.note ? `<p class="muted">${esc(a.quota.note)}</p>` : ''}${a.quota.schemaUnknown ? `<p class="error-box">${esc(t('ui.quota.schemaUnknown'))}</p>` : ''}${windows}<span class="muted">${esc(t('ui.quota.updated', { time: clock(a.quota.checkedAt) }))}</span>${a.quota.raw ? `<details><summary>${esc(t('ui.quota.raw'))}</summary><pre>${esc(JSON.stringify(a.quota.raw, null, 2))}</pre></details>` : ''}</article>`;
   }).join('');
 
   setMemberView(memberView);
@@ -1140,11 +1355,6 @@ function drawQuota() {
     loginId = b.dataset.login; drawLogin(); $('login-dialog').showModal(); recheckMembers([loginId]);
   });
   document.querySelectorAll('[data-check]').forEach(b => b.onclick = () => attempt(async () => { b.disabled = true; await api(`members/${b.dataset.check}/refresh`, {}); await refresh(); }));
-  document.querySelectorAll('[data-usage]').forEach(b => b.onclick = () => attempt(async () => {
-    b.disabled = true; b.textContent = t('ui.members.checking');
-    try { const r = await api(`members/${b.dataset.usage}/usage`, {}); notice(r.parsed ? '' : t('ui.members.usageFailed', { text: r.text || '—' })); await refresh(); }
-    finally { b.disabled = false; b.textContent = t('ui.members.checkQuota'); }
-  }));
   document.querySelectorAll('[data-term]').forEach(b => b.onclick = () => attempt(async () => { await api(`members/${b.dataset.term}/terminal`, {}); notice(t('ui.members.terminalOpened')); }));
   document.querySelectorAll('[data-profile]').forEach(b => b.onclick = () => attempt(() => openProfile(b.dataset.profile)));
   document.querySelectorAll('[data-role-toggle]').forEach(b => b.onchange = () => attempt(async () => { await api(`members/${b.dataset.roleToggle}/role`, { kind: b.value, on: b.checked }); await refresh(); }));
@@ -1168,6 +1378,10 @@ async function refresh() {
   if (rendering) { again = true; return; } rendering = true;
   try {
     state = await api('state');
+    if (linkedJob) {
+      const job = state.jobs.find(j => j.id === linkedJob);
+      if (job) { curProject = job.project; curSession = job.sessionId || ''; selected = job.id; linkedJob = null; }
+    }
     if (!selected) selected = state.jobs.find(j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession))?.id;
     if (state.language && state.language !== lang) await loadLanguage(state.language);
     if (eventsOf !== selected) { events = []; eventsOf = selected; }
@@ -1205,6 +1419,9 @@ $('clear-filter').onclick = () => { filter = null; drawState(); drawTimeline(); 
 document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; document.querySelectorAll('[data-tab]').forEach(x => x.classList.toggle('selected', x === b)); drawTimeline(); });
 function view(name) {
   name = name === true ? 'members' : name || 'work';
+  $('token-view').hidden = name !== 'token'; $('token-nav').classList.toggle('active', name === 'token');
+  $('metrics').hidden = name === 'token'; document.querySelector('main > header').hidden = name === 'token';
+  if (name === 'token') drawToken();
   $('work-view').hidden = name !== 'work'; $('quota-view').hidden = name !== 'members'; $('security-view').hidden = name !== 'security';
   $('overview').classList.toggle('active', name === 'work'); $('quota-nav').classList.toggle('active', name === 'members'); $('security-nav').classList.toggle('active', name === 'security');
   if (name === 'security') { drawSecurity(); drawAccess(); }
@@ -1326,15 +1543,17 @@ async function drawMemory() {
     <label><input type="checkbox" id="mem-history" ${memoryHistory ? 'checked' : ''}> ${esc(t('ui.mem.history'))}</label>
     <div class="row-input"><button id="mem-export">${esc(t('ui.mem.exportMemory'))}</button><label>${esc(t('ui.mem.import'))}<input type="file" id="mem-import" accept=".json,application/json"></label></div><p id="mem-result" role="status"></p>
     <h3>${esc(t('ui.mem.facts', { project: curProject, n: m.facts.length }))}</h3>
-    <ul class="mem-list">${m.facts.filter(f => f.kind === 'fact').map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${f.id} · ${esc(f.source)} · ${esc(t('ui.mem.' + f.scope))} · ${esc(t('ui.mem.' + f.status))} · ${esc(f.commitSha?.slice(0, 8) || '')} · ${esc(clock(f.at))}</small></span>${f.status === 'active' ? `<button class="icon-btn" data-mem-del="${f.id}" data-mem-revision="${f.revision}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button>` : ''}</li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
+    <ul class="mem-list">${m.facts.filter(f => f.kind === 'fact').map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${esc(f.id)} · ${esc(f.source)} · ${esc(t('ui.mem.' + f.scope))} · ${esc(t('ui.mem.' + f.status))} · ${esc(f.commitSha?.slice(0, 8) || '')} · ${esc(clock(f.at))}</small></span>${f.status === 'active' ? `<button type="button" data-mem-stale="${esc(f.id)}" data-mem-revision="${esc(f.revision)}">${esc(t('ui.mem.stale'))}</button><button class="icon-btn" data-mem-del="${esc(f.id)}" data-mem-revision="${esc(f.revision)}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button>` : ''}</li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
     <div class="row-input"><input id="mem-add" maxlength="300" placeholder="${esc(t('ui.mem.addPlaceholder'))}"><button id="mem-add-btn">${esc(t('ui.mem.add'))}</button></div>
     <h3>${esc(t('ui.mem.session', { name: ses?.name || '—' }))}</h3>
     <textarea id="mem-summary" rows="4" maxlength="1500">${esc(m.summary)}</textarea><button id="mem-summary-save">${esc(t('ui.mem.saveSummary'))}</button>
     <details><summary>${esc(t('ui.mem.log', { n: m.log.length }))}</summary><ul class="mem-log">${m.log.map(l => `<li>${esc(l.text)}</li>`).join('')}</ul></details>
     <h3>${esc(t('ui.mem.backups'))}</h3><p class="muted">${esc(b.dir)}</p>
     <ul class="mem-log">${b.list.slice(0, 5).map(x => `<li>${esc(x.file.split(/[\\/]/).pop())} · ${esc(clock(x.at))} · ${Math.round(x.bytes / 1024)} KB</li>`).join('') || `<li class="muted">${esc(t('ui.mem.noBackup'))}</li>`}</ul>
-    <button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>`;
+    <div class="cleanup-actions"><button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>${cleanupButtons('memory')}</div>`;
   const edit = body => attempt(async () => { await api('memory', { project: curProject, session: curSession, ...body }); await drawMemory(); });
+  wireCleanup('memory');
+  document.querySelectorAll('[data-mem-stale]').forEach(x => x.onclick = () => edit({ stale: Number(x.dataset.memStale), revision: Number(x.dataset.memRevision) }));
   document.querySelectorAll('[data-mem-del]').forEach(x => x.onclick = () => edit({ remove: x.dataset.memDel, revision: Number(x.dataset.memRevision) }));
   $('mem-search').onclick = () => attempt(async () => { memoryQuery = $('mem-query').value; await drawMemory(); });
   $('mem-query').onkeydown = e => { if (e.key === 'Enter') $('mem-search').click(); };
@@ -1356,10 +1575,11 @@ async function drawMemory() {
 }
 $('memory-open').onclick = () => attempt(async () => { await drawMemory(); $('memory-dialog').showModal(); });
 $('close-memory').onclick = () => $('memory-dialog').close();
+$('token-nav').onclick = () => view('token');
 $('overview').onclick = () => view('work');
 $('security-nav').onclick = () => view('security');
 $('quota-nav').onclick = () => attempt(async () => { view('members'); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
-$('refresh-quota').onclick = () => attempt(async () => { await api('quota', {}); notice(t('ui.members.refreshing')); });
+$('refresh-quota').onclick = () => attempt(async () => { const r = await api('quota', {}); notice(r.running && r.total ? t('ui.quota.checkingProgress', { done: r.done, total: r.total }) : t('ui.members.refreshing')); });
 $('add-member').onclick = () => { if (state.demo) { location.href = 'http://127.0.0.1:3333/?members=1&add=1'; return; } providerHint(); $('member-dialog').showModal(); };
 $('member-provider').onchange = providerHint;
 $('close-member').onclick = () => $('member-dialog').close();
@@ -1494,9 +1714,23 @@ $('theme-select').onchange = () => { store.set('theme', $('theme-select').value)
 $('lang-select').onchange = () => attempt(async () => {
   const next = $('lang-select').value; store.set('lang', next);
   await api('settings', { language: next }).catch(e => notice(e.message));
-  await loadLanguage(next); notice(''); if (state) { drawState(); drawTimeline(); }
+  await loadLanguage(next); notice(''); if (state) { drawState(); drawTimeline(); if (!$('token-view').hidden) drawToken(); }
 });
 document.addEventListener('click', e => {
+  const check = e.target.closest('[data-activity-check]'), pause = e.target.closest('[data-activity-pause]');
+  if (check) {
+    const job = state.jobs.find(j => j.id === check.dataset.activityJob), run = runningOf(job).find(r => activityRunKey(r) === check.dataset.activityCheck);
+    if (run) {
+      if (!$('slot-dialog').open || slot?.current !== run.agent || slot?.job !== job.id || slot?.run !== activityRunKey(run)) openSlot(['implement', 'research'].includes(run.stage) ? 'builder' : nodeOfRun(run) || 'manager', run.agent, run.task, job.id, activityRunKey(run));
+      const log = $('slot-live').querySelector('.live-log');
+      if (log) { const last = log.lastElementChild; if (last?.tagName === 'DETAILS') last.open = true; log.scrollTop = log.scrollHeight; log.scrollIntoView({ block: 'nearest' }); }
+      else if (slot.task == null) { $('slot-dialog').close(); filter = run.agent; tab = 'activity'; drawState(); drawTimeline(); $('timeline').scrollTop = $('timeline').scrollHeight; }
+    }
+  }
+  if (pause) attempt(async () => {
+    pause.disabled = true;
+    try { await api(`jobs/${pause.dataset.activityPause}/control`, { action: 'pause' }); await refresh(); } finally { pause.disabled = false; }
+  });
   if (!e.target.closest('.actions-dropdown')) {
     document.querySelectorAll('.actions-dropdown[open]').forEach(d => d.removeAttribute('open'));
   }
@@ -1623,3 +1857,4 @@ document.addEventListener('visibilitychange', () => {
 });
 openStream();
 setInterval(() => { if (!document.hidden) attempt(refresh); }, 10000);
+setInterval(updateActivities, 30000);

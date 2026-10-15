@@ -8,6 +8,7 @@ import { Team } from './team.js';
 import { DEFAULT_SYSTEM_PROMPT } from './prompts.js';
 import { Accounts, accessList } from './accounts.js';
 import { exportTransfer, importTransfer } from './transfer.js';
+import { initializeUsage } from './usage.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -34,7 +35,9 @@ const tokenFile = join(dataDir, 'controller.token');
 const token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : randomBytes(32).toString('hex');
 if (!existsSync(tokenFile)) writeFileSync(tokenFile, token, { mode: 0o600 });
 const team = new Team(config, dataDir);
+const usage = initializeUsage(team.db, { timezone: config.timezone, retentionDays: config.usageRetentionDays });
 const accounts = new Accounts(team, file, root);
+team.claudeUsage = (id, opts) => accounts.usage(id, opts);
 const port = config.port || 3333, origin = `http://127.0.0.1:${port}`;
 const cookieName = `team_session_${port}`;
 const clients = new Set();
@@ -75,6 +78,18 @@ const server = createServer(async (req, res) => {
       Object.assign(state, { language: getLanguage(), languages, stale: stale() });
       return send(res, 200, state);
     }
+    if (req.method === 'GET' && url.pathname === '/api/usage') {
+      const options = {};
+      for (const key of ['from', 'to', 'groupBy', 'project', 'session', 'job']) if (url.searchParams.has(key)) options[key] = url.searchParams.get(key);
+      const report = usage.report(options), breakdown = {};
+      for (const groupBy of ['day', 'project', 'session', 'job', 'agent', 'stage', 'model']) breakdown[groupBy] = usage.report({ ...options, from: report.from, to: report.to, groupBy }).groups;
+      const jobs = new Map(team.db.prepare('SELECT id, body FROM jobs').all().map(row => [row.id, JSON.parse(row.body)]));
+      const rankings = Object.fromEntries(['job', 'agent', 'stage', 'model'].map(key => [key, breakdown[key].map(row => key === 'job' ? { ...row, title: jobs.get(row.key)?.goal ?? null, fixRounds: jobs.get(row.key)?.round ?? null } : row).sort((a, b) => b.tokens - a.tokens)]));
+      const filters = ['at >= ?', 'at < ?'], values = [report.from, report.to];
+      for (const key of ['project', 'session', 'job']) if (options[key]) { filters.push(`${key}=?`); values.push(options[key]); }
+      const records = team.db.prepare(`SELECT * FROM usage_log WHERE ${filters.join(' AND ')} ORDER BY at, id`).all(...values);
+      return send(res, 200, { ...report, breakdown, rankings, records });
+    }
     if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, team.skills(url.searchParams.has('refresh')).map(({ name, description, source }) => ({ name, description, source })));
     if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
     if (req.method === 'GET' && url.pathname === '/api/system-prompt') return send(res, 200, { ...team.systemPrompt(), default: DEFAULT_SYSTEM_PROMPT, history: team.systemPromptHistory() });
@@ -113,6 +128,13 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/memory') return send(res, 200, team.editMemory(await body(req)));
     if (req.method === 'GET' && url.pathname === '/api/backups') return send(res, 200, { dir: team.backupDir(), list: team.backups() });
     if (req.method === 'POST' && url.pathname === '/api/backup') return send(res, 200, { file: team.backup('manual'), list: team.backups() });
+    if (req.method === 'GET' && url.pathname === '/api/cleanup') return send(res, 200, await team.cleanup({ dryRun: true }));
+    if (req.method === 'POST' && url.pathname === '/api/cleanup') {
+      const input = await body(req);
+      if (typeof input?.id !== 'string') return send(res, 409, { error: 'Preview cleanup first' });
+      const result = await team.cleanup({ id: input.id });
+      return send(res, 200, { id: result.id, results: result.results.map(r => ({ kind: r.kind, target: r.target, status: r.status, ...(r.status === 'error' ? { error: r.detail } : {}) })) });
+    }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const input = await body(req);
       if (!languages.includes(input.language)) throw new Error('language: vi | en | ja');
@@ -151,7 +173,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && sessionRename) return send(res, 200, team.renameSession(sessionRename[1], (await body(req)).name));
     if (req.method === 'POST' && url.pathname === '/api/jobs') return send(res, 201, await team.create(await body(req, 160e6)));
     if (req.method === 'POST' && url.pathname === '/api/comparisons') return send(res, 201, await team.createComparison(await body(req, 160e6)));
-    if (req.method === 'POST' && url.pathname === '/api/quota') { team.refreshQuota().catch(e => console.error(e.message)); return send(res, 202, { refreshing: true }); }
+    if (req.method === 'POST' && url.pathname === '/api/quota') {
+      const p = team.refreshQuota(); p.catch(e => console.error(e.message));
+      return send(res, 202, { refreshing: true, ...(team.quotaCheck ? { done: team.quotaCheck.done, total: team.quotaCheck.total, running: team.quotaCheck.running } : {}) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
     const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer|evidence|evidence-file))?$/.exec(url.pathname);
     if (match) {
