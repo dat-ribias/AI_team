@@ -294,11 +294,10 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     const refs = (task.readDirs || []).map(claudePath);
     if (refs.length) args.push('--allowedTools', ...refs.map(d => `Read(${d}/**)`), '--disallowedTools', ...refs.flatMap(d => [`Edit(${d}/**)`, `Write(${d}/**)`, ...SECRET_FILES.map(f => `Read(${d}/**/${f})`)]));
   } else {
-    const shellChecks = task.stage === 'implement' ? [] : checks;
     args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);
     if (agent.provider === 'gemini' && task.addDirs?.length) args.push('--include-directories', task.addDirs.join(','));
-    if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : shellChecks.length ? 'default' : 'plan', ...(shellChecks.length ? ['--allowed-tools', ...shellChecks.map(c => `run_shell_command(${c})`)] : []));
+    if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
     // Antigravity (agy) không có cờ quyền theo lượt: lệnh check phải được cho phép trong ~/.gemini/antigravity-cli/settings.json (permissions.allow).
     // Lệnh ngoài allow-list bị từ chối = phiên headless kết thúc không có report. "agyAutoApprove": true bỏ hỏi quyền (toàn quyền như Codex "none");
     // controller vẫn kiểm tra worktree sau mỗi lượt và mọi thay đổi vẫn qua review/verify + bạn duyệt merge.
