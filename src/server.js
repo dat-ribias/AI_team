@@ -7,6 +7,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Team } from './team.js';
 import { Accounts, accessList } from './accounts.js';
 import { exportTransfer, importTransfer } from './transfer.js';
+import { initializeUsage } from './usage.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -33,6 +34,7 @@ const tokenFile = join(dataDir, 'controller.token');
 const token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : randomBytes(32).toString('hex');
 if (!existsSync(tokenFile)) writeFileSync(tokenFile, token, { mode: 0o600 });
 const team = new Team(config, dataDir);
+const usage = initializeUsage(team.db, { timezone: config.timezone, retentionDays: config.usageRetentionDays });
 const accounts = new Accounts(team, file, root);
 team.claudeUsage = (id, opts) => accounts.usage(id, opts);
 const port = config.port || 3333, origin = `http://127.0.0.1:${port}`;
@@ -74,6 +76,18 @@ const server = createServer(async (req, res) => {
       state.providers = accounts.providers();
       Object.assign(state, { language: getLanguage(), languages, stale: stale() });
       return send(res, 200, state);
+    }
+    if (req.method === 'GET' && url.pathname === '/api/usage') {
+      const options = {};
+      for (const key of ['from', 'to', 'groupBy', 'project', 'session', 'job']) if (url.searchParams.has(key)) options[key] = url.searchParams.get(key);
+      const report = usage.report(options), breakdown = {};
+      for (const groupBy of ['day', 'project', 'session', 'job', 'agent', 'stage', 'model']) breakdown[groupBy] = usage.report({ ...options, from: report.from, to: report.to, groupBy }).groups;
+      const jobs = new Map(team.db.prepare('SELECT id, body FROM jobs').all().map(row => [row.id, JSON.parse(row.body)]));
+      const rankings = Object.fromEntries(['job', 'agent', 'stage', 'model'].map(key => [key, breakdown[key].map(row => key === 'job' ? { ...row, title: jobs.get(row.key)?.goal ?? null, fixRounds: jobs.get(row.key)?.round ?? null } : row).sort((a, b) => b.tokens - a.tokens)]));
+      const filters = ['at >= ?', 'at < ?'], values = [report.from, report.to];
+      for (const key of ['project', 'session', 'job']) if (options[key]) { filters.push(`${key}=?`); values.push(options[key]); }
+      const records = team.db.prepare(`SELECT * FROM usage_log WHERE ${filters.join(' AND ')} ORDER BY at, id`).all(...values);
+      return send(res, 200, { ...report, breakdown, rankings, records });
     }
     if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, team.skills(url.searchParams.has('refresh')).map(({ name, description, source }) => ({ name, description, source })));
     if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
