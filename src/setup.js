@@ -30,6 +30,6 @@ if (demo) {
   await run(['git'], ['-C', path, '-c', 'user.name=AI Team Demo', '-c', 'user.email=demo@localhost', 'commit', '-m', 'Demo initial state']);
   projects.push({ id: 'demo', path, tests: [[process.execPath, '-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('hello.txt','utf8'),'Hello from AI Team demo!\\n')"]] });
 }
-writeFileSync(configFile, JSON.stringify({ demo, port: demo ? 3334 : 3333, dataDir: join(root, '.team', demo ? 'demo-state' : 'state'), maxRamPercent: 85, maxCpuPercent: 90, minRemainingPercent: 15, maxReworkRounds: 3, agents, projects }, null, 2));
+writeFileSync(configFile, JSON.stringify({ demo, port: demo ? 3334 : 3333, dataDir: join(root, '.team', demo ? 'demo-state' : 'state'), maxRamPercent: 85, maxCpuPercent: 90, maxConcurrentTests: 1, minRemainingPercent: 15, maxReworkRounds: 3, agents, projects }, null, 2));
 console.log(`Đã tạo ${configFile}`);
 console.log(demo ? 'Chạy: node src/server.js --config .team/demo.config.json' : 'Đăng nhập: .\\scripts\\login.ps1 codex-1 (lặp lại codex-2/codex-3). Thêm repo và lệnh tests vào team.config.json, rồi npm start.');
