@@ -950,6 +950,7 @@
   "ui.prompt.checkDraft": "Check draft conclusion",
   "ui.prompt.draftText": "Paste and edit the AGENTS.md draft",
   "ui.prompt.draftCreated": "Draft job created: {id}. Check its conclusion when the job finishes.",
+  "ui.prompt.draftFailed": "Draft {id} is unusable (cancelled, failed, or has no conclusion). Create a new draft.",
   "ui.prompt.draftReady": "Job {id} has a conclusion. Paste and edit the prompt below before approval.",
   "ui.prompt.approve": "Approve and write AGENTS.md",
   "ui.prompt.confirm": "Approve this text and write AGENTS.md in the project repository?",

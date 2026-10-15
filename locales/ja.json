@@ -950,6 +950,7 @@
   "ui.prompt.checkDraft": "下書きの結論を確認",
   "ui.prompt.draftText": "AGENTS.md の下書きを貼り付けて編集",
   "ui.prompt.draftCreated": "下書きジョブを作成しました: {id}。完了後に結論を確認してください。",
+  "ui.prompt.draftFailed": "下書き {id} は利用できません（キャンセル、失敗、または結論なし）。新しい下書きを作成してください。",
   "ui.prompt.draftReady": "ジョブ {id} の結論ができました。承認前に下へプロンプトを貼り付けて編集してください。",
   "ui.prompt.approve": "承認して AGENTS.md に書き込む",
   "ui.prompt.confirm": "この内容を承認し、プロジェクトリポジトリの AGENTS.md に書き込みますか？",
