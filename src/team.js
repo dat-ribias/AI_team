@@ -682,7 +682,8 @@ export class Team extends EventEmitter {
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       quotaCheck: this.quotaCheck || null,
-      resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, slots: used + cap.start, active: used, waitingReason: this.waitingReason },
+      flaky: this.jobs().flatMap(j => (j.flaky || []).map(({ test, revision, at }) => ({ job: j.id, title: jobTitle(j), test, revision, at }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 50),
+      resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, maxConcurrentTests: Math.max(1, this.config.maxConcurrentTests ?? 1), slots: used + cap.start, active: used, waitingReason: this.waitingReason },
       storage: this.storage(),
     };
   }
@@ -1693,17 +1694,56 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (runtime) runtime.stopping = stopping;
     return stopping;
   }
+  updateTestQueue() {
+    for (const [i, entry] of this.testQueue.entries()) {
+      entry.job.waiting = msg('srv.team.wait_test', { 0: i + 1 }); this.save(entry.job);
+    }
+    this.emit('change');
+  }
+  async acquireTest(job, signal) {
+    this.testQueue ??= []; this.activeTests ??= 0;
+    signal?.throwIfAborted();
+    if (!this.testQueue.length && this.activeTests < Math.max(1, this.config.maxConcurrentTests ?? 1)) {
+      job.waiting = null; this.save(job); this.activeTests++; return;
+    }
+    await new Promise((resolve, reject) => {
+      const entry = { job, resolve: () => { signal?.removeEventListener('abort', aborted); resolve(); } };
+      const aborted = () => {
+        const i = this.testQueue.indexOf(entry);
+        if (i < 0) return;
+        this.testQueue.splice(i, 1); job.waiting = null; this.save(job); this.updateTestQueue();
+        reject(signal.reason);
+      };
+      this.testQueue.push(entry);
+      signal?.addEventListener('abort', aborted, { once: true });
+      this.updateTestQueue();
+    });
+    try { signal?.throwIfAborted(); job.waiting = null; this.save(job); }
+    catch (error) { this.releaseTest(); throw error; }
+  }
+  releaseTest() {
+    this.activeTests--;
+    while (this.testQueue.length && this.activeTests < Math.max(1, this.config.maxConcurrentTests ?? 1)) {
+      const entry = this.testQueue.shift(); this.activeTests++; entry.resolve();
+    }
+    this.updateTestQueue();
+  }
   async runTests(job, cwd, revision, tests) {
     const manager = (job.roster || roster(this.config)).manager, signal = this.runs.get(job.id)?.abort.signal;
-    for (const test of tests) {
-      const { command, cwd: testCwd = cwd, label } = Array.isArray(test) ? { command: test } : test;
+    const execute = async (command, testCwd, label) => {
       this.event(job.id, 'controller', manager, 'TEST_START', (label ? `[${label}] ` : '') + command.join(' '));
       const started = Date.now(), chunks = [], maxBytes = (this.config.evidenceMaxMB ?? 50) * 2 ** 20;
+      const names = new Set(), passedNames = new Set();
       let logBytes = 0, log = null;
       // Stream the complete output: run() bounds its stdout/stderr buffers.
       const result = await run(/[\\/]/.test(command[0]) ? [command[0]] : executable(command[0]), command.slice(1), { cwd: testCwd, signal, allowFailure: true,
         onLine: (line, stream) => {
           this.event(job.id, 'controller', manager, 'TEST_OUTPUT', line.slice(0, 8000), { stream });
+          const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
+          const name = (/^\s*not ok \d+ - (.+?)(\s+#.*)?$/.exec(clean)?.[1] || /^\s*✖ (.+?) \(\d+(\.\d+)?ms\)/.exec(clean)?.[1])?.trim();
+          if (name && !/^failing tests:/i.test(name) && !/\.[cm]?[jt]sx?(?::\d+){0,2}$/i.test(name) && !existsSync(resolve(testCwd, name))) names.add(name);
+          const passed = (/^\s*ok \d+ - (.+?)(\s+#.*)?$/.exec(clean)?.[1] || /^\s*✔ (.+?) \(\d+(\.\d+)?ms\)/.exec(clean)?.[1])?.trim();
+          if (passed) passedNames.add(passed);
           const text = redact(line) + '\n'; logBytes += Buffer.byteLength(text);
           if ((job.evidenceBytes || 0) + logBytes <= maxBytes) chunks.push(text);
         } });
@@ -1726,12 +1766,36 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       await this.captureEvidence(job, testCwd, 'test', 'controller', revision);
       this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision, ms, log });
       job.checkResults = [...(job.checkResults || []), scrub({ command, project: label || job.project, code: result.code, revision, ms, log, output: compressOutput(redact(result.stderr + result.stdout)), at: now() })].slice(-100);
-      if (result.code !== 0) {
-        job.reports.push({ stage: 'test', summary: `Test failed: ${label ? `[${label}] ` : ''}${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
-        return false;
+      return { ...result, names: [...names], passedNames: [...passedNames] };
+    };
+    let acquired = false;
+    try {
+      await this.acquireTest(job, signal); acquired = true;
+      for (const test of tests) {
+        const { command, cwd: testCwd = cwd, label } = Array.isArray(test) ? { command: test } : test;
+        const result = await execute(command, testCwd, label);
+        if (result.code !== 0) {
+          const names = result.names;
+          if (/^node(?:\.exe)?$/i.test(basename(command[0])) && command.includes('--test') && names.length >= 1 && names.length <= 20) {
+            const retryCommand = [...command], index = command.indexOf('--test') + 1;
+            retryCommand.splice(index, 0, ...names.map(name => `--test-name-pattern=^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`));
+            const retry = await execute(retryCommand, testCwd, label), output = (retry.stdout + '\n' + retry.stderr).replace(/\x1b\[[0-9;]*m/g, '');
+            const passes = [...output.matchAll(/^\s*(?:#|ℹ) pass (\d+)\s*$/gm)], failures = [...output.matchAll(/^\s*(?:#|ℹ) fail (\d+)\s*$/gm)];
+            // Node can count a successful file wrapper when no named test matched.
+            if (retry.code === 0 && passes.some(m => Number(m[1]) > 0) && failures.length && failures.every(m => Number(m[1]) === 0) && names.every(name => retry.passedNames.includes(name))) {
+              this.event(job.id, 'controller', 'user', 'FLAKY_WARNING', msg('srv.team.flaky_test', { 0: names.join(', ') }), { names, revision, command });
+              job.flaky = [...(job.flaky || []), ...names.map(test => ({ test, revision, command: command.join(' '), at: now() }))].slice(-50);
+              continue;
+            }
+          }
+          job.reports.push({ stage: 'test', summary: `Test failed: ${label ? `[${label}] ` : ''}${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
+          return false;
+        }
       }
+      return true;
+    } finally {
+      if (acquired) this.releaseTest();
     }
-    return true;
   }
   async testJob(job) {
     // Test của repo liên kết chạy trong worktree của nó; repo chính chạy sau cùng ở job.worktree.

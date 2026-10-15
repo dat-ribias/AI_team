@@ -1008,5 +1008,10 @@
   "ui.cleanup.kind.session": "Phiên CLI",
   "ui.cleanup.status.ok": "Đã dọn",
   "ui.cleanup.status.skipped": "Đã bỏ qua",
-  "ui.cleanup.status.error": "Lỗi"
+  "ui.cleanup.status.error": "Lỗi",
+  "srv.team.wait_test": "Chờ lượt test #{0}",
+  "srv.team.flaky_test": "flaky: {0}",
+  "ui.flaky.title": "Test flaky gần đây",
+  "ui.flaky.empty": "Chưa có test flaky",
+  "ui.flaky.item": "{test} · job {job} · {at}"
 }

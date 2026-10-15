@@ -1008,5 +1008,10 @@
   "ui.cleanup.kind.session": "CLI sessions",
   "ui.cleanup.status.ok": "Cleaned",
   "ui.cleanup.status.skipped": "Skipped",
-  "ui.cleanup.status.error": "Error"
+  "ui.cleanup.status.error": "Error",
+  "srv.team.wait_test": "Waiting for test slot #{0}",
+  "srv.team.flaky_test": "flaky: {0}",
+  "ui.flaky.title": "Recent flaky tests",
+  "ui.flaky.empty": "No flaky tests yet",
+  "ui.flaky.item": "{test} · job {job} · {at}"
 }

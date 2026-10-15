@@ -1008,5 +1008,10 @@
   "ui.cleanup.kind.session": "CLI セッション",
   "ui.cleanup.status.ok": "削除済み",
   "ui.cleanup.status.skipped": "スキップ",
-  "ui.cleanup.status.error": "エラー"
+  "ui.cleanup.status.error": "エラー",
+  "srv.team.wait_test": "テスト順番待ち #{0}",
+  "srv.team.flaky_test": "flaky: {0}",
+  "ui.flaky.title": "最近の不安定なテスト",
+  "ui.flaky.empty": "不安定なテストはまだありません",
+  "ui.flaky.item": "{test} · ジョブ {job} · {at}"
 }
