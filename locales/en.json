@@ -1008,5 +1008,21 @@
   "ui.cleanup.kind.session": "CLI sessions",
   "ui.cleanup.status.ok": "Cleaned",
   "ui.cleanup.status.skipped": "Skipped",
-  "ui.cleanup.status.error": "Error"
+  "ui.cleanup.status.error": "Error",
+  "srv.team.rework_digest_head": "Rework rounds summary (limit {limit} rounds, owner added scope {scope} times):",
+  "srv.team.rework_digest_round": "Round {n} · {who} ({stage}) · {verdict}",
+  "srv.team.rework_origin_owner": "owner added scope",
+  "srv.team.rework_origin_builder": "builder defect",
+  "srv.team.rework_still_open": "still open",
+  "srv.team.extra_round_granted": "Owner granted 1 more rework round ({0} extra in total).",
+  "srv.team.owner_takes_over": "Owner stopped the job to handle it personally; the worktree is kept.",
+  "ui.rework.title": "Why it took several rework rounds",
+  "ui.rework.summary": "{rounds} rounds, {open} open findings, owner added scope {scope} times",
+  "ui.rework.round": "Round {n} · {who} · {verdict}",
+  "ui.rework.owner": "Owner added scope",
+  "ui.rework.builder": "Builder defect",
+  "ui.rework.open": "still open",
+  "ui.rework.extraRound": "Allow 1 more round",
+  "ui.rework.handoff": "Stop, I'll handle it",
+  "ui.rework.handedOff": "Owner is handling it"
 }

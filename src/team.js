@@ -93,6 +93,30 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { re
 const normFindings = list => (Array.isArray(list) ? list : []).slice(0, 10).map((f, i) => f && typeof f === 'object'
   ? { ...f, id: String(f.id || `F${i + 1}`).slice(0, 20), claim: String(f.claim || f.problem || f.summary || '').slice(0, 1000), impact: ['high', 'medium', 'low'].includes(f.impact) ? f.impact : 'medium' }
   : { id: `F${i + 1}`, claim: String(f).slice(0, 1000), impact: 'medium' });
+// Tóm tắt các vòng sửa khi chạm giới hạn: finding mới xuất hiện sau khi owner bổ sung phạm vi được tính là 'owner', còn lại là lỗi builder.
+export function reworkDigest(job, limit) {
+  const reports = job.reports || [], scopeAdds = job.scopeAdds || [], rounds = [];
+  let prev = -1;
+  reports.forEach((r, i) => {
+    if (r.stage === 'test' && String(r.summary || '').startsWith('Test failed')) { rounds.push({ n: rounds.length + 1, stage: 'test', agent: r.agent || 'controller', verdict: 'failed', summary: r.summary, findings: [] }); return; }
+    if (!['review', 'verify'].includes(r.stage)) return;
+    const before = new Set(prev >= 0 ? normFindings(reports[prev].findings).map(f => f.id) : []), scoped = scopeAdds.some(s => prev < s.reports && s.reports <= i);
+    rounds.push({ n: rounds.length + 1, stage: r.stage, agent: r.agent, verdict: r.verdict, findings: normFindings(r.findings).map(f => ({ id: f.id, claim: f.claim.length > 120 ? f.claim.slice(0, 120) + '…' : f.claim, impact: f.impact, origin: !before.has(f.id) && scoped ? 'owner' : 'builder', open: false })) });
+    prev = i;
+  });
+  const last = rounds.at(-1), open = last && last.stage !== 'test' ? last.findings : [];
+  open.forEach(f => { f.open = true; });
+  return { limit, round: job.round, rounds, open: open.map(f => f.id), scopeAdds: scopeAdds.length };
+}
+export function reworkSummaryText(d) {
+  const lines = [msg('srv.team.rework_digest_head', { limit: d.limit, scope: d.scopeAdds })];
+  for (const r of d.rounds) {
+    lines.push(msg('srv.team.rework_digest_round', { n: r.n, who: r.agent, stage: r.stage, verdict: r.verdict }));
+    for (const f of r.findings) lines.push(`  - [${f.id}] ${f.claim} (${msg(f.origin === 'owner' ? 'srv.team.rework_origin_owner' : 'srv.team.rework_origin_builder')}${f.open ? ', ' + msg('srv.team.rework_still_open') : ''})`);
+  }
+  const text = lines.join('\n');
+  return text.length > 7000 ? text.slice(0, 6999) + '…' : text;
+}
 const RISKY = /auth|login|password|passwd|(?:access|api|auth|refresh|jwt|bearer)[ _-]?token|secret|credential|permission|quyền|bảo mật|security|migrat|database|schema|\bdb\b|xóa (?:dữ liệu|data|bảng|db|database|tài khoản|user)|delete (?:data|table|user|account|database)|drop (?:table|database|column)|deploy|production|payment|thanh toán|refactor|kiến trúc|architecture|toàn bộ|whole project|nhiều file|many files|rewrite|viết lại/i;
 const RESEARCHY = /^(?!.*\b(fix|sửa|implement|thêm|add|tạo|create|update|cập nhật|đổi|change)\b).*(review|kiểm tra|nghiên cứu|so sánh|điều tra|tìm hiểu|giải thích|đánh giá|research|investigate|compare|explain|audit|analy[sz]e|phân tích|tại sao|why)/is;
 export function routeGoal(goal, mode = 'full', attachments = 0) {
@@ -1998,18 +2022,23 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (r.verdict === 'approved') { job.verified = job.revision; await this.finish(job, members); }
         else job.stage = 'rework'; break;
       }
-      case 'rework':
-        if (++job.round > (this.config.maxReworkRounds ?? 3)) {
+      case 'rework': {
+        // Mỗi lần owner bổ sung phạm vi và mỗi lần owner cho thêm vòng đều nới giới hạn +1; bị chặn thì không tăng round.
+        const limit = (this.config.maxReworkRounds ?? 3) + (job.scopeAdds?.length || 0) + (job.extraRounds || 0);
+        if (job.round + 1 > limit) {
+          job.reworkDigest = reworkDigest(job, limit);
           const open = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).filter(f => f.impact === 'high');
-          if (!open.length) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua"));
+          if (!open.length) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest));
           job.questions = open.slice(0, 5).map(f => `${f.id}: ${f.claim}${f.evidence ? ' — ' + f.evidence : ''}`.slice(0, 600)); job.status = 'waiting';
-          this.event(job.id, 'controller', 'user', 'QUESTION', `${msg("srv.team.disagreement_needs_human")}\n${job.questions.join('\n')}`); break;
+          this.event(job.id, 'controller', 'user', 'QUESTION', `${msg("srv.team.disagreement_needs_human")}\n${job.questions.join('\n')}\n${reworkSummaryText(job.reworkDigest)}`); break;
         }
+        job.round++;
         usageFor(this.db, { timezone: this.config.timezone, retentionDays: this.config.usageRetentionDays }).markReworked(job.id);
         if (job.fast) { this.escalate(job, members, msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round })); break; }
         this.event(job.id, 'controller', members.manager, 'REWORK_REQUEST', msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round }));
         job.skipped = []; job.stage = 'plan'; job.planReason = 'rework';
         job.planTrigger = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).map(f => f.id).join(', ') || 'test failed'; break;
+      }
       case 'final': await this.finish(job, members); break;
       default: throw new Error(msg("srv.team.stage_khong_hop_le"));
     }
@@ -2185,10 +2214,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (action === 'pause' || action === 'cancel') {
       if (action === 'cancel') { job.error = null; job.current = null; job.running = []; }
+      // "Dừng, tôi tự xử lý": giữ worktree, đánh dấu owner đang tự làm.
+      const handoff = action === 'pause' && payload.handoff === true && ['blocked', 'waiting'].includes(job.status);
+      if (handoff) job.handoff = { at: now() };
       job.status = action === 'pause' ? 'paused' : 'cancelled'; this.save(job);
       if (action === 'cancel') await this.stopPreview(id, 'cancelled');
       if (this.runs.has(id)) this.runs.get(id).abort.abort(new DOMException(action === 'cancel' ? msg("srv.team.huy_task_giu_worktree_de_khong") : msg("srv.team.dung_tien_trinh_khi_tiep_tuc"), 'AbortError'));
-      this.event(id, 'user', 'team', 'CONTROL', action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
+      this.event(id, 'user', 'team', 'CONTROL', handoff ? msg("srv.team.owner_takes_over") : action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
       if (action === 'cancel') await this.cleanupJob(id).catch(e => this.emit('fault', e));
     } else if (action === 'resume') {
       if (!['blocked', 'paused', 'waiting'].includes(job.status)) throw new Error(msg("srv.team.chi_tiep_tuc_task_paused_blocked"));
@@ -2208,6 +2240,11 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (job.usage.tokens >= cap) job.tokenBudget = job.usage.tokens + this.config.maxTokensPerJob;
         this.event(id, 'user', 'team', 'CONTROL', msg("srv.team.token_budget_extended", { 0: job.usage.tokens, 1: job.tokenBudget || cap }));
       }
+      if (payload.extraRound === true) {
+        job.extraRounds = (job.extraRounds || 0) + 1; job.reworkDigest = null; job.questions = null;
+        this.event(id, 'user', 'team', 'CONTROL', msg("srv.team.extra_round_granted", { 0: job.extraRounds }));
+      }
+      delete job.handoff;
       job.status = 'queued'; job.error = null; this.save(job); this.kick();
     } else if (action === 'message') {
       if (typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 20000) throw new Error(msg("srv.team.message_khong_hop_le"));
@@ -2215,12 +2252,14 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       job.acceptance = null;
       const names = await this.attach(job, payload.files);
       job.messages.push({ time: now(), text: payload.message.trim(), ...(names.length ? { attachments: names } : {}) });
+      // Đã có plan (trừ trả lời cổng duyệt plan / câu hỏi của teammate) = owner bổ sung phạm vi: nới giới hạn vòng sửa +1.
+      if ((job.plans?.length || job.tasks.length) && !job.planGate && !job.peerWait) (job.scopeAdds ||= []).push({ at: now(), round: job.round, reports: job.reports.length });
       // Steering invalidates a ready-to-merge result; it must go through planning/review again.
       if (job.status === 'ready') { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); job.planGate = null; job.reviewed = job.verified = job.tested = null; }
       if (job.status === 'waiting') { if (!job.peerWait) { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); } job.planGate = null; job.questions = null; delete job.peerWait; }
       // Chat vào task đang dừng/vướng = muốn nhóm làm tiếp: tự xếp hàng lại, chỉ dẫn được giao ở lượt kế tiếp.
       if (['ready', 'waiting', 'paused', 'blocked'].includes(job.status) && !this.runs.has(id)) {
-        job.roster = this.jobRoster(job); job.status = 'queued'; job.error = null; setImmediate(() => this.kick());
+        job.roster = this.jobRoster(job); job.status = 'queued'; job.error = null; job.reworkDigest = null; delete job.handoff; setImmediate(() => this.kick());
       }
       this.save(job); this.event(id, 'user', (job.roster || roster(this.config)).manager, 'MESSAGE', payload.message, { delivery: 'next invocation' });
     } else if (action === 'approve-plan') {
