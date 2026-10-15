@@ -114,8 +114,19 @@ export function run(command, args = [], options = {}) {
     const aborted = () => stop(options.signal.reason);
     options.signal?.addEventListener('abort', aborted, { once: true });
     if (options.signal?.aborted) aborted();
-    const timer = setTimeout(() => stop('Process timed out'), options.timeoutMs || 30 * 60_000);
+    const timer = setTimeout(() => {
+      const error = new Error('Process timed out'); error.timeout = 'max'; stop(error);
+    }, options.timeoutMs || 30 * 60_000);
+    let idleTimer, closed = false;
+    const resetIdle = () => {
+      clearTimeout(idleTimer);
+      if (options.idleTimeoutMs && !closed && !stopping) idleTimer = setTimeout(() => {
+        const error = new Error(`Agent silent for ${options.idleTimeoutMs / 60_000} min`); error.timeout = 'idle'; stop(error);
+      }, options.idleTimeoutMs);
+    };
+    resetIdle();
     function chunk(stream, value) {
+      resetIdle();
       if (stream === 'stdout') stdout = (stdout + value).slice(-2_000_000);
       else stderr = (stderr + value).slice(-32_000);
       buffers[stream] += value;
@@ -132,7 +143,7 @@ export function run(command, args = [], options = {}) {
     child.stdin.on('error', error => { if (error.code !== 'EPIPE') stop(error.message); });
     child.on('error', error => { failure = error; });
     child.on('close', async code => {
-      clearTimeout(timer); options.signal?.removeEventListener('abort', aborted);
+      closed = true; clearTimeout(timer); clearTimeout(idleTimer); options.signal?.removeEventListener('abort', aborted);
       await termination;
       for (const stream of ['stdout', 'stderr']) {
         chunk(stream, decoders[stream].end());

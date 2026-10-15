@@ -177,6 +177,7 @@ export function roster(config) {
 }
 
 export function validateConfig(config) {
+  for (const key of ['idleTimeoutMin', 'maxCallMin', 'silenceWarnMin']) if (config[key] !== undefined && (!Number.isFinite(config[key]) || config[key] <= 0)) throw new Error(`${key} must be a positive number`);
   for (const key of ['planApproval', 'planApprovalRework']) if (config[key] !== undefined && typeof config[key] !== 'boolean') throw new Error(msg("srv.team.plan_approval_invalid"));
   if (config.peerDialogue !== undefined && typeof config.peerDialogue !== 'boolean') throw new Error('peerDialogue must be boolean');
   if (config.evidenceMaxMB != null && (!Number.isFinite(config.evidenceMaxMB) || config.evidenceMaxMB < 0)) throw new Error('evidenceMaxMB must be a non-negative number');
@@ -185,6 +186,7 @@ export function validateConfig(config) {
   const homes = config.agents.filter(a => ['codex', 'claude', 'gemini'].includes(a.provider)).map(a => resolve(a.home || '').toLowerCase());
   if (new Set(homes).size !== homes.length) throw new Error(msg("srv.team.moi_codex_can_codex_home_rieng"));
   for (const agent of config.agents) {
+    for (const key of ['idleTimeoutMin', 'maxCallMin']) if (agent[key] !== undefined && (!Number.isFinite(agent[key]) || agent[key] <= 0)) throw new Error(`${agent.id}.${key} must be a positive number`);
     if (typeof agent.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(agent.id)) throw new Error(msg("srv.team.agent_id_khong_hop_le"));
     if (!['codex', 'gemini', 'antigravity', 'claude', 'mock'].includes(agent.provider)) throw new Error(msg("srv.team.provider_khong_ho_tro"));
     if (['codex', 'gemini', 'claude'].includes(agent.provider) && !agent.home) throw new Error(msg("srv.team.thieu_thu_muc_ho_so_rieng"));
@@ -375,6 +377,10 @@ export class Team extends EventEmitter {
     // ponytail: việc còn chờ cộng dồn như chạy tuần tự (ước lượng bi quan), đủ để hiện ETA.
     const pending = job.stage === 'implement' ? job.tasks.filter((t, i) => !t.done && !(job.running || []).some(r => r.task === i)).reduce((s, t) => s + (t.estMinutes || 10), 0) : 0;
     return Math.round(Math.max(0, ...running) + pending);
+  }
+  overrun(job) {
+    if (!job.running?.length) return null;
+    return Math.round(Math.max(0, ...job.running.map(r => (Date.now() - Date.parse(r.startedAt)) / 60000 - (r.est || 10))));
   }
   // ---- Bộ nhớ AI: 3 tầng, có giới hạn để không phình prompt ----
   // fact (theo dự án): điều bền vững Manager ghi lúc tổng kết; log (theo phiên): 1 dòng/việc do controller ghi, không tốn AI;
@@ -625,7 +631,7 @@ export class Team extends EventEmitter {
   }
   state() {
     const busy = this.busyAgents(), cap = this.capacity(), used = this.runs.size + this.extra + this.previews.size;
-    return { demo: !!this.config.demo, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, title: jobTitle(j), eta: this.eta(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
+    return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, title: jobTitle(j), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
@@ -1093,7 +1099,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       let slot, entry, status;
       try {
         slot = await this.acquire(run, agentId, signal);
-        entry = { agent: agentId, stage, task: opts.taskIndex ?? null, startedAt: now(), est: Math.round(this.estimate(agentId, opts.task)), slot };
+        const startedAt = now();
+        entry = { agent: agentId, stage, task: opts.taskIndex ?? null, startedAt, lastActivityAt: startedAt, est: Math.round(this.estimate(agentId, opts.task)), slot };
         job.running = [...(job.running || []), entry]; job.current = job.running[0]; this.save(job);
         return await this.invoke(job, agentId, stage, instruction, effort, skills, { ...opts, slot, entry }, base, signal);
       } catch (error) {
@@ -1246,9 +1253,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const sessionKey = hash(JSON.stringify({ agent: agentId, provider: agent.provider, role: agent.role, home: agent.home, sqliteHome: agent.sqliteHome, command: agent.command, model: agent.model, effort: agent.effort, prompt: agent.systemPrompt, mcp: base.mcp, worktree, slot: opts.slot || 1, access, linked: job.linked, stage, sandbox: agent.windowsSandbox || this.config.codexWindowsSandbox }));
     const resume = this.config.resumeCodexTasks === true && stage === 'implement' && agent.provider === 'codex' && opts.task;
     const sessionId = resume && opts.task.cliSession?.key === sessionKey ? opts.task.cliSession.id : undefined;
-    let report;
-    try { report = await this.agentRun(agent, { ...job, sessionId, stage, worktree, promptFile, slot: opts.slot || 1, checks: checking && access.shell ? this.project(job.project).tests : [], network: access.network, readDirs: [...readDirs, ...(job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(l => l.worktree)], addDirs: stage === 'implement' ? (job.linked || []).filter(l => granted(l.members, agentId)).map(l => l.worktree) : [], researchWeb: ['consult', 'assess'].includes(stage) ? false : this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox, agyAutoApprove: this.config.agyAutoApprove === true }, prompt, { signal: runSignal,
-      onEvent: (type, data) => { if (type === 'SESSION' && resume && /^[\w-]{1,100}$/.test(data.details?.id)) { opts.task.cliSession = { id: data.details.id, key: sessionKey }; this.save(job); } if (type === 'SPAWN' && opts.entry) { opts.entry.pid = data.details.pid; this.save(job); } if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') { const n = usageTokens(data.details); tokens += n; job.usage.tokens += n; } this.event(job.id, agentId, 'controller', type, data.summary, data.details);
+    let report, lastActivitySavedAt = 0;
+    try { report = await this.agentRun(agent, { ...job, idleTimeoutMin: base.idleTimeoutMin ?? this.config.idleTimeoutMin ?? 15, maxCallMin: base.maxCallMin ?? this.config.maxCallMin ?? 120, sessionId, stage, worktree, promptFile, slot: opts.slot || 1, checks: checking && access.shell ? this.project(job.project).tests : [], network: access.network, readDirs: [...readDirs, ...(job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(l => l.worktree)], addDirs: stage === 'implement' ? (job.linked || []).filter(l => granted(l.members, agentId)).map(l => l.worktree) : [], researchWeb: ['consult', 'assess'].includes(stage) ? false : this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox, agyAutoApprove: this.config.agyAutoApprove === true }, prompt, { signal: runSignal,
+      onEvent: (type, data) => { job.lastActivityAt = now(); if (opts.entry) opts.entry.lastActivityAt = job.lastActivityAt;
+        if (type === 'ACTIVITY' && opts.entry) data = { ...data, details: { ...data.details, task: opts.entry.task, stage: opts.entry.stage, startedAt: opts.entry.startedAt } };
+        if (type === 'SESSION' && resume && /^[\w-]{1,100}$/.test(data.details?.id)) opts.task.cliSession = { id: data.details.id, key: sessionKey }; if (type === 'SPAWN' && opts.entry) opts.entry.pid = data.details.pid;
+        if (Date.now() - lastActivitySavedAt >= 10_000) { const fresh = this.get(job.id); if (['paused', 'cancelled'].includes(fresh.status)) job.status = fresh.status; this.save(job); lastActivitySavedAt = Date.now(); }
+        if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') { const n = usageTokens(data.details); tokens += n; job.usage.tokens += n; } this.event(job.id, agentId, 'controller', type, data.summary, data.details);
         if (type === 'ACTIVITY' && !access.shell && agent.provider !== 'codex' && !shellUsed && isShell(data.details)) { shellUsed = String(data.summary || 'shell'); stop.abort(new Error('shell')); } } });
     } catch (e) {
       if (!shellUsed || signal.aborted) throw e;
@@ -1366,11 +1377,20 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (batch.length > 1) this.event(job.id, 'controller', members.manager, 'PARALLEL', msg("srv.team.parallel_start", { 0: batch.map(([, i, who]) => `T${i + 1}→${who}`).join(', ') }));
     // Song song nhiều task code: mỗi task một worktree/branch con từ đầu nhánh công việc, gộp lại tuần tự sau đó.
-    const split = code && batch.length > 1, root = this.project(job.project).path;
-    const children = split ? await Promise.all(batch.map(async ([, i]) => {
+    const root = this.project(job.project).path;
+    const branches = code ? await Promise.all(batch.map(async ([, i]) => (await run(['git'], ['-C', job.worktree, 'rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}-t${i + 1}`], { allowFailure: true })).code === 0)) : [];
+    const split = code && (batch.length > 1 || branches.some(Boolean));
+    const children = split ? await Promise.all(batch.map(async ([task, i], k) => {
       const wt = `${job.worktree}-t${i + 1}`, branch = `${job.branch}-t${i + 1}`;
-      await run(['git'], ['-C', root, 'worktree', 'remove', '--force', wt], { allowFailure: true });
-      await git(job.worktree, ['worktree', 'add', '-B', branch, wt, 'HEAD']);
+      await git(job.worktree, ['worktree', 'prune']);
+      if (branches[k]) {
+        if (!existsSync(wt)) await git(job.worktree, ['worktree', 'add', wt, branch]);
+        if (await git(wt, ['symbolic-ref', '--short', 'HEAD']) !== branch) throw new Error(msg("srv.team.agent_doi_branch_can_kiem_tra"));
+        task.base = await git(job.worktree, ['merge-base', branch, 'HEAD']);
+        this.event(job.id, 'controller', task.ranBy, 'RESUME_WIP', `T${i + 1}: resume ${branch}`, { branch, base: task.base });
+      } else {
+        await git(job.worktree, ['worktree', 'add', '-B', branch, wt, 'HEAD']); task.base = head0;
+      }
       if (job.attachments?.length) cpSync(join(job.worktree, '.ai-team', 'attachments'), join(wt, '.ai-team', 'attachments'), { recursive: true });
       return { wt, branch };
     })) : [];
@@ -1386,11 +1406,34 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         try { report = await this.callWithHandover(job, task, i, who, code ? 'implement' : 'research', skills, children[k]?.wt); }
         catch (error) { if (!error.peerReport && (!error.peerWait || runState.abort.signal.aborted)) throw error; peerWaits.set(k, error); report = error.peerReport || error.report; }
         task.contextGaps = (Array.isArray(report.contextGaps) ? report.contextGaps : []).map(String).filter(Boolean).slice(0, 10);
-        if (children[k]) { await this.commitAll(job, children[k].wt, children[k].branch, { agent: task.ranBy || who, taskIndex: i }); task.base = head0; task.commit = await git(children[k].wt, ['rev-parse', 'HEAD']); }
+        if (children[k]) { await this.commitAll(job, children[k].wt, children[k].branch, { agent: task.ranBy || who, taskIndex: i }); task.commit = await git(children[k].wt, ['rev-parse', 'HEAD']); }
         return report;
       }));
     } finally { this.extra -= batch.length - 1; }
-    let failure = results.find(r => r.status === 'rejected')?.reason, conflict = false;
+    let failure, conflict = false, retry = false;
+    for (const [k, [task, i, who]] of batch.entries()) {
+      if (results[k].status !== 'rejected') continue;
+      const error = results[k].reason, child = children[k];
+      if (child) try {
+        if (await git(child.wt, ['status', '--porcelain'])) {
+          const id = task.ranBy || who, label = this.config.agents.find(a => a.id === id)?.label || id;
+          await git(child.wt, ['add', '--all']);
+          await git(child.wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `AI Team ${job.id} T${i + 1} ${id}: WIP`]);
+          task.checkpoint = { ...task.checkpoint, wip: { branch: child.branch, commit: await git(child.wt, ['rev-parse', 'HEAD']), at: now(), reason: redact(error.message) } };
+          const fresh = this.get(job.id);
+          if (fresh.status === 'cancelled') {
+            // save() intentionally refuses cancelled jobs; only add their recovery checkpoint.
+            fresh.tasks[i].checkpoint = task.checkpoint;
+            this.db.prepare('UPDATE jobs SET body=? WHERE id=?').run(JSON.stringify(fresh), job.id); this.emit('change');
+          } else { if (fresh.status === 'paused') job.status = fresh.status; this.save(job); }
+        }
+      } catch (e) { failure ||= e; this.event(job.id, 'controller', 'user', 'WIP_WARNING', redact(e.message), { task: i, branch: child.branch }); }
+      if (['idle', 'max'].includes(error.timeout) && !task.timeoutRetried && !runState.abort.signal.aborted) {
+        task.timeoutRetried = true; retry = true;
+        const agent = this.agent(task.ranBy || who), minutes = error.timeout === 'idle' ? agent.idleTimeoutMin ?? this.config.idleTimeoutMin ?? 15 : agent.maxCallMin ?? this.config.maxCallMin ?? 120;
+        this.event(job.id, 'controller', task.ranBy || who, 'RETRY', `T${i + 1}: ${error.timeout} timeout after ${minutes} minutes; retry 1/1`, { task: i, timeout: error.timeout, minutes });
+      } else failure ||= error;
+    }
     for (const [k, [task, i, who]] of batch.entries()) {
       if (results[k].status !== 'fulfilled' || conflict) continue;
       if (children[k]) {
@@ -1405,6 +1448,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       task.done = !peerWaits.has(k); if (task.done) delete task.handover;
     }
     for (const c of children) {
+      if (!batch.find((b, k) => children[k] === c)[0].done) continue;
       await run(['git'], ['-C', root, 'worktree', 'remove', '--force', c.wt], { allowFailure: true });
       if (batch.find((b, k) => children[k] === c)[0].done) await run(['git'], ['-C', root, 'branch', '-D', c.branch], { allowFailure: true });
     }
@@ -1413,10 +1457,10 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     failure ||= peerWaits.values().next().value;
     if (failure) {
       // Đường nhanh bị vướng → nâng lên Manager lập kế hoạch thay vì dừng hẳn.
-      if (job.fast && !failure.peerWait && !runState.abort.signal.aborted) { this.escalate(job, members, failure.message); return false; }
+      if (job.fast && !failure.timeout && !failure.peerWait && !runState.abort.signal.aborted) { this.escalate(job, members, failure.message); return false; }
       throw failure;
     }
-    return true;
+    return !retry;
   }
   evidence(id) {
     const job = this.get(id);
@@ -1928,6 +1972,10 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       this.save(job);
     } catch (error) {
       const fresh = this.get(job.id);
+      if (this.closed && fresh.status !== 'cancelled') {
+        job.status = 'paused'; job.error = null; job.messages = fresh.messages; job.running = []; job.current = null; this.save(job);
+        this.event(job.id, 'controller', 'user', 'RECOVERY', 'Server closed; task checkpoints kept for resume'); return;
+      }
       if (fresh.status === 'paused' && error.peerReport) { job.status = 'paused'; job.messages = fresh.messages; job.running = []; job.current = null; this.save(job); }
       if (!['paused', 'cancelled'].includes(fresh.status)) {
         job.status = error.peerWait ? 'waiting' : 'blocked'; job.messages = fresh.messages; job.error = redact(error.message).slice(0, 8000); job.running = []; job.current = null;

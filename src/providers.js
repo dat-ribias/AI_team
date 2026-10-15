@@ -190,9 +190,12 @@ export async function listModels(agent) {
 export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   signal?.throwIfAborted();
   if (agent.provider === 'mock') {
+    const delay = Number(process.env.AI_TEAM_DEMO_DELAY_MS) || 450;
     await new Promise((resolve, reject) => {
-      const aborted = () => { clearTimeout(timer); reject(signal.reason); };
-      const timer = setTimeout(() => { signal?.removeEventListener('abort', aborted); resolve(); }, 450);
+      const activity = delay > 450 && process.env.AI_TEAM_DEMO_SILENT !== '1'
+        ? setInterval(() => onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong") }), 20_000) : null;
+      const aborted = () => { clearTimeout(timer); clearInterval(activity); reject(signal.reason); };
+      const timer = setTimeout(() => { clearInterval(activity); signal?.removeEventListener('abort', aborted); resolve(); }, delay);
       signal?.addEventListener('abort', aborted, { once: true });
     });
     signal?.throwIfAborted();
@@ -259,6 +262,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   if (slot > 1) mkdirSync(slotAgent.sqliteHome, { recursive: true });
   const env = childEnv(slotAgent);
   const exec = () => run(resolveCommand(agent), args, {
+    idleTimeoutMs: (task.idleTimeoutMin ?? 15) * 60_000, timeoutMs: (task.maxCallMin ?? 120) * 60_000,
     cwd: task.worktree, env, onSpawn: pid => onEvent('SPAWN', { summary: `PID ${pid} · slot ${slot}`, details: { pid, slot, cwd: task.worktree, sqliteHome: env.CODEX_SQLITE_HOME || agent.home || null } }), input: ['codex', 'claude'].includes(agent.provider) ? prompt : '', signal,
     onLine(line, stream) {
       if (!line) return;
