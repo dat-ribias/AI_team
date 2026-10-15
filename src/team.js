@@ -2029,6 +2029,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           job.reworkDigest = reworkDigest(job, limit);
           const open = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).filter(f => f.impact === 'high');
           if (!open.length) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest));
+          job.error = msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest);
           job.questions = open.slice(0, 5).map(f => `${f.id}: ${f.claim}${f.evidence ? ' — ' + f.evidence : ''}`.slice(0, 600)); job.status = 'waiting';
           this.event(job.id, 'controller', 'user', 'QUESTION', `${msg("srv.team.disagreement_needs_human")}\n${job.questions.join('\n')}\n${reworkSummaryText(job.reworkDigest)}`); break;
         }

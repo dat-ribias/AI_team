@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team, reworkDigest, reworkSummaryText } from '../src/team.js';
 import { run } from '../src/process.js';
+import { runAgent } from '../src/providers.js';
 
 test('reworkDigest separates owner scope additions from builder defects and truncates claims', () => {
   const long = 'x'.repeat(300);
@@ -29,9 +30,42 @@ test('reworkDigest separates owner scope additions from builder defects and trun
   assert.equal(t.rounds.at(-1).verdict, 'failed'); assert.deepEqual(t.open, []);
 });
 
+test('rework limit with high findings includes the round summary in job.error and the owner question', async t => {
+  const path = mkdtempSync(join(tmpdir(), 'ai-team-rework-')), data = mkdtempSync(join(tmpdir(), 'ai-team-rework-state-'));
+  let team;
+  t.after(async () => { await team?.close(); rmSync(path, { recursive: true, force: true }); rmSync(data, { recursive: true, force: true }); });
+  await run(['git'], ['init', '-b', 'main', path]);
+  await run(['git'], ['-C', path, 'config', 'core.autocrlf', 'false']);
+  writeFileSync(join(path, 'hello.txt'), 'Hello!\n');
+  await run(['git'], ['-C', path, 'add', '.']);
+  await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial']);
+  const config = { demo: true, planApproval: false, maxRamPercent: 100, maxCpuPercent: 100, maxReworkRounds: 0,
+    agents: ['codex-1', 'codex-2', 'codex-3', 'codex-4', 'gemini'].map(id => ({ id, label: id, role: id, provider: 'mock' })),
+    pipeline: { manager: 'codex-1', builders: ['codex-2', 'codex-4'], reviewer: 'gemini', verifier: 'codex-3' },
+    projects: [{ id: 'test', path, tests: [[process.execPath, '-e', 'process.exit(0)']] }] };
+  team = new Team(config, data, { runAgent: async (agent, task, prompt, opts) => {
+    const r = await runAgent(agent, task, prompt, opts);
+    return task.stage === 'review' ? { ...r, verdict: 'changes_requested', findings: [{ id: 'F1', claim: 'Missing empty file handling', impact: 'high' }] } : r;
+  } });
+  const job = await team.create({ project: 'test', goal: 'Update hello' });
+  const end = Date.now() + 60000;
+  let waiting;
+  while (Date.now() < end) {
+    const current = team.get(job.id);
+    if (current.status === 'waiting' && !team.active) { waiting = current; break; }
+    await new Promise(r => setTimeout(r, 30));
+  }
+  assert(waiting, `Timeout: ${JSON.stringify(team.get(job.id))}`);
+  assert.equal(waiting.status, 'waiting');
+  assert.match(waiting.error, /giới hạn/); assert.match(waiting.error, /Vòng 1/);
+  assert.match(waiting.error, /\[F1\] Missing empty file handling/);
+  assert(team.events(job.id).some(e => e.type === 'QUESTION' && /Vòng 1/.test(e.summary) && /\[F1\] Missing empty file handling/.test(e.summary)));
+});
+
 test('rework limit explains rounds, owner scope adds +1 round, extraRound resume runs exactly one more', async t => {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-rework-')), data = mkdtempSync(join(tmpdir(), 'ai-team-rework-state-'));
-  t.after(() => { rmSync(path, { recursive: true, force: true }); rmSync(data, { recursive: true, force: true }); });
+  let team;
+  t.after(async () => { await team?.close(); rmSync(path, { recursive: true, force: true }); rmSync(data, { recursive: true, force: true }); });
   await run(['git'], ['init', '-b', 'main', path]);
   await run(['git'], ['-C', path, 'config', 'core.autocrlf', 'false']);
   writeFileSync(join(path, 'hello.txt'), 'Hello!\n');
@@ -41,7 +75,7 @@ test('rework limit explains rounds, owner scope adds +1 round, extraRound resume
     agents: ['codex-1', 'codex-2', 'codex-3', 'codex-4', 'gemini'].map(id => ({ id, label: id, role: id, provider: 'mock' })),
     pipeline: { manager: 'codex-1', builders: ['codex-2', 'codex-4'], reviewer: 'gemini', verifier: 'codex-3' },
     projects: [{ id: 'test', path, tests: [[process.execPath, '-e', 'process.exit(7)']] }] };
-  const team = new Team(config, data); t.after(() => team.close());
+  team = new Team(config, data);
   const settle = async (id, timeoutMs = 60000) => {
     const end = Date.now() + timeoutMs;
     while (Date.now() < end) { const job = team.get(id); if (job.status === 'blocked' && !team.active) return job; await new Promise(r => setTimeout(r, 30)); }
