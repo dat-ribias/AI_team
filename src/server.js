@@ -5,6 +5,7 @@ import { join, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { Team } from './team.js';
+import { DEFAULT_SYSTEM_PROMPT } from './prompts.js';
 import { Accounts, accessList } from './accounts.js';
 import { exportTransfer, importTransfer } from './transfer.js';
 
@@ -76,6 +77,18 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, team.skills(url.searchParams.has('refresh')).map(({ name, description, source }) => ({ name, description, source })));
     if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
+    if (req.method === 'GET' && url.pathname === '/api/system-prompt') return send(res, 200, { ...team.systemPrompt(), default: DEFAULT_SYSTEM_PROMPT, history: team.systemPromptHistory() });
+    if (req.method === 'POST' && url.pathname === '/api/system-prompt') {
+      team.setSystemPrompt((await body(req)).text);
+      return send(res, 200, { ...team.systemPrompt(), default: DEFAULT_SYSTEM_PROMPT, history: team.systemPromptHistory() });
+    }
+    const projectPrompt = /^\/api\/projects\/([a-z0-9-]+)\/prompt(\/draft)?$/.exec(url.pathname);
+    if (req.method === 'GET' && projectPrompt && !projectPrompt[2]) return send(res, 200, team.projectPrompt(projectPrompt[1]));
+    if (req.method === 'POST' && projectPrompt) {
+      if (projectPrompt[2]) return send(res, 200, { job: await team.draftProjectPrompt(projectPrompt[1]) });
+      const input = await body(req), result = team.writeProjectPrompt(projectPrompt[1], input.text, input.approved);
+      return send(res, 200, { ok: true, chars: result.chars });
+    }
     if (req.method === 'POST' && url.pathname === '/api/projects') return send(res, 201, await accounts.addProject(await body(req)));
     if (req.method === 'POST' && url.pathname === '/api/projects/pick') return send(res, 200, await accounts.pickFolder());
     const projectBranches = /^\/api\/projects\/([a-z0-9-]+)\/branches$/.exec(url.pathname);
