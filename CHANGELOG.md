@@ -1,5 +1,7 @@
 # Lịch sử thay đổi
 
+- 2026-10-15 · Thêm settings và lịch sử hỏi/đáp thu gọn cho Lead tham khảo ChatGPT web bằng quota web ở bước plan, cùng tài liệu cấu hình Oracle.
+
 Nguồn: lịch sử `master` tại `072ccb2` và bảng jobs đọc chỉ đọc ngày 2026-10-14. Mỗi job đã có commit trong master ghi một lần; ngày lấy từ commit mới nhất của job trong lịch sử này (riêng merge trực tiếp vào master dùng ngày merge). Tiêu đề/tóm tắt job được rút gọn từ goal và báo cáo cuối trong DB khi job cũ chưa có title. Commit không gắn job giữ tiêu đề Git, không suy đoán nội dung. Không bao gồm job của repo khác.
 
 ## 2026-10-14

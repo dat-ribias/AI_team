@@ -1037,5 +1037,10 @@
   "ui.cleanup.kind.session": "CLI sessions",
   "ui.cleanup.status.ok": "Cleaned",
   "ui.cleanup.status.skipped": "Skipped",
-  "ui.cleanup.status.error": "Error"
+  "ui.cleanup.status.error": "Error",
+  "ui.settings.oracle": "Lead consults ChatGPT web",
+  "ui.settings.oracleHint": "Lead can ask ChatGPT web using web quota; errors are skipped automatically.",
+  "ui.settings.oracleUnavailable": "Configure a ChatGPT web account and use a supported server to enable.",
+  "ui.ev.ORACLE_QUESTION": "Ask ChatGPT web",
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web answer"
 }

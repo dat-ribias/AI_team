@@ -1037,5 +1037,10 @@
   "ui.cleanup.kind.session": "CLI セッション",
   "ui.cleanup.status.ok": "削除済み",
   "ui.cleanup.status.skipped": "スキップ",
-  "ui.cleanup.status.error": "エラー"
+  "ui.cleanup.status.error": "エラー",
+  "ui.settings.oracle": "Lead が ChatGPT web に相談",
+  "ui.settings.oracleHint": "Lead は web の利用枠で ChatGPT web に相談できます。エラー時はスキップします。",
+  "ui.settings.oracleUnavailable": "有効にするには ChatGPT web アカウントの設定と対応サーバーが必要です。",
+  "ui.ev.ORACLE_QUESTION": "ChatGPT web への質問",
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web の回答"
 }
