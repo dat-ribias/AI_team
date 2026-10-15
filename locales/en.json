@@ -43,6 +43,8 @@
   "ui.metric.ramNote": "{total} GB total · controller {controller} MB",
   "ui.metric.cpu": "CPU",
   "ui.metric.cpuNote": "One run at a time",
+  "ui.metric.cpuAverage30s": "30-second average CPU (whole machine)",
+  "ui.metric.agentsAboveRecommended": "{n} agents running, above the recommended {m}",
   "ui.team.title": "Who is doing what?",
   "ui.team.running": "{n} / 1 run active",
   "ui.team.legendWorking": "Working",

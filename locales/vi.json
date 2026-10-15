@@ -43,6 +43,8 @@
   "ui.metric.ramNote": "{total} GB tổng · controller {controller} MB",
   "ui.metric.cpu": "CPU MÁY",
   "ui.metric.cpuNote": "Một lượt xử lý tại một thời điểm",
+  "ui.metric.cpuAverage30s": "CPU trung bình 30s (toàn máy)",
+  "ui.metric.agentsAboveRecommended": "Đang chạy {n} agent, vượt mức khuyến nghị {m}",
   "ui.team.title": "Ai đang làm gì?",
   "ui.team.running": "{n} / 1 lượt hoạt động",
   "ui.team.legendWorking": "Đang làm",

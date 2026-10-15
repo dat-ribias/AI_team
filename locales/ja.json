@@ -43,6 +43,8 @@
   "ui.metric.ramNote": "合計 {total} GB・コントローラー {controller} MB",
   "ui.metric.cpu": "CPU",
   "ui.metric.cpuNote": "同時実行は1件",
+  "ui.metric.cpuAverage30s": "CPU 30秒平均（マシン全体）",
+  "ui.metric.agentsAboveRecommended": "{n} エージェントが実行中で、推奨値 {m} を超えています",
   "ui.team.title": "誰が何をしている？",
   "ui.team.running": "{n} / 1 実行中",
   "ui.team.legendWorking": "作業中",
