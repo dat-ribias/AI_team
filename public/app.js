@@ -976,12 +976,14 @@ function drawTimeline() {
   const timeline = $('timeline'), atBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 80;
   const opened = new Set([...timeline.querySelectorAll('details[open]')].map(e => e.dataset.seq));
   const time = e => new Date(e.timestamp).toLocaleTimeString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const details = e => e.details ? `<details data-seq="${e.seq}" ${opened.has(String(e.seq)) ? 'open' : ''}><summary>${esc(t('ui.timeline.details'))}</summary><pre>${esc(JSON.stringify(e.details, null, 2))}</pre></details>` : '';
+  const details = e => (['TASK_ASSIGNMENT', 'REVIEW_REQUEST'].includes(e.type) && e.details?.prompt ? `<button type="button" data-view-prompt="${esc(e.seq)}">${esc(t('ui.prompt.view'))}</button>` : '') + (e.details ? `<details data-seq="${e.seq}" ${opened.has(String(e.seq)) ? 'open' : ''}><summary>${esc(t('ui.timeline.details'))}</summary><pre>${esc(JSON.stringify(e.details, null, 2))}</pre></details>` : '');
   timeline.innerHTML = filtered.length ? filtered.map(e => {
+    if (e.type === 'PROMPT_BUDGET') return `<article class="prompt-warning" role="alert"><strong>${esc(t('ui.prompt.over'))}</strong><p>${esc(e.summary)}</p><time>${time(e)}</time>${details(e)}</article>`;
     if (SYSTEM_TYPES.includes(e.type)) return `<div class="chat-system"><span class="chat-type">${esc(evLabel(e.type))}</span><b>${esc(names[e.from] || e.from)}</b> ${esc(cut(e.summary, 300))}<time>${time(e)}</time>${details(e)}</div>`;
     const mine = e.from === 'user', cls = [mine && 'mine', e.from === 'controller' && 'from-system', e.type === 'BLOCKER' && 'alert', e.type === 'QUESTION' && 'question', ['READY_FOR_MERGE', 'MERGED'].includes(e.type) && 'success'].filter(Boolean).join(' ');
     return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
   }).join('') : `<div class="empty"><span class="empty-icon">◎</span><b>${esc(t('ui.timeline.emptyTitle'))}</b><span>${esc(t('ui.timeline.emptyText'))}</span></div>`;
+  timeline.querySelectorAll('[data-view-prompt]').forEach(b => b.onclick = () => openCallPrompt(events.find(e => String(e.seq) === b.dataset.viewPrompt)));
   // Agent đang chạy: bong bóng "đang soạn" ba chấm.
   // Chỉ AI đang chạy cho đúng việc đang xem; việc khác cùng phiên đã hiện ở sơ đồ (viền đứt "đang làm việc khác").
   const sessionRuns = job ? runningOf(job).map(r => ({ ...r, job: job.id })) : [];
@@ -1499,6 +1501,95 @@ document.addEventListener('click', e => {
     document.querySelectorAll('.actions-dropdown[open]').forEach(d => d.removeAttribute('open'));
   }
 });
+
+// Shared and project prompt controls stay separate from member profile prompts.
+let promptRequest = 0;
+function openPrompt(title) {
+  promptRequest++;
+  $('prompt-title').textContent = title;
+  $('prompt-body').textContent = t('ui.prompt.loading');
+  if (!$('prompt-dialog').open) $('prompt-dialog').showModal();
+  return promptRequest;
+}
+function promptCounter(text, budget) {
+  return t('ui.prompt.count', { chars: text.length, tokens: Math.ceil(text.length / 4), budget });
+}
+function wirePromptCounter(budget) {
+  const input = $('prompt-text'), count = $('prompt-count');
+  const update = () => { count.textContent = promptCounter(input.value, budget); count.classList.toggle('prompt-over', input.value.length > budget); };
+  input.oninput = update; update();
+}
+async function openSystemPrompt() {
+  const request = openPrompt(t('ui.prompt.system'));
+  const data = await api('system-prompt');
+  if (request !== promptRequest || !$('prompt-dialog').open) return;
+  $('prompt-body').innerHTML = `<p class="muted">${esc(t('ui.prompt.version'))} ${esc(data.version)}${data.isDefault ? ' · ' + esc(t('ui.prompt.default')) : ''}</p><form id="system-prompt-form"><label for="prompt-text">${esc(t('ui.prompt.system'))}</label><textarea id="prompt-text" rows="10" maxlength="4000" required></textarea><p id="prompt-count" class="muted" aria-live="polite"></p><div class="prompt-actions"><button type="submit" class="primary">${esc(t('ui.prompt.save'))}</button><button type="button" id="prompt-default">${esc(t('ui.prompt.restore'))}</button></div></form><h3>${esc(t('ui.prompt.history'))}</h3><div class="prompt-history">${(data.history || []).map((v, i) => `<details><summary>${esc(t('ui.prompt.version'))} ${esc(v.version)} · ${esc(clock(v.at))}</summary><pre>${esc(v.text)}</pre><button type="button" data-prompt-version="${i}">${esc(t('ui.prompt.reuse'))}</button></details>`).join('')}</div>`;
+  $('prompt-text').value = data.text;
+  wirePromptCounter(4000);
+  let saving = false;
+  const save = async text => {
+    if (saving) return;
+    if (text.length > 4000) throw new Error(t('ui.prompt.tooLong'));
+    saving = true;
+    const buttons = [...$('prompt-body').querySelectorAll('button')]; buttons.forEach(b => b.disabled = true);
+    try { await api('system-prompt', { text }); if (request === promptRequest && $('prompt-dialog').open) await openSystemPrompt(); }
+    finally { saving = false; buttons.forEach(b => b.disabled = false); }
+  };
+  $('system-prompt-form').onsubmit = e => { e.preventDefault(); attempt(() => save($('prompt-text').value)); };
+  $('prompt-default').onclick = () => attempt(() => save(data.default));
+  $('prompt-body').querySelectorAll('[data-prompt-version]').forEach(b => b.onclick = () => attempt(() => save(data.history[+b.dataset.promptVersion].text)));
+}
+async function openProjectPrompt(project = curProject) {
+  if (!project) return notice(t('ui.prompt.noProject'));
+  const request = openPrompt(`${t('ui.prompt.project')} · ${project}`);
+  const path = `projects/${encodeURIComponent(project)}/prompt`, data = await api(path);
+  if (request !== promptRequest || !$('prompt-dialog').open) return;
+  if (data.exists) {
+    $('prompt-body').innerHTML = `<p class="${data.chars > data.budget ? 'prompt-warning' : 'muted'}">${esc(t('ui.prompt.projectCount', { chars: data.chars, budget: data.budget }))}${data.chars > data.budget ? ' · ' + esc(t('ui.prompt.over')) : ''}</p><p class="muted">${esc(t('ui.prompt.readonly'))}</p><pre class="prompt-content">${esc(data.text)}</pre>`;
+    return;
+  }
+  const key = `prompt-draft:${project}`, draftId = store.get(key);
+  $('prompt-body').innerHTML = `<p class="muted">${esc(t('ui.prompt.missing'))}</p><button type="button" id="prompt-draft">${esc(t('ui.prompt.create'))}</button><p id="prompt-draft-status" role="status"></p><button type="button" id="prompt-draft-check" ${draftId ? '' : 'hidden'}>${esc(t('ui.prompt.checkDraft'))}</button><form id="project-prompt-form" hidden><label for="prompt-text">${esc(t('ui.prompt.draftText'))}</label><textarea id="prompt-text" rows="10" required></textarea><p id="prompt-count" class="muted" aria-live="polite"></p><button type="submit" class="primary">${esc(t('ui.prompt.approve'))}</button></form>`;
+  let currentDraft = draftId;
+  const checkDraft = async () => {
+    const job = await api(`jobs/${encodeURIComponent(currentDraft)}`);
+    if (request !== promptRequest || !$('prompt-dialog').open) return;
+    $('prompt-draft-status').textContent = t(job.conclusion ? 'ui.prompt.draftReady' : 'ui.prompt.draftCreated', { id: currentDraft });
+    if (job.conclusion) {
+      $('project-prompt-form').hidden = false;
+      $('prompt-draft').disabled = true;
+      $('prompt-draft-check').hidden = true;
+      wirePromptCounter(data.budget);
+    }
+  };
+  $('prompt-draft').onclick = () => attempt(async () => {
+    const button = $('prompt-draft'); button.disabled = true;
+    try {
+      const result = await api(path + '/draft', {});
+      currentDraft = result.job.id; store.set(key, currentDraft);
+      if (request !== promptRequest || !$('prompt-dialog').open) return;
+      $('prompt-draft-status').textContent = t('ui.prompt.draftCreated', { id: currentDraft });
+      $('prompt-draft-check').hidden = false;
+    } catch (e) { button.disabled = false; throw e; }
+  });
+  $('prompt-draft-check').onclick = () => attempt(checkDraft);
+  $('project-prompt-form').onsubmit = e => { e.preventDefault(); attempt(async () => {
+    if (!confirm(t('ui.prompt.confirm'))) return;
+    const button = e.target.querySelector('button'); button.disabled = true;
+    try { await api(path, { text: $('prompt-text').value, approved: true }); store.set(key, ''); if (request === promptRequest && $('prompt-dialog').open) await openProjectPrompt(project); }
+    finally { button.disabled = false; }
+  }); };
+  if (currentDraft) { $('prompt-draft').disabled = true; await checkDraft(); }
+}
+function openCallPrompt(event) {
+  if (!event?.details?.prompt) return;
+  openPrompt(t('ui.prompt.view'));
+  $('prompt-body').innerHTML = `<div class="prompt-table-wrap"><table class="prompt-table"><thead><tr>${['part', 'chars', 'tokens', 'budget'].map(k => `<th scope="col">${esc(t('ui.prompt.' + k))}</th>`).join('')}</tr></thead><tbody>${(event.details.promptParts || []).map(p => `<tr class="${p.over ? 'prompt-over' : ''}"><th scope="row">${esc(p.name)}${p.over ? ' · ' + esc(t('ui.prompt.over')) : ''}</th><td>${esc(p.chars)}</td><td>${esc(p.tokens)}</td><td>${esc(p.budget ?? '—')}</td></tr>`).join('')}</tbody></table></div><pre class="prompt-content">${esc(event.details.prompt)}</pre>`;
+}
+$('system-prompt-open').onclick = () => attempt(openSystemPrompt);
+$('project-prompt-open').onclick = () => attempt(() => openProjectPrompt());
+$('prompt-close').onclick = () => $('prompt-dialog').close();
+$('prompt-dialog').addEventListener('close', () => { promptRequest++; });
 
 await loadLanguage(store.get('lang') || 'vi');
 await attempt(refresh);
