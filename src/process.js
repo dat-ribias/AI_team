@@ -69,13 +69,16 @@ export function childEnv(agent) {
   return env;
 }
 
+// 128 = process does not exist or has already exited; consider it killed.
+export function taskkillSucceeded(code) { return code === 0 || code === 128; }
+
 export async function killTree(child) {
   if (!child?.pid) return;
   if (process.platform === 'win32') {
     if (child.exitCode !== null || child.signalCode) return;
     await new Promise((resolve, reject) => {
       const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
-      killer.on('error', reject); killer.on('close', code => code === 0 ? resolve() : reject(new Error(`taskkill failed (${code})`)));
+      killer.on('error', reject); killer.on('close', code => taskkillSucceeded(code) ? resolve() : reject(new Error(`taskkill failed (${code})`)));
     });
   } else {
     try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
