@@ -127,29 +127,57 @@ async function retryState(fn) {
   try { return await fn(); }
   catch (error) { if (!/sqlite|state runtime|database is locked/i.test(error.message)) throw error; await new Promise(r => setTimeout(r, 2500)); return fn(); }
 }
-export async function codexRpc(agent, methods) {
+export async function codexRpc(agent, methods, { signal } = {}) {
+  signal?.throwIfAborted();
   if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap_bam_dang_nhap"));
-  return withHome(agent, () => retryState(async () => {
+  const read = async () => {
+    signal?.throwIfAborted();
     const client = await codexClient(agent);
+    let rejectAbort, closing;
+    const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+    const abort = () => {
+      rejectAbort(signal.reason);
+      closing = client.close();
+      closing.catch(() => {});
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     try {
-      const results = [];
-      for (const method of methods) results.push(await client.request(method));
-      return results;
-    } finally { await client.close(); }
-  }));
+      if (signal?.aborted) abort();
+      return await Promise.race([aborted, (async () => {
+        signal?.throwIfAborted();
+        const results = [];
+        for (const method of methods) { signal?.throwIfAborted(); results.push(await client.request(method)); }
+        return results;
+      })()]);
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      throw error;
+    } finally { signal?.removeEventListener('abort', abort); await (closing || client.close()); }
+  };
+  return withHome(agent, async () => {
+    try { return await read(); }
+    catch (error) {
+      signal?.throwIfAborted();
+      if (!/sqlite|state runtime|database is locked/i.test(error.message)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 2500));
+      signal?.throwIfAborted();
+      return read();
+    }
+  });
 }
 
 const unsupportedUsage = new Set();
-export async function readQuota(agent) {
+export async function readQuota(agent, { signal } = {}) {
+  signal?.throwIfAborted();
   if (agent.provider === 'codex') {
     const sqliteHome = join(agent.home, 'sqlite-quota'); mkdirSync(sqliteHome, { recursive: true });
-    const [account, quota] = await codexRpc({ ...agent, sqliteHome, lockKey: agent.home + '#quota' }, ['account/read', 'account/rateLimits/read']);
+    const [account, quota] = await codexRpc({ ...agent, sqliteHome, lockKey: agent.home + '#quota' }, ['account/read', 'account/rateLimits/read'], { signal });
     return { buckets: normalizeCodexQuota(quota), account: account.account || null };
   }
   if (agent.provider !== 'antigravity') throw new Error(msg("srv.providers.cli_nay_chua_co_bo_doc"));
   // agy mới hỗ trợ `-p /usage` không gọi model. Bản cũ coi đó là prompt (tốn quota) → gặp lỗi một lần thì ngừng thử tới khi restart.
   if (unsupportedUsage.has(agent.id)) throw new Error(msg("srv.providers.agy_tren_may_chua_tra_usage"));
-  const output = await run(resolveCommand(agent), ['-p', '/usage', '--output-format', 'json'], { env: childEnv(agent), timeoutMs: 25_000, allowFailure: true });
+  const output = await run(resolveCommand(agent), ['-p', '/usage', '--output-format', 'json'], { env: childEnv(agent), timeoutMs: 25_000, allowFailure: true, signal });
   let raw;
   try { raw = JSON.parse(output.stdout); if (typeof raw?.response === 'string') try { raw.response = JSON.parse(raw.response); } catch {} }
   catch { unsupportedUsage.add(agent.id); throw new Error(msg("srv.providers.agy_khong_tra_json_cho_usage") + (output.stderr || output.stdout).slice(0, 300)); }
