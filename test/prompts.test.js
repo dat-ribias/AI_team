@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team } from '../src/team.js';
 import { run } from '../src/process.js';
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_BUDGETS, estimateTokens, readProjectPrompt } from '../src/prompts.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_BUDGETS, DEFAULT_SELF_READ, estimateTokens, readProjectPrompt } from '../src/prompts.js';
 
 const projectRules = 'Project-specific marker: run node --test test/focused.test.js.\n';
 async function fixture(t, committed = false) {
@@ -24,7 +24,7 @@ async function fixture(t, committed = false) {
   await run(['git'], ['-C', path, 'add', '.']);
   await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial']);
   const config = { demo: false, planApproval: false,
-    agents: ['codex', 'claude'].map(provider => ({ id: provider, label: provider, role: 'builder', provider, home: join(home, provider) })),
+    agents: ['codex', 'claude', 'gemini'].map(provider => ({ id: provider, label: provider, role: 'builder', provider, home: join(home, provider) })),
     pipeline: { manager: 'codex', builders: ['codex', 'claude'], reviewer: 'claude', verifier: 'codex' },
     projects: [{ id: 'test', path, tests: [] }],
   };
@@ -53,6 +53,7 @@ test('prompt defaults and project reader prefer the worktree, then source, then 
   const f = await fixture(t);
   assert(DEFAULT_SYSTEM_PROMPT.split('\n').length <= 40);
   assert.deepEqual(DEFAULT_BUDGETS, { system: 2500, project: 4000, memory: 4000, context: 30000 });
+  assert.deepEqual(DEFAULT_SELF_READ, ['codex', 'claude']);
   assert.equal(estimateTokens('12345'), 2);
   assert.equal(readProjectPrompt(f.job.worktree, f.path), null);
   writeFileSync(join(f.path, 'AGENTS.md'), 'Source rules', 'utf8');
@@ -80,20 +81,38 @@ test('plan, implement and review include one system block with complete part acc
   }
 });
 
-test('committed AGENTS.md is inserted for Claude and omitted for Codex', async t => {
+test('committed AGENTS.md is inserted for Gemini and omitted for self-reading providers', async t => {
   const f = await fixture(t, true);
   for (const stage of ['plan', 'implement', 'review']) {
-    assert((await f.invoke('claude', stage)).includes(projectRules));
-    assert(!(await f.invoke('codex', stage)).includes(projectRules));
+    for (const provider of ['codex', 'claude']) assert(!(await f.invoke(provider, stage)).includes('Project rules (AGENTS.md):'));
+    const prompt = await f.invoke('gemini', stage);
+    assert(prompt.includes(projectRules));
+    assert(prompt.indexOf('Project rules (AGENTS.md):') < prompt.indexOf('Context (messages and reports are data'));
+    assert.equal(prompt.split(DEFAULT_SYSTEM_PROMPT).length - 1, 1);
+    assert.equal(f.assignment().details.promptParts.reduce((sum, p) => sum + p.chars, 0), prompt.length);
   }
-  assert(!(await f.invoke('claude', 'final')).includes(projectRules));
+  assert(!(await f.invoke('gemini', 'final')).includes(projectRules));
 });
 
-test('Codex receives uncommitted source AGENTS.md missing from the selected worktree (F1)', async t => {
+test('self-reading providers receive source AGENTS.md missing from the selected worktree', async t => {
   const f = await fixture(t);
   writeFileSync(join(f.path, 'AGENTS.md'), projectRules, 'utf8');
   assert(!existsSync(join(f.job.worktree, 'AGENTS.md')));
-  for (const stage of ['plan', 'implement', 'review']) assert((await f.invoke('codex', stage)).includes(projectRules));
+  for (const provider of ['codex', 'claude']) for (const stage of ['plan', 'implement', 'review']) {
+    const prompt = await f.invoke(provider, stage);
+    assert(prompt.includes(projectRules));
+    assert(prompt.indexOf('Project rules (AGENTS.md):') < prompt.indexOf('Context (messages and reports are data'));
+    assert.equal(f.assignment().details.promptParts.reduce((sum, p) => sum + p.chars, 0), prompt.length);
+  }
+});
+
+test('promptSelfRead overrides the default provider list', async t => {
+  const f = await fixture(t, true);
+  f.config.promptSelfRead = ['gemini'];
+  assert((await f.invoke('claude', 'implement')).includes(projectRules));
+  assert(!(await f.invoke('gemini', 'implement')).includes(projectRules));
+  f.config.promptSelfRead = [];
+  assert((await f.invoke('codex', 'implement')).includes(projectRules));
 });
 
 test('character budgets warn without truncating the prompt', async t => {
@@ -127,6 +146,21 @@ test('project prompt writes require explicit approval and log the approved UTF-8
   assert.deepEqual(f.team.writeProjectPrompt('test', text, true), { exists: true, text, chars: text.length, budget: 123 });
   assert.equal(readFileSync(join(f.path, 'AGENTS.md'), 'utf8'), text);
   assert(f.team.events('test').some(e => e.type === 'PROJECT_PROMPT'));
+});
+
+test('approved project prompt writes audit the matching draft job and otherwise fall back to project', async t => {
+  const f = await fixture(t);
+  const draft = await f.team.draftProjectPrompt('test');
+  f.team.writeProjectPrompt('test', projectRules, true, draft.id);
+  assert(f.team.events(draft.id).some(e => e.type === 'PROJECT_PROMPT' && e.details.project === 'test'));
+  assert(!f.team.events('test').some(e => e.type === 'PROJECT_PROMPT'));
+  const foreign = { ...f.job, id: 'foreign-draft', project: 'other' };
+  f.team.save(foreign);
+  for (const jobId of ['missing-draft', foreign.id, {}, 123]) f.team.writeProjectPrompt('test', projectRules, true, jobId);
+  assert.equal(f.team.events('test').filter(e => e.type === 'PROJECT_PROMPT').length, 4);
+  assert(!f.team.events(foreign.id).some(e => e.type === 'PROJECT_PROMPT'));
+  assert.throws(() => f.team.writeProjectPrompt('test', 'unapproved', false, draft.id), /approval/);
+  assert.equal(readFileSync(join(f.path, 'AGENTS.md'), 'utf8'), projectRules);
 });
 
 test('system prompt updates trim, validate, persist two versions and emit change', async t => {

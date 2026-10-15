@@ -5,7 +5,7 @@ import { resolve, join, basename, extname, relative, isAbsolute, dirname, sep } 
 import { randomUUID, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore, fileHash, hash } from './memory.js';
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_BUDGETS, estimateTokens, readProjectPrompt } from './prompts.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_BUDGETS, DEFAULT_SELF_READ, estimateTokens, readProjectPrompt } from './prompts.js';
 import { ledger, scopeFiles, question, answer, decide, refreshLedger, obligations, evidence } from './discussions.js';
 import { cpus, totalmem, freemem } from 'node:os';
 import { EventEmitter } from 'node:events';
@@ -580,11 +580,13 @@ export class Team extends EventEmitter {
     const path = this.project(projectId).path, prompt = readProjectPrompt(path, path), text = prompt?.text || '';
     return { exists: prompt !== null, text, chars: text.length, budget: this.config.promptBudgets?.project ?? DEFAULT_BUDGETS.project };
   }
-  writeProjectPrompt(projectId, text, approved) {
+  writeProjectPrompt(projectId, text, approved, jobId) {
     if (approved !== true) throw new Error('Owner approval is required to write the project prompt');
     if (typeof text !== 'string') throw new Error('Project prompt must be text');
     writeFileSync(join(this.project(projectId).path, 'AGENTS.md'), text, 'utf8');
-    this.event(projectId, 'controller', 'user', 'PROJECT_PROMPT', 'Project prompt updated with owner approval', { project: projectId, chars: text.length });
+    const row = typeof jobId === 'string' && this.db.prepare('SELECT body FROM jobs WHERE id=?').get(jobId);
+    const auditJob = row && JSON.parse(row.body).project === projectId ? jobId : projectId;
+    this.event(auditJob, 'controller', 'user', 'PROJECT_PROMPT', 'Project prompt updated with owner approval', { project: projectId, chars: text.length });
     return this.projectPrompt(projectId);
   }
   draftProjectPrompt(projectId) {
@@ -1265,8 +1267,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (job.attachments?.length) cpSync(join(job.worktree, '.ai-team'), join(worktree, '.ai-team'), { recursive: true });
     }
     const project = stage === 'final' ? null : readProjectPrompt(worktree, this.project(job.project).path);
-    const projectText = project && (agent.provider !== 'codex' || !project.inWorktree) ? `\nProject rules (AGENTS.md):\n${project.text}\n` : '';
-    prompt += projectText;
+    const selfRead = this.config.promptSelfRead ?? DEFAULT_SELF_READ;
+    const projectText = project && (!selfRead.includes(agent.provider) || !project.inWorktree) ? `\nProject rules (AGENTS.md):\n${project.text}\n` : '';
+    prompt = prompt.replace('\nReturn ONLY valid JSON', projectText + '\nReturn ONLY valid JSON');
     if (['implement', 'verify'].includes(stage)) await this.ensureExclude(worktree);
     const given = await this.provideSkills(worktree, skills);
     const snapshot = await snapshotOf(worktree);
