@@ -950,6 +950,7 @@
   "ui.prompt.checkDraft": "Kiểm tra kết luận bản nháp",
   "ui.prompt.draftText": "Dán và chỉnh sửa bản nháp AGENTS.md",
   "ui.prompt.draftCreated": "Đã tạo job bản nháp: {id}. Kiểm tra kết luận khi job hoàn tất.",
+  "ui.prompt.draftFailed": "Nháp {id} không dùng được (đã hủy/lỗi/không có kết luận). Hãy tạo lại.",
   "ui.prompt.draftReady": "Job {id} đã có kết luận. Dán và chỉnh sửa prompt bên dưới trước khi duyệt.",
   "ui.prompt.approve": "Duyệt và ghi AGENTS.md",
   "ui.prompt.confirm": "Duyệt nội dung này và ghi AGENTS.md vào repo dự án?",
