@@ -1546,7 +1546,17 @@ test('independent checker: a reviewer who wrote the code is swapped for another 
   assert(!team.events(job.id).some(e => e.type === 'WARNING' && /codex-2/.test(e.summary))); // đã có người thay → không còn cảnh báo tự review
 });
 
-test('task graph: per-task review nodes review exact commits, auto-fix on failure, escalate to the Leader after 2 fixes', async t => {
+test('task graph: per-task review nodes review exact commits, auto-fix on failure, escalate to the Leader after 2 fixes', { timeout: 180_000 }, async t => {
+  const { once } = await import('node:events');
+  // Wait for the full graph, including repair/review/verify, within the test's outer deadline.
+  const waitForReady = async (team, id) => {
+    for (;;) {
+      const job = team.get(id);
+      if (job.status === 'ready' && !team.active) return job;
+      assert.notEqual(job.status, 'blocked', job.error);
+      await once(team, 'change', { signal: t.signal });
+    }
+  };
   const graph = [
     { instruction: 'write a.txt', files: ['a.txt'], dependsOn: [], difficulty: 2 },
     { instruction: 'write b.txt', files: ['b.txt'], dependsOn: [], difficulty: 2 },
@@ -1569,7 +1579,7 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     return { team, job, calls };
   };
   // (a) 2 task → 2 review theo task → verify cuối; review cấp job bị Manager bỏ
-  { const { team, job, calls } = await go(() => 'approved'); const ready = await settle(team, job.id, 'ready');
+  { const { team, job, calls } = await go(() => 'approved'); const ready = await waitForReady(team, job.id);
     const nodeRev = calls.filter(c => c.stage === 'review' && /Review ONLY this part/.test(c.prompt));
     assert.equal(nodeRev.length, 2);
     for (const [k, idx] of [[0, 2], [1, 3]]) {
@@ -1581,12 +1591,12 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     assert(!calls.some(c => c.stage === 'review' && !/Review ONLY this part/.test(c.prompt)), 'review cấp job đã bị bỏ theo flow.steps');
     assert(calls.some(c => c.stage === 'verify')); assert.equal(ready.verified, ready.revision); }
   // (b) review node fail 1 lần → task sửa tự động (tác giả cũ) → review lại → đạt
-  { const { team, job } = await go(n => n === 0 ? 'changes_requested' : 'approved'); const ready = await settle(team, job.id, 'ready');
+  { const { team, job } = await go(n => n === 0 ? 'changes_requested' : 'approved'); const ready = await waitForReady(team, job.id);
     const fix = ready.tasks.find(x => x.auto); assert(fix && fix.done); assert.equal(fix.agent, ready.tasks[fix.fixOf - 2].ranBy);
     assert.equal(ready.tasks[fix.fixOf].attempts, 1); assert(ready.tasks[fix.fixOf].done);
     assert(team.events(job.id).some(e => e.type === 'FIX_TASK')); }
   // (c) luôn fail → sau 2 lần sửa thì về Leader lập kế hoạch lại (kế hoạch 2 không có node review)
-  { const { team, job, calls } = await go(() => 'changes_requested'); await settle(team, job.id, 'ready', 40000);
+  { const { team, job, calls } = await go(() => 'changes_requested'); await waitForReady(team, job.id);
     assert.equal(calls.filter(c => c.stage === 'plan').length, 2);
     assert(team.events(job.id).some(e => e.type === 'REWORK_REQUEST')); }
 });
