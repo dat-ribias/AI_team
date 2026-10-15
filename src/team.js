@@ -1245,6 +1245,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       : checking ? 'Do not edit source files. Run the commands in "checks" yourself (plus read-only git, lint or type-check commands) to confirm the change, and report what ran with its real result in "tests". Run them in the foreground and wait until they finish (they can take several minutes); never end your turn while a command or background task is still running. Run one command per call: never chain commands with ;, &&, || or pipes (chained commands are denied). If a command is denied, continue without it and say so in "tests"; still return the JSON. If a command cannot start because of the sandbox or permissions (e.g. spawn EPERM, permission denied), say so in "tests" and judge from the code and the controller test result; that alone is not a reason for status=blocked. Never install dependencies.'
         // agy headless: lệnh không nằm trong allow-list bị từ chối là kết thúc phiên, không có report.
         + (agent.provider === 'antigravity' && this.config.agyAutoApprove !== true ? ' Run ONLY the exact commands listed in "checks" and read-only git commands; never any other command (npm test, npx, node scripts…): it is denied and ends your headless session without a report. If "checks" is empty, judge from the code and the diff.' : '')
+        + (job.tested === job.revision ? ' The controller already ran the full test suite on this revision (see "tests"); do NOT re-run the whole test/system.test.js yourself, only run related tests with --test-name-pattern and --test-timeout.' : '')
       : (stage === 'research' ? roleRules('research', 'builder') : 'Read-only analysis: do not edit files or run builds/tests. The controller runs configured tests separately.')
         // agy headless: lệnh shell bị từ chối là kết thúc phiên, không có report → chỉ dùng tool đọc file.
         + (agent.provider === 'antigravity' && this.config.agyAutoApprove !== true ? ' Read, list and search files only with your file tools (view_file, list_dir, grep_search), never with shell commands: a denied shell command ends your headless session without a report.' : '');
@@ -1312,14 +1313,26 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const sessionKey = hash(JSON.stringify({ agent: agentId, provider: agent.provider, role: agent.role, home: agent.home, sqliteHome: agent.sqliteHome, command: agent.command, model: agent.model, effort: agent.effort, prompt: agent.systemPrompt, mcp: base.mcp, worktree, slot: opts.slot || 1, access, linked: job.linked, stage, sandbox: agent.windowsSandbox || this.config.codexWindowsSandbox }));
     const resume = this.config.resumeCodexTasks === true && stage === 'implement' && agent.provider === 'codex' && opts.task;
     const sessionId = resume && opts.task.cliSession?.key === sessionKey ? opts.task.cliSession.id : undefined;
-    let report, lastActivitySavedAt = 0;
-    try { report = await this.agentRun(agent, { ...job, idleTimeoutMin: base.idleTimeoutMin ?? this.config.idleTimeoutMin ?? 15, maxCallMin: base.maxCallMin ?? this.config.maxCallMin ?? 120, sessionId, stage, worktree, promptFile, demoServer, slot: opts.slot || 1, checks: checking && access.shell ? this.project(job.project).tests : [], network: access.network, readDirs: [...readDirs, ...(job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(l => l.worktree)], addDirs: stage === 'implement' ? (job.linked || []).filter(l => granted(l.members, agentId)).map(l => l.worktree) : [], researchWeb: ['consult', 'assess'].includes(stage) ? false : this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox, agyAutoApprove: this.config.agyAutoApprove === true }, prompt, { signal: runSignal,
-      onEvent: (type, data) => { job.lastActivityAt = now(); if (opts.entry) opts.entry.lastActivityAt = job.lastActivityAt;
+    let report, cliSessionId = sessionId, lastActivitySavedAt = 0;
+    const taskObj = { ...job, idleTimeoutMin: base.idleTimeoutMin ?? this.config.idleTimeoutMin ?? 15, maxCallMin: base.maxCallMin ?? this.config.maxCallMin ?? 120, sessionId, stage, worktree, promptFile, demoServer, slot: opts.slot || 1, checks: checking && access.shell ? this.project(job.project).tests : [], network: access.network, readDirs: [...readDirs, ...(job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(l => l.worktree)], addDirs: stage === 'implement' ? (job.linked || []).filter(l => granted(l.members, agentId)).map(l => l.worktree) : [], researchWeb: ['consult', 'assess'].includes(stage) ? false : this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox, agyAutoApprove: this.config.agyAutoApprove === true };
+    const onEvent = (type, data) => { job.lastActivityAt = now(); if (opts.entry) opts.entry.lastActivityAt = job.lastActivityAt;
         if (type === 'ACTIVITY' && opts.entry) data = { ...data, details: { ...data.details, task: opts.entry.task, stage: opts.entry.stage, startedAt: opts.entry.startedAt } };
-        if (type === 'SESSION' && resume && /^[\w-]{1,100}$/.test(data.details?.id)) opts.task.cliSession = { id: data.details.id, key: sessionKey }; if (type === 'SPAWN' && opts.entry) opts.entry.pid = data.details.pid;
+        if (type === 'SESSION' && typeof data.details?.id === 'string' && /^[\w-]{1,100}$/.test(data.details.id)) { cliSessionId = data.details.id; if (resume) opts.task.cliSession = { id: cliSessionId, key: sessionKey }; } if (type === 'SPAWN' && opts.entry) opts.entry.pid = data.details.pid;
         if (Date.now() - lastActivitySavedAt >= 10_000) { const fresh = this.get(job.id); if (['paused', 'cancelled'].includes(fresh.status)) job.status = fresh.status; this.save(job); lastActivitySavedAt = Date.now(); }
         if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') { usage.push(data.details); const n = usageTokens(data.details); tokens += n; job.usage.tokens += n; } this.event(job.id, agentId, 'controller', type, data.summary, data.details);
-        if (type === 'ACTIVITY' && !access.shell && agent.provider !== 'codex' && !shellUsed && isShell(data.details)) { shellUsed = String(data.summary || 'shell'); stop.abort(new Error('shell')); } } });
+        if (type === 'ACTIVITY' && !access.shell && agent.provider !== 'codex' && !shellUsed && isShell(data.details)) { shellUsed = String(data.summary || 'shell'); stop.abort(new Error('shell')); } };
+    const call = (sessionId, text) => this.agentRun(agent, { ...taskObj, sessionId }, text, { signal: runSignal, onEvent });
+    try {
+      try { report = await call(sessionId, prompt); }
+      catch (e) {
+        if (e.code !== 'REPORT_NOT_JSON' || runSignal.aborted || e.name === 'AbortError' || shellUsed) throw e;
+        this.event(job.id, 'controller', agentId, 'WARNING', 'Agent report was not JSON; requesting a JSON report again.');
+        job.usage.calls += 1;
+        const reminder = `Lượt trước chưa trả JSON. Không chạy thêm lệnh dài; trả ngay báo cáo JSON đúng schema dựa trên kết quả đã có.\nReturn ONLY valid JSON matching this structure: ${shape}`;
+        const retryPrompt = cliSessionId && ['codex', 'claude'].includes(agent.provider) ? reminder : `${prompt}\n${reminder}`;
+        if (promptFile) writeFileSync(join(worktree, promptFile), retryPrompt);
+        report = await call(cliSessionId, retryPrompt);
+      }
     } catch (e) {
       if (!shellUsed || signal.aborted) throw e;
       if (startHead) await this.guardPaths(job, worktree, startHead, before, agentId, { ...access, paths: [{ path: '.', grant: {} }] }).catch(() => {});

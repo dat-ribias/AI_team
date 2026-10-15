@@ -16,9 +16,9 @@ export function parseReport(text) {
     for (let i = text.lastIndexOf('{'); i >= 0 && !report; i = text.lastIndexOf('{', i - 1)) {
       for (let j = text.lastIndexOf('}'); j > i; j = text.lastIndexOf('}', j - 1)) { try { const r = JSON.parse(text.slice(i, j + 1)); if (r && typeof r.summary === 'string') { report = r; break; } } catch {} }
     }
-    if (!report) throw new Error('Agent response must be JSON with a summary. Got: ' + text.trim().slice(0, 300));
+    if (!report) throw Object.assign(new Error('Agent response must be JSON with a summary. Got: ' + text.trim().slice(0, 300)), { code: 'REPORT_NOT_JSON' });
   }
-  if (!report || typeof report !== 'object' || Array.isArray(report) || typeof report.summary !== 'string') throw new Error('Agent response must be JSON with a summary');
+  if (!report || typeof report !== 'object' || Array.isArray(report) || typeof report.summary !== 'string') throw Object.assign(new Error('Agent response must be JSON with a summary'), { code: 'REPORT_NOT_JSON' });
   return report;
 }
 
@@ -280,6 +280,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     args.push('-');
   } else if (agent.provider === 'claude') {
     args.push('-p', '--output-format', 'stream-json', '--verbose', ...claudeToolArgs(task, checks, web, writes));
+    if (task.sessionId) args.push('--resume', task.sessionId);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
     for (const d of task.addDirs || []) args.push('--add-dir', d); // repo liên kết được cấp quyền sửa (acceptEdits áp dụng cả ở đây)
@@ -313,6 +314,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
       // Deliberately expose actions and messages, not reasoning items.
       const item = event.item;
       if (event.type === 'thread.started' && typeof event.thread_id === 'string') onEvent('SESSION', { summary: 'Codex session', details: { id: event.thread_id, resumed: !!task.sessionId } });
+      if (agent.provider === 'claude' && event.type === 'system' && event.subtype === 'init' && typeof event.session_id === 'string') onEvent('SESSION', { summary: 'Claude session', details: { id: event.session_id, resumed: !!task.sessionId } });
       if (event.type === 'item.completed' && item?.type === 'agent_message') final = item.text;
       if (item && ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'].includes(item.type) || event.type === 'item.completed' && item?.type === 'agent_message') onEvent('ACTIVITY', { summary: item.command || (item.text ? item.text.slice(0, 200) : item.type), details: item });
       if (event.type === 'turn.completed') onEvent('USAGE', { summary: 'Token usage', details: event.usage });
