@@ -86,7 +86,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && projectPrompt && !projectPrompt[2]) return send(res, 200, team.projectPrompt(projectPrompt[1]));
     if (req.method === 'POST' && projectPrompt) {
       if (projectPrompt[2]) return send(res, 200, { job: await team.draftProjectPrompt(projectPrompt[1]) });
-      const input = await body(req), result = team.writeProjectPrompt(projectPrompt[1], input.text, input.approved, input.job);
+      const input = await body(req), result = await team.writeProjectPrompt(projectPrompt[1], input.text, input.approved, input.job);
       return send(res, 200, { ok: true, chars: result.chars });
     }
     if (req.method === 'POST' && url.pathname === '/api/projects') return send(res, 201, await accounts.addProject(await body(req)));

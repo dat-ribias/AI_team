@@ -138,29 +138,71 @@ test('project prompt writes require explicit approval and log the approved UTF-8
   const f = await fixture(t);
   assert.deepEqual(f.team.projectPrompt('test'), { exists: false, text: '', chars: 0, budget: 4000 });
   for (const approved of [undefined, false, 'true', 1]) {
-    assert.throws(() => f.team.writeProjectPrompt('test', projectRules, approved), /approval/);
+    await assert.rejects(f.team.writeProjectPrompt('test', projectRules, approved), /approval/);
     assert(!existsSync(join(f.path, 'AGENTS.md')));
   }
   const text = 'Quy ước dự án: chạy kiểm thử riêng.\n';
   f.config.promptBudgets = { project: 123 };
-  assert.deepEqual(f.team.writeProjectPrompt('test', text, true), { exists: true, text, chars: text.length, budget: 123 });
+  await assert.rejects(f.team.writeProjectPrompt('test', null, true), /must be text/);
+  assert(!existsSync(join(f.path, 'AGENTS.md')));
+  assert.deepEqual(await f.team.writeProjectPrompt('test', text, true), { exists: true, text, chars: text.length, budget: 123 });
   assert.equal(readFileSync(join(f.path, 'AGENTS.md'), 'utf8'), text);
-  assert(f.team.events('test').some(e => e.type === 'PROJECT_PROMPT'));
+  const commit = (await run(['git'], ['-C', f.path, 'rev-parse', 'HEAD'])).stdout.trim();
+  assert(f.team.events('test').some(e => e.type === 'PROJECT_PROMPT' && e.details.commit === commit));
+  assert.equal((await run(['git'], ['-C', f.path, 'log', '-1', '--format=%s'])).stdout.trim(), 'AI Team: update AGENTS.md (owner approved)');
+  assert.equal((await run(['git'], ['-C', f.path, 'status', '--porcelain'])).stdout.trim(), '');
+  assert(await f.team.create({ project: 'test', goal: 'x', paused: true }));
+  await f.team.writeProjectPrompt('test', text, true);
+  assert.equal((await run(['git'], ['-C', f.path, 'rev-parse', 'HEAD'])).stdout.trim(), commit);
+  assert.equal(f.team.events('test').filter(e => e.type === 'PROJECT_PROMPT').at(-1).details.commit, undefined);
 });
 
 test('approved project prompt writes audit the matching draft job and otherwise fall back to project', async t => {
   const f = await fixture(t);
   const draft = await f.team.draftProjectPrompt('test');
-  f.team.writeProjectPrompt('test', projectRules, true, draft.id);
+  await f.team.writeProjectPrompt('test', projectRules, true, draft.id);
   assert(f.team.events(draft.id).some(e => e.type === 'PROJECT_PROMPT' && e.details.project === 'test'));
   assert(!f.team.events('test').some(e => e.type === 'PROJECT_PROMPT'));
   const foreign = { ...f.job, id: 'foreign-draft', project: 'other' };
   f.team.save(foreign);
-  for (const jobId of ['missing-draft', foreign.id, {}, 123]) f.team.writeProjectPrompt('test', projectRules, true, jobId);
+  for (const jobId of ['missing-draft', foreign.id, {}, 123]) await f.team.writeProjectPrompt('test', projectRules, true, jobId);
   assert.equal(f.team.events('test').filter(e => e.type === 'PROJECT_PROMPT').length, 4);
   assert(!f.team.events(foreign.id).some(e => e.type === 'PROJECT_PROMPT'));
-  assert.throws(() => f.team.writeProjectPrompt('test', 'unapproved', false, draft.id), /approval/);
+  await assert.rejects(f.team.writeProjectPrompt('test', 'unapproved', false, draft.id), /approval/);
   assert.equal(readFileSync(join(f.path, 'AGENTS.md'), 'utf8'), projectRules);
+});
+
+test('project prompt commits preserve other staged and unstaged owner changes', async t => {
+  const f = await fixture(t);
+  writeFileSync(join(f.path, 'staged.txt'), 'Owner staged change\n', 'utf8');
+  await run(['git'], ['-C', f.path, 'add', '--', 'staged.txt']);
+  writeFileSync(join(f.path, 'hello.txt'), 'Owner unstaged change\n', 'utf8');
+  const before = (await run(['git'], ['-C', f.path, 'status', '--porcelain'])).stdout;
+  await f.team.writeProjectPrompt('test', projectRules, true);
+  assert.equal((await run(['git'], ['-C', f.path, 'status', '--porcelain'])).stdout, before);
+  assert.equal((await run(['git'], ['-C', f.path, 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'])).stdout.trim(), 'AGENTS.md');
+});
+
+test('committed project rules preserve literal replacement dollar sequences exactly once', async t => {
+  const f = await fixture(t);
+  const rules = "grep $'\\t' a; echo $$ $& done\necho $`\n";
+  writeFileSync(join(f.job.worktree, 'AGENTS.md'), rules, 'utf8');
+  await run(['git'], ['-C', f.job.worktree, 'add', '--', 'AGENTS.md']);
+  await run(['git'], ['-C', f.job.worktree, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'Project rules']);
+  const prompt = await f.invoke('gemini', 'implement');
+  assert.equal(prompt.split(rules).length - 1, 1);
+  assert.equal(f.assignment().details.promptParts.reduce((sum, p) => sum + p.chars, 0), prompt.length);
+});
+
+test('draft extraction preserves nested fences and raw conclusions', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const extractDraft = new Function(`return (${source.match(/const extractDraft = (.+);/)[1]});`)();
+  const draft = '# Rules\n```bash\nnpm test\n```\n- port 3334';
+  for (const language of ['markdown', 'md']) assert.equal(extractDraft('```' + language + '\n' + draft + '\n```'), draft);
+  assert.equal(extractDraft(draft), draft);
+  assert.equal(extractDraft('```bash\nnpm test\n```'), '```bash\nnpm test\n```');
+  const raw = 'Draft notes\n```markdown\n' + draft + '\n```';
+  assert.equal(extractDraft(raw), raw);
 });
 
 test('system prompt updates trim, validate, persist two versions and emit change', async t => {

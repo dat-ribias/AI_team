@@ -1551,7 +1551,7 @@ async function openProjectPrompt(project = curProject) {
   const key = `prompt-draft:${project}`, draftId = store.get(key);
   $('prompt-body').innerHTML = `<p class="muted">${esc(t('ui.prompt.missing'))}</p><button type="button" id="prompt-draft">${esc(t('ui.prompt.create'))}</button><p id="prompt-draft-status" role="status"></p><button type="button" id="prompt-draft-check" ${draftId ? '' : 'hidden'}>${esc(t('ui.prompt.checkDraft'))}</button><form id="project-prompt-form" hidden><label for="prompt-text">${esc(t('ui.prompt.draftText'))}</label><textarea id="prompt-text" rows="10" required></textarea><p id="prompt-count" class="muted" aria-live="polite"></p><button type="submit" class="primary">${esc(t('ui.prompt.approve'))}</button></form>`;
   let currentDraft = draftId;
-  const extractDraft = text => (text.match(/```(?:markdown|md)?[ \t]*\r?\n([\s\S]*?)```/i)?.[1] ?? text).trim();
+  const extractDraft = text => (text.match(/^\s*```(?:markdown|md)[ \t]*\r?\n([\s\S]*)\r?\n```[ \t]*(?:\r?\n|$)/i)?.[1] ?? text).trim();
   const resetDraft = () => {
     if (request !== promptRequest || !$('prompt-dialog').open) return;
     const id = currentDraft;

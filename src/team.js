@@ -580,13 +580,20 @@ export class Team extends EventEmitter {
     const path = this.project(projectId).path, prompt = readProjectPrompt(path, path), text = prompt?.text || '';
     return { exists: prompt !== null, text, chars: text.length, budget: this.config.promptBudgets?.project ?? DEFAULT_BUDGETS.project };
   }
-  writeProjectPrompt(projectId, text, approved, jobId) {
+  async writeProjectPrompt(projectId, text, approved, jobId) {
     if (approved !== true) throw new Error('Owner approval is required to write the project prompt');
     if (typeof text !== 'string') throw new Error('Project prompt must be text');
-    writeFileSync(join(this.project(projectId).path, 'AGENTS.md'), text, 'utf8');
+    const path = this.project(projectId).path;
+    writeFileSync(join(path, 'AGENTS.md'), text, 'utf8');
+    await git(path, ['add', '--', 'AGENTS.md']);
+    let commit;
+    if (await git(path, ['status', '--porcelain', '--', 'AGENTS.md'])) {
+      await git(path, ['-c', 'user.name=AI Team', '-c', 'user.email=ai-team@local', 'commit', '-m', 'AI Team: update AGENTS.md (owner approved)', '--', 'AGENTS.md']);
+      commit = await git(path, ['rev-parse', 'HEAD']);
+    }
     const row = typeof jobId === 'string' && this.db.prepare('SELECT body FROM jobs WHERE id=?').get(jobId);
     const auditJob = row && JSON.parse(row.body).project === projectId ? jobId : projectId;
-    this.event(auditJob, 'controller', 'user', 'PROJECT_PROMPT', 'Project prompt updated with owner approval', { project: projectId, chars: text.length });
+    this.event(auditJob, 'controller', 'user', 'PROJECT_PROMPT', 'Project prompt updated with owner approval', { project: projectId, chars: text.length, ...(commit ? { commit } : {}) });
     return this.projectPrompt(projectId);
   }
   draftProjectPrompt(projectId) {
@@ -1269,7 +1276,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const project = stage === 'final' ? null : readProjectPrompt(worktree, this.project(job.project).path);
     const selfRead = this.config.promptSelfRead ?? DEFAULT_SELF_READ;
     const projectText = project && (!selfRead.includes(agent.provider) || !project.inWorktree) ? `\nProject rules (AGENTS.md):\n${project.text}\n` : '';
-    prompt = prompt.replace('\nReturn ONLY valid JSON', projectText + '\nReturn ONLY valid JSON');
+    prompt = prompt.replace('\nReturn ONLY valid JSON', () => projectText + '\nReturn ONLY valid JSON');
     if (['implement', 'verify'].includes(stage)) await this.ensureExclude(worktree);
     const given = await this.provideSkills(worktree, skills);
     const snapshot = await snapshotOf(worktree);
