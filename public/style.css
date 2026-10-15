@@ -284,3 +284,4 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 .cleanup-group ul{padding-left:20px}
 .cleanup-group li{margin:8px 0;overflow-wrap:anywhere}
 .cleanup-group small{display:block}
+.metric .metric-agents-warning{display:block;color:var(--amber);overflow-wrap:anywhere}

@@ -448,11 +448,11 @@ function drawState() {
   if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
   const ready = state.jobs.filter(j => j.status === 'ready').length;
   $('metrics').innerHTML = [
-    [t('ui.metric.agents'), `${state.resources.active} <small>/ ${state.resources.slots ?? 1}</small>`, state.resources.waitingReason || t('ui.metric.onDemand')],
+    [t('ui.metric.agents'), `${state.resources.active} <small>/ ${state.resources.slots ?? 1}</small>`, state.resources.waitingReason || t('ui.metric.onDemand'), state.resources.active > state.resources.maxAgents ? t('ui.metric.agentsAboveRecommended', { n: state.resources.active, m: state.resources.maxAgents }) : ''],
     [t('ui.metric.jobs'), state.jobs.length, t('ui.metric.jobsNote', { running: state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length, ready })],
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
-    [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
-  ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
+    [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuAverage30s')],
+  ].map(([label, value, note, warning]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small>${warning ? `<small class="metric-agents-warning">${esc(warning)}</small>` : ''}</div>`).join('');
   const resultJob = state.jobs.find(j => j.id === selected);
   if (resultsSelection !== selected) {
     resultsSelection = selected;
