@@ -114,10 +114,10 @@ export function compressOutput(text, max = 4000) {
   return out.length > max ? out.slice(0, max / 2) + '\n…\n' + out.slice(-max / 2) : out;
 }
 // Slot theo RAM tuyệt đối (GB): bao nhiêu agent nữa còn chạy được với RAM trống hiện tại; % chỉ là chốt chặn cuối.
-export function computeSlots({ freeGB, totalGB, running = 0, reserveGB = 4, ramPerAgentGB = 1.5, maxAgents = 3, hardStopRamPercent = 90 }) {
+export function computeSlots({ freeGB, totalGB, running = 0, reserveGB = 4, ramPerAgentGB = 1.5, maxAgents = 3, maxAgentsHard = false, hardStopRamPercent = 90 }) {
   if (100 * (1 - freeGB / totalGB) >= hardStopRamPercent) return { start: 0, hardStop: true };
   const fit = Math.floor((freeGB - reserveGB) / ramPerAgentGB);
-  return { start: Math.max(0, Math.min(maxAgents - running, Math.max(running ? 0 : 1, fit))), hardStop: false };
+  return { start: Math.max(0, Math.min(maxAgentsHard === true ? maxAgents - running : Infinity, Math.max(running ? 0 : 1, fit))), hardStop: false };
 }
 export const rolesOf = (r, id) => ROLE_KEYS.filter(k => k === 'builder' ? r.builders.includes(id) : r[k] === id);
 export const defaultSensitive = String.raw`(^|/)(\.env|\.github/|migrations?/|dockerfile|docker-compose|package(-lock)?\.json$|pnpm-lock|yarn\.lock|[^/]*(secret|credential|auth|password|token|permission)[^/]*)`;
@@ -273,7 +273,8 @@ export class Team extends EventEmitter {
     try { this.db.exec('ALTER TABLE sessions ADD COLUMN access TEXT'); } catch {}
     // Mỗi công việc đang chạy giữ 1 slot; các task song song trong cùng công việc giữ thêm (extra).
     this.runs = new Map(); this.previews = new Map(); this.extra = 0; this.closed = false; this.refreshing = false; this.waitingReason = null;
-    this.cpu = { total: 0, idle: 0 }; this.cpuPercent = 0; this.sampleResources();
+    this.readCpus = adapters.cpus || cpus; this.resourceNow = adapters.resourceNow || (() => performance.now());
+    this.cpu = null; this.cpuSamples = []; this.cpuPercent = 0; this.sampleCpu();
     this.orphans = [];
     const cleanup = [];
     for (const job of this.jobs()) if (job.preview?.pid || job.preview?.basePid) {
@@ -364,6 +365,7 @@ export class Team extends EventEmitter {
         } catch {}
       }
     } catch {}
+    this.resourceTimer = setInterval(() => this.sampleCpu(), 5000); this.resourceTimer.unref();
   }
   get active() { return this.runs.values().next().value || null; }
   // ponytail: PID có thể bị tái sử dụng; hết hạn 60 phút để không khóa slot mãi. Không tự kill tiến trình không chắc của mình.
@@ -391,11 +393,11 @@ export class Team extends EventEmitter {
   // Member đã dùng hết slot: không nhận thêm việc lúc này.
   fullAgents() { return new Set(this.config.agents.map(a => a.id).filter(id => this.useOf(id) >= this.maxJobs(id))); }
   capacity() {
-    const r = this.config.resources || {}, res = this.sampleResources();
+    const r = this.config.resources || {};
     const slots = computeSlots({ freeGB: freemem() / 2 ** 30, totalGB: totalmem() / 2 ** 30, running: this.runs.size + this.extra + this.previews.size,
-      reserveGB: r.reserveGB ?? 4, ramPerAgentGB: r.ramPerAgentGB ?? 1.5, maxAgents: r.maxAgents ?? 3, hardStopRamPercent: r.hardStopRamPercent ?? Math.max(90, this.config.maxRamPercent ?? 90) });
+      reserveGB: r.reserveGB ?? 4, ramPerAgentGB: r.ramPerAgentGB ?? 1.5, maxAgents: r.maxAgents ?? 3, maxAgentsHard: r.maxAgentsHard, hardStopRamPercent: r.hardStopRamPercent ?? Math.max(90, this.config.maxRamPercent ?? 90) });
     if (slots.hardStop) return { ...slots, reason: msg("srv.team.ram_cao_cho_tai_nguyen") };
-    if (res.cpuPercent > (this.config.maxCpuPercent ?? 90)) return { start: 0, reason: msg("srv.team.cpu_cao_cho_tai_nguyen") };
+    if (this.cpuPercent > (this.config.maxCpuPercent ?? 90)) return { start: 0, reason: msg("srv.team.cpu_cao_cho_tai_nguyen") };
     return { ...slots, reason: slots.start ? null : msg("srv.team.slots_full") };
   }
   // Hệ số tốc độ thực / ước lượng của Lead, học từ các lượt đã chạy (mặc định 1).
@@ -682,12 +684,24 @@ export class Team extends EventEmitter {
   }
   events(id, after = 0) { return this.db.prepare('SELECT seq,body FROM events WHERE job=? AND seq>? ORDER BY seq LIMIT 2000').all(id, after).map(r => ({ ...JSON.parse(r.body), seq: r.seq })); }
   quota(id) { const row = this.db.prepare('SELECT body FROM quotas WHERE agent=?').get(id); return row ? JSON.parse(row.body) : { status: 'unknown', buckets: [] }; }
+  sampleCpu() {
+    if (this.closed) return;
+    const at = this.resourceNow();
+    if (this.cpu && at - this.cpu.at < 5000) return;
+    const sample = this.readCpus().reduce((s, c) => ({ total: s.total + Object.values(c.times).reduce((a, b) => a + b, 0), idle: s.idle + c.times.idle }), { total: 0, idle: 0 });
+    if (!Number.isFinite(at) || !Number.isFinite(sample.total) || !Number.isFinite(sample.idle) || sample.total < 0 || sample.idle < 0 || sample.idle > sample.total) return;
+    const previous = this.cpu; this.cpu = { ...sample, at };
+    if (!previous) return;
+    const total = sample.total - previous.total, idle = sample.idle - previous.idle;
+    if (total <= 0 || idle < 0 || idle > total) return;
+    this.cpuSamples.push({ busy: total - idle, total });
+    if (this.cpuSamples.length > 6) this.cpuSamples.shift();
+    const window = this.cpuSamples.reduce((s, c) => ({ busy: s.busy + c.busy, total: s.total + c.total }), { busy: 0, total: 0 });
+    const percent = 100 * (window.busy / window.total);
+    if (Number.isFinite(percent)) this.cpuPercent = Math.max(0, Math.min(100, percent));
+  }
   sampleResources() {
-    const sample = cpus().reduce((s, c) => ({ total: s.total + Object.values(c.times).reduce((a, b) => a + b, 0), idle: s.idle + c.times.idle }), { total: 0, idle: 0 });
-    const delta = sample.total - this.cpu.total;
-    if (this.cpu.total && delta > 0) this.cpuPercent = Math.round(100 * (1 - (sample.idle - this.cpu.idle) / delta));
-    this.cpu = sample;
-    return { cpuPercent: this.cpuPercent, ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
+    return { cpuPercent: Math.round(this.cpuPercent), ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
   state() {
     const busy = this.busyAgents(), cap = this.capacity(), used = this.runs.size + this.extra + this.previews.size;
@@ -2835,7 +2849,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   async close() {
     if (this.dbClosed) return;
-    this.closed = true; clearInterval(this.interval); clearInterval(this.backupTimer); clearInterval(this.cleanupTimer); for (const r of this.runs.values()) r.abort.abort();
+    this.closed = true; clearInterval(this.resourceTimer); clearInterval(this.interval); clearInterval(this.backupTimer); clearInterval(this.cleanupTimer); for (const r of this.runs.values()) r.abort.abort();
     await this.previewRecovery;
     const previews = [...this.previews.entries()];
     for (const [id] of previews) await this.stopPreview(id, 'close');

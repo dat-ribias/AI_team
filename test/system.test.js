@@ -1688,10 +1688,10 @@ test('read-only reference folders map to Claude permission paths', async () => {
 });
 
 test('RAM slots use absolute GB; percent is only the hard stop', () => {
-  assert.deepEqual(computeSlots({ freeGB: 10, totalGB: 32, reserveGB: 4, ramPerAgentGB: 1.5, maxAgents: 3 }), { start: 3, hardStop: false });
+  assert.deepEqual(computeSlots({ freeGB: 10, totalGB: 32, reserveGB: 4, ramPerAgentGB: 1.5, maxAgents: 3, maxAgentsHard: true }), { start: 3, hardStop: false });
   assert.equal(computeSlots({ freeGB: 4.5, totalGB: 32, reserveGB: 4, ramPerAgentGB: 1.5 }).start, 1); // idle → at least one agent
   assert.equal(computeSlots({ freeGB: 4.5, totalGB: 32, running: 1, reserveGB: 4, ramPerAgentGB: 1.5 }).start, 0);
-  assert.equal(computeSlots({ freeGB: 20, totalGB: 32, running: 2, maxAgents: 3 }).start, 1);
+  assert.equal(computeSlots({ freeGB: 20, totalGB: 32, running: 2, maxAgents: 3, maxAgentsHard: true }).start, 1);
   assert.deepEqual(computeSlots({ freeGB: 3, totalGB: 32, hardStopRamPercent: 90 }), { start: 0, hardStop: true });
   assert.deepEqual(testList('node --test "a b.js"\n\n'), [['node', '--test', 'a b.js']]);
   assert.throws(() => testList([['node', 1]])); assert.throws(() => testList([[]]));
