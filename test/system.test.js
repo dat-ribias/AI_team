@@ -623,6 +623,7 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
 });
 
 test('Git authors: task checkpoints identify members and controller merges identify their work', async t => {
+  // Three task checkpoints, merges and final checks need headroom for Git I/O under load.
   const { team, f } = await parallelTeam(t, [
     { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [] },
     { agent: 'codex-4', difficulty: 2, instruction: 'T2 edit', files: ['t2.txt'], dependsOn: [] },
@@ -630,7 +631,7 @@ test('Git authors: task checkpoints identify members and controller merges ident
   ]);
   team.config.agents.find(a => a.id === 'codex-2').label = 'Builder Two\nDisplay';
   team.start();
-  const job = await team.create({ project: 'test', goal: 'Git attribution' }), ready = await settle(team, job.id, 'ready');
+  const job = await team.create({ project: 'test', goal: 'Git attribution' }), ready = await settle(team, job.id, 'ready', 60000);
   const log = (await run(['git'], ['-C', ready.worktree, 'log', '--format=%an|%ae|%s'])).stdout;
   for (const [i, task] of ready.tasks.entries()) {
     const id = task.ranBy, label = team.agent(id).label.replace(/[\r\n]/g, ' ');
@@ -1332,6 +1333,7 @@ test('attachments land in the worktree for agents but never in commits', async t
 });
 
 test('Gemini/Antigravity get the prompt via a file (Windows command-line limit) and progress timing is recorded', async t => {
+  // Prompt-file I/O and the full mock pipeline may exceed 20 seconds under load.
   const f = await fixture(); f.config.demo = false;
   f.config.agents = f.config.agents.map(a => a.id === 'gemini' ? { ...a, provider: 'antigravity' } : { ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) });
   const seen = [];
@@ -1342,7 +1344,7 @@ test('Gemini/Antigravity get the prompt via a file (Windows command-line limit) 
   }, readQuota: async () => ({ buckets: [] }) });
   t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello' });
-  const ready = await settle(team, job.id, 'ready');
+  const ready = await settle(team, job.id, 'ready', 60000);
   assert.deepEqual(seen, ['.ai-team/prompt.md']);
   assert(ready.durations.length >= 4); assert.equal(ready.current, null);
 });
@@ -1470,6 +1472,7 @@ test('plan challenge: risky plans get one evidence-based challenge; serious obje
 });
 
 test('structured rebuttal: a rejected finding becomes a dispute that forces verify; unresolved high findings go to the human', async t => {
+  // Rework, dispute verification and escalation each run a full mock pipeline.
   const f = await fixture(); const seen = [];
   const finding = { id: 'F1', claim: 'Thiếu xử lý file rỗng', failsWhen: 'hello.txt rỗng', check: 'chạy test với file rỗng', impact: 'high' };
   let reviews = 0;
@@ -1483,7 +1486,7 @@ test('structured rebuttal: a rejected finding becomes a dispute that forces veri
   } });
   t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello' });
-  const ready = await settle(team, job.id, 'ready');
+  const ready = await settle(team, job.id, 'ready', 60000);
   const verify = seen.find(x => x.stage === 'verify');
   assert(verify, 'verify phải bị ép chạy vì có tranh chấp (rigor standard, không có cổng rủi ro)');
   assert.match(verify.prompt, /"disputes"/); assert.match(verify.prompt, /đã phủ file rỗng/);
@@ -1497,7 +1500,7 @@ test('structured rebuttal: a rejected finding becomes a dispute that forces veri
   } });
   t.after(() => team2.close());
   const j2 = await team2.create({ project: 'test', goal: 'Update hello' });
-  const waiting = await settle(team2, j2.id, 'waiting');
+  const waiting = await settle(team2, j2.id, 'waiting', 60000);
   assert.match(waiting.questions[0], /F1: Thiếu xử lý file rỗng/);
 });
 
@@ -1547,6 +1550,7 @@ test('independent checker: a reviewer who wrote the code is swapped for another 
 });
 
 test('task graph: per-task review nodes review exact commits, auto-fix on failure, escalate to the Leader after 2 fixes', async t => {
+  // Per-task reviews, auto-fixes and replanning need bounded headroom for Git I/O.
   const graph = [
     { instruction: 'write a.txt', files: ['a.txt'], dependsOn: [], difficulty: 2 },
     { instruction: 'write b.txt', files: ['b.txt'], dependsOn: [], difficulty: 2 },
@@ -1569,7 +1573,7 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     return { team, job, calls };
   };
   // (a) 2 task → 2 review theo task → verify cuối; review cấp job bị Manager bỏ
-  { const { team, job, calls } = await go(() => 'approved'); const ready = await settle(team, job.id, 'ready');
+  { const { team, job, calls } = await go(() => 'approved'); const ready = await settle(team, job.id, 'ready', 60000);
     const nodeRev = calls.filter(c => c.stage === 'review' && /Review ONLY this part/.test(c.prompt));
     assert.equal(nodeRev.length, 2);
     for (const [k, idx] of [[0, 2], [1, 3]]) {
@@ -1581,12 +1585,12 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     assert(!calls.some(c => c.stage === 'review' && !/Review ONLY this part/.test(c.prompt)), 'review cấp job đã bị bỏ theo flow.steps');
     assert(calls.some(c => c.stage === 'verify')); assert.equal(ready.verified, ready.revision); }
   // (b) review node fail 1 lần → task sửa tự động (tác giả cũ) → review lại → đạt
-  { const { team, job } = await go(n => n === 0 ? 'changes_requested' : 'approved'); const ready = await settle(team, job.id, 'ready');
+  { const { team, job } = await go(n => n === 0 ? 'changes_requested' : 'approved'); const ready = await settle(team, job.id, 'ready', 60000);
     const fix = ready.tasks.find(x => x.auto); assert(fix && fix.done); assert.equal(fix.agent, ready.tasks[fix.fixOf - 2].ranBy);
     assert.equal(ready.tasks[fix.fixOf].attempts, 1); assert(ready.tasks[fix.fixOf].done);
     assert(team.events(job.id).some(e => e.type === 'FIX_TASK')); }
   // (c) luôn fail → sau 2 lần sửa thì về Leader lập kế hoạch lại (kế hoạch 2 không có node review)
-  { const { team, job, calls } = await go(() => 'changes_requested'); await settle(team, job.id, 'ready', 40000);
+  { const { team, job, calls } = await go(() => 'changes_requested'); await settle(team, job.id, 'ready', 60000);
     assert.equal(calls.filter(c => c.stage === 'plan').length, 2);
     assert(team.events(job.id).some(e => e.type === 'REWORK_REQUEST')); }
 });
