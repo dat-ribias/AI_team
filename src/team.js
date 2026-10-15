@@ -1,18 +1,19 @@
 import { DatabaseSync } from 'node:sqlite';
 import { msg } from './i18n.js';
 import { mkdirSync, existsSync, realpathSync, writeFileSync, readFileSync, appendFileSync, cpSync, statSync, lstatSync, readlinkSync, readdirSync, rmSync, renameSync } from 'node:fs';
-import { resolve, join, basename, extname, relative, isAbsolute, dirname, sep } from 'node:path';
+import { resolve, join, basename, extname, relative, isAbsolute, dirname, sep, win32, posix } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { MemoryStore, fileHash, hash } from './memory.js';
 import { ledger, scopeFiles, question, answer, decide, refreshLedger, obligations, evidence } from './discussions.js';
-import { cpus, totalmem, freemem } from 'node:os';
+import { cpus, totalmem, freemem, homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { run, executable } from './process.js';
 import { runAgent, readQuota } from './providers.js';
 import { scanSkills, skillRoots } from './skills.js';
 import { collect, kind, safeRel } from './evidence.js';
+import { planJob, planPeriodic, apply as applyCleanup, storageStats } from './cleanup.js';
 import { validatePreview, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
 import { initializeUsage } from './usage.js';
 
@@ -51,7 +52,11 @@ const snapshotOf = async cwd => {
   });
   return { commit, dirtyHash: hash(JSON.stringify({ diff, status, files })) };
 };
-export const redact = text => String(text).replace(/\b(?:sk-[\w-]{12,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+)\b/g, '[REDACTED]').replace(/((?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
+export const redact = text => String(text)
+  .replace(/\b(?:sk-[\w-]{12,}|ya29\.[\w.-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[0-9A-Z]{16})\b/g, '[REDACTED]')
+  .replace(/(authorization(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\r\n"'}\\]+)/gi, '$1[REDACTED]')
+  .replace(/(\bBearer\s+)([^\s,"'{}\\]+)/gi, '$1[REDACTED]')
+  .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
 const scrub = value => JSON.parse(redact(JSON.stringify(value)));
 // Skill names may contain ':' (plugin:skill), which Windows forbids in folder names.
 const skillDir = name => name.replace(/[^\w.-]+/g, '-');
@@ -184,6 +189,14 @@ export function roster(config) {
 
 export function validateConfig(config) {
   for (const key of ['idleTimeoutMin', 'maxCallMin', 'silenceWarnMin']) if (config[key] !== undefined && (!Number.isFinite(config[key]) || config[key] <= 0)) throw new Error(`${key} must be a positive number`);
+  if (config.retentionDays === undefined) config.retentionDays = 30;
+  if (config.maxBackups === undefined) config.maxBackups = config.backupKeep ?? 14;
+  if (config.maxBackupMB === undefined) config.maxBackupMB = 2048;
+  if (config.cleanupOnMerge === undefined) config.cleanupOnMerge = true;
+  if (!Number.isFinite(config.retentionDays) || config.retentionDays <= 0) throw new Error('retentionDays must be a positive number');
+  if (!Number.isInteger(config.maxBackups) || config.maxBackups < 1) throw new Error('maxBackups must be an integer >= 1');
+  if (!Number.isFinite(config.maxBackupMB) || config.maxBackupMB < 0) throw new Error('maxBackupMB must be a non-negative number');
+  if (typeof config.cleanupOnMerge !== 'boolean') throw new Error('cleanupOnMerge must be boolean');
   for (const key of ['planApproval', 'planApprovalRework']) if (config[key] !== undefined && typeof config[key] !== 'boolean') throw new Error(msg("srv.team.plan_approval_invalid"));
   if (config.peerDialogue !== undefined && typeof config.peerDialogue !== 'boolean') throw new Error('peerDialogue must be boolean');
   if (config.evidenceMaxMB != null && (!Number.isFinite(config.evidenceMaxMB) || config.evidenceMaxMB < 0)) throw new Error('evidenceMaxMB must be a non-negative number');
@@ -231,6 +244,11 @@ export class Team extends EventEmitter {
       CREATE TABLE IF NOT EXISTS memory (id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, session TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, job TEXT, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS member_stats (seq INTEGER PRIMARY KEY AUTOINCREMENT, agent TEXT, model TEXT, effort TEXT, stage TEXT, ms INTEGER, tokens INTEGER, at TEXT);`);
     this.memoryStore = new MemoryStore(this.db, redact); this.memoryReaders = new Map();
+    const memoryJobs = this.jobs();
+    this.memoryStore.promoteMerged(memoryJobs);
+    for (const job of memoryJobs) if (this.outsideProject(job)) {
+      for (const r of this.memoryStore.rows(job.project)) if (r.job === job.id) this.memoryStore.markStale(job.project, r.id, r.revision);
+    }
     this.agentRun = adapters.runAgent || runAgent; this.quotaRead = adapters.readQuota || readQuota;
     this.providerDowns = new Map();
     this.claudeUsage = adapters.claudeUsage || null;
@@ -415,6 +433,7 @@ export class Team extends EventEmitter {
       }
       let valid = true;
       for (const [path, expected] of Object.entries(r.files)) {
+        if (path.replace(/\\/g, '/').startsWith('.ai-team/')) continue;
         if (!fingerprints.has(path)) { try { fingerprints.set(path, fileHash(worktree, path)); } catch { fingerprints.set(path, undefined); } }
         if (fingerprints.get(path) !== expected) { valid = false; break; }
       }
@@ -437,6 +456,20 @@ export class Team extends EventEmitter {
       records: selected.map(({ id, scope, job, source, commitSha, revision }) => ({ id: `M${id}`, scope, job, source, commit: commitSha, revision })),
       snapshot: found.snapshot, session: summary || undefined, recentJobs: task ? undefined : cap(log.map(l => l.text), 1500) };
   }
+  outsideProject(job) {
+    if (job.kind !== 'research') return false;
+    const paths = [...String(job.goal || '').matchAll(/(?<![\w:/\\])(?:["'`]((?:[A-Za-z]:[\\/]|\\\\|\/)[^"'`\r\n]+)["'`]|((?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'`<>]+))/g)].map(m => m[1] || m[2]);
+    if (!paths.length) return false;
+    const project = this.config.projects.find(p => p.id === job.project);
+    if (!project) return false;
+    const linked = [...(job.linked || []).map(l => l.path), ...(project.access?.repos || []).map(r => this.config.projects.find(p => p.id === r.project)?.path)];
+    const roots = [project.path, ...linked, this.dataDir, homedir()].filter(Boolean);
+    return paths.every(path => !roots.some(root => {
+      const style = win32.isAbsolute(path) && !posix.isAbsolute(path) ? win32 : posix;
+      const rel = style.relative(style.resolve(root), style.resolve(path));
+      return !rel || rel !== '..' && !rel.startsWith('..' + style.sep) && !style.isAbsolute(rel);
+    }));
+  }
   async remember(job, mem) {
     const at = now();
     const ins = this.db.prepare('INSERT INTO memory (project, session, kind, text, job, at) VALUES (?,?,?,?,?,?)');
@@ -444,10 +477,10 @@ export class Team extends EventEmitter {
     if (job.sessionId && !job.comparison) ins.run(job.project, job.sessionId, 'log', redact(line), job.id, at);
     // Comparison outputs stay in reports; they must not teach the next comparison job its answer.
     if (mem && typeof mem === 'object' && !job.comparison) {
-      const scope = job.kind === 'research' || job.status === 'merged' ? 'project' : 'job';
+      const scope = !this.outsideProject(job) && (job.kind === 'research' || job.status === 'merged') ? 'project' : 'job';
       // ponytail: a final report shares changed/declared file dependencies; accept per-fact paths if invalidation is too broad.
       const files = {}, changed = job.kind === 'research' ? [] : (await git(job.worktree, ['diff', '--no-ext-diff', '--name-only', '-z', job.base, job.revision])).split('\0').filter(Boolean);
-      for (const path of [...new Set([...changed, ...job.tasks.flatMap(t => t.files || [])])]) { try { files[path] = fileHash(job.worktree, path); } catch {} }
+      for (const path of [...new Set([...changed, ...job.tasks.flatMap(t => t.files || [])])]) { if (path.replace(/\\/g, '/').startsWith('.ai-team/')) continue; try { files[path] = fileHash(job.worktree, path); } catch {} }
       const provenance = { project: job.project, job: job.id, scope, commitSha: job.kind === 'research' ? null : job.revision, files, source: `job:${job.id}/final` };
       for (const id of (Array.isArray(mem.remove) ? mem.remove : []).map(x => Number(String(x).replace(/^M/i, ''))).filter(Number.isInteger)) {
         const old = this.memoryStore.candidates(job.project, job.id, '', 1, id)[0];
@@ -460,10 +493,11 @@ export class Team extends EventEmitter {
     // Prompt limits do not delete stored knowledge or job history.
     this.emit('change');
   }
-  editMemory({ project, session, add, remove, revision, summary }) {
+  editMemory({ project, session, add, remove, stale, revision, summary }) {
     this.project(project);
     if (add) this.memoryStore.add({ project, text: String(add).slice(0, 300) });
     if (remove != null) this.memoryStore.retire(project, remove, revision);
+    if (stale != null) this.memoryStore.markStale(project, stale, revision);
     if (summary != null && session) this.db.prepare('UPDATE sessions SET notes=? WHERE id=? AND project=?').run(redact(String(summary)).slice(0, 1500), session, project);
     this.emit('change'); return this.memory(project, session);
   }
@@ -474,8 +508,7 @@ export class Team extends EventEmitter {
     const file = join(dir, `team-${new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '')}-${String(reason).replace(/[^\w-]/g, '')}.sqlite`);
     if (existsSync(file)) return file;
     this.db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
-    const keep = this.config.backupKeep ?? 14, all = readdirSync(dir).filter(f => /^team-.*\.sqlite$/.test(f)).sort();
-    for (const f of all.slice(0, Math.max(0, all.length - keep))) rmSync(join(dir, f), { force: true });
+    this.cleanup({ backupsOnly: true }).catch(e => this.emit('fault', e));
     this.lastBackup = { file, at: now() }; return file;
   }
   backups() { const dir = this.backupDir(); try { return readdirSync(dir).filter(f => /^team-.*\.sqlite$/.test(f)).sort().reverse().map(f => ({ file: join(dir, f), bytes: statSync(join(dir, f)).size, at: statSync(join(dir, f)).mtime.toISOString() })); } catch { return []; } }
@@ -609,7 +642,11 @@ export class Team extends EventEmitter {
     // SQLite access is synchronous: a stale sync/review cannot overwrite cancellation.
     const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(job.id);
     if (row) {
-      const saved = JSON.parse(row.body); if (saved.status === 'cancelled' && !rename) return saved;
+      const saved = JSON.parse(row.body);
+      if (saved.status === 'cancelled' && !rename) {
+        for (const key of Object.keys(job)) if (!Object.hasOwn(saved, key)) delete job[key];
+        return Object.assign(job, saved);
+      }
       if (saved.titleBy === 'user' && !rename) { job.title = saved.title; job.titleBy = 'user'; }
       if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; job.acceptance = null; }
       if (Array.isArray(saved.messages) && saved.messages.length > (job.messages?.length || 0)) { job.messages = saved.messages; if (this.runs.has(job.id)) job.steered = true; }
@@ -645,6 +682,7 @@ export class Team extends EventEmitter {
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       quotaCheck: this.quotaCheck || null,
       resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, slots: used + cap.start, active: used, waitingReason: this.waitingReason },
+      storage: this.storage(),
     };
   }
   comparisonSignature(project, sessionId) {
@@ -1672,7 +1710,10 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const r = single ? job.reports.filter(x => x.stage === 'research').at(-1) : await this.call(job, this.pickMember(job, 'manager'), 'final', msg("srv.team.research_final"));
       if (single) job.skipped = [...new Set([...(job.skipped || []), 'final'])];
       job.conclusion = { summary: r.summary, conclusion: r.conclusion || r.summary, sources: r.sources || [], confidence: r.confidence || null, openQuestions: r.openQuestions || [] };
-      job.status = 'done'; await this.remember(job, single ? null : r.memory); this.event(job.id, single ? r.agent : members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion); return;
+      job.status = 'done'; await this.remember(job, single ? null : r.memory); this.save(job);
+      if (job.status === 'cancelled') return;
+      this.event(job.id, single ? r.agent : members.manager, 'user', 'CONCLUSION', job.conclusion.conclusion, job.conclusion);
+      await this.cleanupJob(job.id, { fromRun: true }).catch(e => this.emit('fault', e)); Object.assign(job, this.get(job.id)); return;
     }
     const stepsF = job.flow?.requested?.steps;
     if (stepsF ? !stepsF.includes('final') : job.fast || job.rigor === 'light') job.skipped = [...new Set([...(job.skipped || []), 'final'])];
@@ -2013,7 +2054,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } finally { this.runs.delete(job.id); this.emit('change'); this.kick(); }
   }
   kick() { if (!this.closed) setImmediate(() => this.tick().catch(e => this.emit('fault', e))); }
-  start() { this.interval = setInterval(() => this.tick().catch(e => this.emit('fault', e)), 3000); this.backupTimer = setInterval(() => this.autoBackup(), 3600_000); setImmediate(() => this.autoBackup()); this.sweepGit().catch(e => this.emit('fault', e)); this.kick(); }
+  start() {
+    this.interval = setInterval(() => this.tick().catch(e => this.emit('fault', e)), 3000);
+    this.backupTimer = setInterval(() => this.autoBackup(), 3600_000); setImmediate(() => this.autoBackup());
+    this.cleanupTimer = setInterval(() => this.cleanup().catch(e => this.emit('fault', e)), 24 * 3600_000);
+    this.cleanupStartup = this.sweepGit().catch(e => this.emit('fault', e)); this.kick();
+  }
   async control(id, action, payload = {}) {
     const job = this.get(id);
     if (action === 'preview-stop') { await this.stopPreview(id, 'user'); return this.get(id); }
@@ -2038,7 +2084,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       job.title = validateTitle(payload.title); job.titleBy = 'user';
       this.save(job, { rename: true }); this.event(id, 'user', 'team', 'CONTROL', msg('srv.team.renamed', { 0: job.title })); return job;
     }
-    if (action === 'cancel' && job.status === 'cancelled') return job;
+    if (action === 'cancel' && job.status === 'cancelled') { await this.cleanupJob(id).catch(e => this.emit('fault', e)); return this.get(id); }
     if (action === 'delete') {
       // Xóa được mọi việc không có tiến trình đang chạy (đang chạy thì Tạm dừng/Hủy trước). Xóa cả worktree, branch và log.
       if (['running', 'queued', 'merging'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.delete_not_finished"));
@@ -2050,6 +2096,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (terminal.has(job.status)) throw new Error(msg("srv.team.task_da_ket_thuc"));
     if (job.status === 'merging') throw new Error(msg("srv.team.merge_dang_chay"));
+    if (action === 'sync' || action === 'review') return this.controlRevision(job, action);
     if (['adopt-discussion', 'revisit-discussion', 'resolve-discussion'].includes(action)) {
       if (!['paused', 'blocked', 'waiting', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error('Pause the job before mapping discussion obligations');
       const o = job.obligations?.find(o => o.id === payload.thread && o.status === 'unmapped');
@@ -2082,6 +2129,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (action === 'cancel') await this.stopPreview(id, 'cancelled');
       if (this.runs.has(id)) this.runs.get(id).abort.abort(new DOMException(action === 'cancel' ? msg("srv.team.huy_task_giu_worktree_de_khong") : msg("srv.team.dung_tien_trinh_khi_tiep_tuc"), 'AbortError'));
       this.event(id, 'user', 'team', 'CONTROL', action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
+      if (action === 'cancel') await this.cleanupJob(id).catch(e => this.emit('fault', e));
     } else if (action === 'resume') {
       if (!['blocked', 'paused', 'waiting'].includes(job.status)) throw new Error(msg("srv.team.chi_tiep_tuc_task_paused_blocked"));
       if (this.runs.has(id)) throw new Error(msg("srv.team.tien_trinh_dang_dung_thu_lai"));
@@ -2101,27 +2149,6 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         this.event(id, 'user', 'team', 'CONTROL', msg("srv.team.token_budget_extended", { 0: job.usage.tokens, 1: job.tokenBudget || cap }));
       }
       job.status = 'queued'; job.error = null; this.save(job); this.kick();
-    } else if (action === 'sync') {
-      // Base đã đi tiếp: merge base vào branch công việc, rồi bắt buộc test/review/verify lại từ đầu.
-      if (!['paused', 'blocked', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_cap_nhat"));
-      await this.stopPreview(id, 'revision'); job.preview = this.get(id).preview; job.acceptance = null;
-      const head = await git(this.project(job.project).path, ['rev-parse', `refs/heads/${job.baseBranch}`]);
-      for (const l of job.linked || []) if (await git(l.path, ['rev-parse', l.baseBranch]) !== l.base) throw new Error(msg("srv.team.linked_base_moved", { 0: l.project }));
-      if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
-      if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
-      const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} into ai-team/${job.id}`, head], { allowFailure: true, timeoutMs: 120_000 });
-      const conflicts = result.code === 0 ? '' : await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']);
-      if (result.code !== 0 && !conflicts) { await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true }); throw new Error(msg("srv.team.merge_base_that_bai") + redact(result.stderr).slice(0, 2000)); }
-      job.base = head; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; job.status = 'queued';
-      if (conflicts) {
-        job.tasks = [{ agent: null, difficulty: 4, instruction: `Base branch ${job.baseBranch} changed and merging it caused conflicts in:\n${conflicts}\nResolve every conflict keeping the intent of BOTH sides (the goal: ${job.goal.slice(0, 2000)}). Remove all conflict markers. Do not commit and do not run git merge/rebase/reset.` }];
-        job.taskIndex = 0; job.stage = 'implement';
-        this.event(id, 'controller', (job.roster || roster(this.config)).manager, 'CONFLICT', msg("srv.team.xung_dot_voi", { 0: job.baseBranch, 1: conflicts.split('\n').join(', ') }));
-      } else {
-        job.revision = await git(job.worktree, ['rev-parse', 'HEAD']); job.stage = 'test';
-        this.event(id, 'user', 'team', 'SYNC', msg("srv.team.da_cap_nhat_theo_chay_lai", { 0: job.baseBranch, 1: head.slice(0, 8) }));
-      }
-      this.save(job); this.kick();
     } else if (action === 'message') {
       if (typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 20000) throw new Error(msg("srv.team.message_khong_hop_le"));
       job.acceptance = null;
@@ -2173,12 +2200,136 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (!(job.roster || roster(this.config)).builders.includes(payload.agent)) throw new Error(msg("srv.team.thanh_vien_nay_khong_thuoc_nhom"));
       job.assignee = payload.agent; this.save(job); this.event(id, 'user', payload.agent, 'REASSIGN', msg("srv.team.chuyen_cac_buoc_implementation_tiep_theo"));
       if (['blocked', 'paused'].includes(job.status) && !this.runs.has(id)) { job.status = 'queued'; job.error = null; delete job.blockedReason; this.save(job); this.kick(); }
-    } else if (action === 'review') {
-      if (!['paused', 'blocked', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_review_lai"));
-      if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
-      job.stage = 'test'; job.status = 'queued'; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; this.save(job); this.kick();
     } else throw new Error(msg("srv.team.action_khong_ho_tro"));
     return this.get(id);
+  }
+  async controlRevision(job, action) {
+    const id = job.id;
+    if (this.runs.has(id)) throw new Error(msg(action === 'sync' ? 'srv.team.dung_task_truoc_khi_cap_nhat' : 'srv.team.dung_task_truoc_khi_review_lai'));
+    const runtime = { job: id, agents: new Set(), abort: new AbortController() };
+    this.runs.set(id, runtime);
+    const current = () => { if (runtime.abort.signal.aborted) throw runtime.abort.signal.reason; };
+    try {
+      if (action === 'sync') {
+        // Base đã đi tiếp: merge base vào branch công việc, rồi bắt buộc test/review/verify lại từ đầu.
+        if (!['paused', 'blocked', 'ready'].includes(job.status)) throw new Error(msg("srv.team.dung_task_truoc_khi_cap_nhat"));
+        await this.stopPreview(id, 'revision'); job.preview = this.get(id).preview; job.acceptance = null;
+        current();
+        const head = await git(this.project(job.project).path, ['rev-parse', `refs/heads/${job.baseBranch}`]);
+        for (const l of job.linked || []) if (await git(l.path, ['rev-parse', l.baseBranch]) !== l.base) throw new Error(msg("srv.team.linked_base_moved", { 0: l.project }));
+        if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
+        if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
+        current();
+        const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} into ai-team/${job.id}`, head], { allowFailure: true, timeoutMs: 120_000 });
+        const conflicts = result.code === 0 ? '' : await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']);
+        if (result.code !== 0 && !conflicts) { await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true }); throw new Error(msg("srv.team.merge_base_that_bai") + redact(result.stderr).slice(0, 2000)); }
+        current();
+        job.base = head; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; job.status = 'queued';
+        if (conflicts) {
+          job.tasks = [{ agent: null, difficulty: 4, instruction: `Base branch ${job.baseBranch} changed and merging it caused conflicts in:\n${conflicts}\nResolve every conflict keeping the intent of BOTH sides (the goal: ${job.goal.slice(0, 2000)}). Remove all conflict markers. Do not commit and do not run git merge/rebase/reset.` }];
+          job.taskIndex = 0; job.stage = 'implement';
+          this.event(id, 'controller', (job.roster || roster(this.config)).manager, 'CONFLICT', msg("srv.team.xung_dot_voi", { 0: job.baseBranch, 1: conflicts.split('\n').join(', ') }));
+        } else {
+          job.revision = await git(job.worktree, ['rev-parse', 'HEAD']); job.stage = 'test';
+          current();
+          this.event(id, 'user', 'team', 'SYNC', msg("srv.team.da_cap_nhat_theo_chay_lai", { 0: job.baseBranch, 1: head.slice(0, 8) }));
+        }
+        this.save(job);
+      } else {
+        if (!['paused', 'blocked', 'ready'].includes(job.status)) throw new Error(msg("srv.team.dung_task_truoc_khi_review_lai"));
+        if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
+        current();
+        job.stage = 'test'; job.status = 'queued'; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; this.save(job);
+      }
+    } catch (error) {
+      if (this.get(id).status !== 'cancelled') throw error;
+    } finally { this.runs.delete(id); this.emit('change'); this.kick(); }
+    if (this.get(id).status === 'cancelled') await this.cleanupJob(id).catch(e => this.emit('fault', e));
+    return this.get(id);
+  }
+  storage() {
+    if (!this.storageCache || Date.now() - this.storageCache.at >= 10 * 60_000) this.storageCache = { at: Date.now(), ...storageStats(this.dataDir) };
+    const { dataDirBytes, freeBytes } = this.storageCache;
+    return { dataDirBytes, freeBytes, warn: { dataDir: dataDirBytes > 2 ** 30, disk: freeBytes !== null && freeBytes < 10e9 }, lastCleanup: this.lastCleanup || null };
+  }
+  cleanupContext(ownId) {
+    return { dataDir: this.dataDir, projects: this.config.projects, agents: this.config.agents, config: this.config, jobs: this.jobs(), run, git,
+      isBusy: id => this.previews.has(id) || this.runs.has(id),
+      isActive: id => {
+        const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(id);
+        const status = row && JSON.parse(row.body).status;
+        return !!row && !terminal.has(status) || this.previews.has(id) || this.runs.has(id) && (id !== ownId || status === 'cancelled');
+      },
+      events: {
+        page: (id, after, limit) => this.db.prepare('SELECT seq,body FROM events WHERE job=? AND seq>? ORDER BY seq LIMIT ?').all(id, after, limit),
+        transaction: fn => {
+          this.db.exec('BEGIN IMMEDIATE');
+          try {
+            fn({ deleteActivity: (id, seqs) => {
+              const remove = this.db.prepare("DELETE FROM events WHERE job=? AND seq=? AND json_extract(body,'$.type')='ACTIVITY'");
+              for (const seq of seqs) remove.run(id, seq);
+            }, insert: (id, event) => this.db.prepare('INSERT INTO events (job,body) VALUES (?,?)').run(id, JSON.stringify(scrub(event))) });
+            this.db.exec('COMMIT');
+          } catch (e) { this.db.exec('ROLLBACK'); throw e; }
+        },
+      },
+    };
+  }
+  queueCleanup(fn) {
+    const pending = (this.cleanupPending || Promise.resolve()).then(fn);
+    this.cleanupPending = pending.catch(() => {}); return pending;
+  }
+  cleaned(ids, result) {
+    for (const id of ids) {
+      if (result.results.some(r => r.jobId === id && (r.status === 'error' || !r.keep && r.status !== 'ok'))) continue;
+      const job = this.get(id);
+      if (!terminal.has(job.status) || job.cleanedAt || job.status === 'cancelled' && this.runs.has(id)) continue;
+      job.cleanedAt = now(); job.released = true;
+      this.db.prepare('UPDATE jobs SET body=? WHERE id=?').run(JSON.stringify(job), id);
+      for (const entry of result.results.filter(r => r.jobId === id && r.status === 'ok' && r.kind !== 'events')) this.event(id, 'controller', 'team', 'CLEANUP_ITEM', `${entry.kind}: ${entry.target}`, { manifest: result.id, kind: entry.kind, target: entry.target });
+      this.event(id, 'controller', 'team', 'CLEANUP', 'Finished job cleanup completed', { manifest: result.id, cleanedAt: job.cleanedAt });
+    }
+    this.lastCleanup = { id: result.id, at: now() }; this.emit('change');
+    for (const r of result.results) if (r.status === 'error') this.emit('fault', new Error(`${r.kind}: ${r.detail}`));
+  }
+  async cleanupJob(id, { dryRun = false, fromRun = false } = {}) {
+    if (!dryRun) {
+      if (this.get(id).cleanedAt) return null;
+      await this.stopPreview(id, 'cleanup');
+      if (fromRun && this.get(id).status === 'cancelled') return null;
+      if (this.get(id).status === 'cancelled') while (this.runs.has(id)) await new Promise(r => setTimeout(r, 25));
+    }
+    return this.queueCleanup(async () => {
+      const job = this.get(id);
+      if (!terminal.has(job.status) || job.cleanedAt && !dryRun || fromRun && job.status === 'cancelled') return null;
+      const ctx = this.cleanupContext(id), root = this.project(job.project).path;
+      const plan = await planJob({ ...ctx, root, job });
+      if (dryRun) return plan;
+      const result = await applyCleanup({ ...plan, dryRun: false }, this.cleanupContext(id));
+      this.cleaned([id], result); return result;
+    });
+  }
+  cleanup({ dryRun = false, id, backupsOnly = false } = {}) {
+    return this.queueCleanup(async () => {
+      await this.previewRecovery;
+      let ctx = this.cleanupContext(), plan, pending = [];
+      if (id !== undefined) {
+        const preview = this.cleanupPreview;
+        if (!preview || preview.id !== id || Date.now() - Date.parse(preview.at) > 10 * 60_000) throw Object.assign(new Error('Cleanup preview expired or does not match; preview again'), { code: 409 });
+        plan = preview; pending = preview.jobIds; this.cleanupPreview = null;
+      } else {
+        plan = await planPeriodic(backupsOnly ? { ...ctx, jobs: [], projects: [], agents: [], isActive: () => false } : ctx);
+        if (!backupsOnly) for (const job of ctx.jobs) if (terminal.has(job.status) && !job.cleanedAt && !ctx.isActive(job.id) && !(job.status === 'merged' && this.config.cleanupOnMerge === false)) {
+          const planned = await planJob({ ...ctx, root: this.project(job.project).path, job });
+          plan.items.push(...planned.items); pending.push(job.id);
+        }
+        plan.items = plan.items.filter((entry, i, all) => all.findIndex(e => e.kind === entry.kind && e.target === entry.target && e.root === entry.root) === i);
+      }
+      if (dryRun) { this.cleanupPreview = { ...plan, jobIds: pending }; return plan; }
+      ctx = this.cleanupContext();
+      const result = await applyCleanup({ ...plan, dryRun: false }, ctx);
+      this.cleaned(pending.filter(jobId => !ctx.isActive(jobId)), result); return result;
+    });
   }
   // Gỡ mọi worktree controller tạo cho việc (chính, -tN, -review-*, -consult-*) và branch ai-team/<id>*. Không đụng worktree/branch người dùng tạo.
   async releaseGit(job) {
@@ -2192,15 +2343,23 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     for (const l of job.linked || []) if (l.worktree?.startsWith(mine)) { await run(['git'], ['-C', l.path, 'worktree', 'remove', '--force', l.worktree], { allowFailure: true }); if (job.status !== 'merged') await run(['git'], ['-C', l.path, 'branch', '-D', l.branch], { allowFailure: true }); }
   }
-  // Lúc khởi động chưa có lượt nào chạy: dọn rác của việc đã merge/nghiên cứu xong và worktree review/consult sót lại (bản cũ không gỡ, hoặc server bị tắt giữa lượt).
+  // Giữ đường release cũ cho merged khi tắt cleanupOnMerge; phần còn lại đi qua manifest.
   async sweepGit() {
-    const mine = join(this.dataDir, 'worktrees');
-    for (const job of this.jobs()) if (['merged', 'done'].includes(job.status) && !job.released) { await this.releaseGit(job); job.released = true; this.save(job); }
-    for (const p of this.config.projects) {
-      const trees = (await git(p.path, ['worktree', 'list', '--porcelain']).catch(() => '')).split(/\r?\n/).filter(l => l.startsWith('worktree ')).map(l => l.slice(9));
-      for (const wt of trees) if (resolve(wt).toLowerCase().startsWith(resolve(mine).toLowerCase()) && /-(review|consult|preview)-[0-9a-f]{8}$/.test(wt) && !this.runs.has(basename(wt).split('-')[0]) && !this.previews.has(basename(wt).split('-')[0])) await run(['git'], ['-C', p.path, 'worktree', 'remove', '--force', wt], { allowFailure: true });
-      await run(['git'], ['-C', p.path, 'worktree', 'prune'], { allowFailure: true });
+    await this.previewRecovery;
+    for (const job of this.jobs()) if (this.config.cleanupOnMerge === false && job.status === 'merged' && !job.released && !this.runs.has(job.id) && !this.previews.has(job.id)) {
+      await this.releaseGit(job); const fresh = this.get(job.id); fresh.released = true; this.save(fresh);
     }
+    await this.cleanup();
+    return this.queueCleanup(async () => {
+      for (const job of this.jobs()) if (!terminal.has(job.status) && !this.runs.has(job.id) && !this.previews.has(job.id)) {
+        const ctx = this.cleanupContext(), root = this.project(job.project).path;
+        const plan = await planJob({ ...ctx, root, job, scratchOnly: true });
+        if (plan.items.length) {
+          const result = await applyCleanup({ ...plan, dryRun: false }, this.cleanupContext());
+          this.cleaned([], result);
+        }
+      }
+    });
   }
   async diff(id) {
     const job = this.get(id);
@@ -2335,7 +2494,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       for (const l of job.linked || []) { const r = await run(['git'], ['-C', l.path, 'merge', '--ff-only', l.revision], { allowFailure: true }); if (r.code !== 0) throw new Error(msg("srv.team.linked_merge_failed", { 0: l.project, 1: job.baseBranch })); }
       job.status = 'merged'; job.pendingMerge = null; job.mergedInto = { branch: destination.branch, commit, mode }; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: commit.slice(0, 8), 1: destination.branch }), job.mergedInto);
       await this.stopPreview(id, 'merged'); job.preview = this.get(id).preview;
-      await this.releaseGit(job).catch(e => this.emit('fault', e));
+      if (this.config.cleanupOnMerge !== false) await this.cleanupJob(id).catch(e => this.emit('fault', e));
+      else await this.releaseGit(job).catch(e => this.emit('fault', e));
+      Object.assign(job, this.get(id));
     } catch (error) { job.status = 'ready'; this.save(job); throw error; }
     finally { this.runs.delete(id); this.kick(); }
     return job;
@@ -2539,12 +2700,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   async close() {
     if (this.dbClosed) return;
-    this.closed = true; clearInterval(this.interval); clearInterval(this.backupTimer); for (const r of this.runs.values()) r.abort.abort();
+    this.closed = true; clearInterval(this.interval); clearInterval(this.backupTimer); clearInterval(this.cleanupTimer); for (const r of this.runs.values()) r.abort.abort();
     await this.previewRecovery;
     const previews = [...this.previews.entries()];
     for (const [id] of previews) await this.stopPreview(id, 'close');
     await Promise.all(previews.map(([, p]) => p.done));
     while (this.runs.size || this.refreshing) await new Promise(r => setTimeout(r, 25));
+    await this.cleanupStartup; await this.cleanupPending;
     this.db.close(); this.dbClosed = true;
   }
 }

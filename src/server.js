@@ -115,6 +115,13 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/memory') return send(res, 200, team.editMemory(await body(req)));
     if (req.method === 'GET' && url.pathname === '/api/backups') return send(res, 200, { dir: team.backupDir(), list: team.backups() });
     if (req.method === 'POST' && url.pathname === '/api/backup') return send(res, 200, { file: team.backup('manual'), list: team.backups() });
+    if (req.method === 'GET' && url.pathname === '/api/cleanup') return send(res, 200, await team.cleanup({ dryRun: true }));
+    if (req.method === 'POST' && url.pathname === '/api/cleanup') {
+      const input = await body(req);
+      if (typeof input?.id !== 'string') return send(res, 409, { error: 'Preview cleanup first' });
+      const result = await team.cleanup({ id: input.id });
+      return send(res, 200, { id: result.id, results: result.results.map(r => ({ kind: r.kind, target: r.target, status: r.status, ...(r.status === 'error' ? { error: r.detail } : {}) })) });
+    }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const input = await body(req);
       if (!languages.includes(input.language)) throw new Error('language: vi | en | ja');
