@@ -437,6 +437,9 @@ function wireCleanup(prefix) {
 $('close-cleanup').onclick = () => $('cleanup-dialog').close();
 
 function drawState() {
+  $('oracle-toggle').checked = !!state.oracle?.enabled;
+  $('oracle-toggle').disabled = !state.oracle?.accounts;
+  $('oracle-toggle').parentElement.title = t('ui.settings.oracleHint') + (!state.oracle?.accounts ? ' ' + t('ui.settings.oracleUnavailable') : '');
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
   drawStorage();
@@ -1142,7 +1145,7 @@ async function recheckMembers(ids) {
 }
 // Khung trao đổi kiểu chat nhóm: mọi thành viên trong luồng, tin của Bạn bên phải, hoạt động kỹ thuật thu gọn ở giữa.
 const SYSTEM_TYPES = ['ACTIVITY', 'DIAGNOSTIC', 'TEST_OUTPUT', 'TEST_START', 'USAGE', 'RATE_LIMIT'];
-const DECISION_TYPES = ['QUESTION', 'CONCLUSION', 'DECISION', 'PEER_QUESTION', 'PEER_REPLY', 'PEER_DECISION', 'PEER_UNRESOLVED', 'PEER_HANDOVER', 'PEER_REOPENED', 'PEER_SCORE', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'REASSIGN', 'REQUEUE', 'CONFLICT', 'WARNING'];
+const DECISION_TYPES = ['QUESTION', 'ORACLE_QUESTION', 'ORACLE_ANSWER', 'CONCLUSION', 'DECISION', 'PEER_QUESTION', 'PEER_REPLY', 'PEER_DECISION', 'PEER_UNRESOLVED', 'PEER_HANDOVER', 'PEER_REOPENED', 'PEER_SCORE', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'REASSIGN', 'REQUEUE', 'CONFLICT', 'WARNING'];
 const hueClass = id => 'hue-' + [...String(id)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 8, 3);
 const evLabel = type => dict['ui.ev.' + type] || fallback['ui.ev.' + type] || type;
 function avatar(id) {
@@ -1175,6 +1178,7 @@ function drawTimeline() {
   const time = e => new Date(e.timestamp).toLocaleTimeString(LOCALE_TAG[lang], { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const details = e => e.details ? `<details data-seq="${e.seq}" ${opened.has(String(e.seq)) ? 'open' : ''}><summary>${esc(t('ui.timeline.details'))}</summary><pre>${esc(JSON.stringify(e.details, null, 2))}</pre></details>` : '';
   timeline.innerHTML = filtered.length ? filtered.map(e => {
+    if (['ORACLE_QUESTION', 'ORACLE_ANSWER'].includes(e.type)) return `<article class="chat-msg"><div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(cut(e.summary || evLabel(e.type), 200))}</div><details data-seq="${e.seq}" ${opened.has(String(e.seq)) ? 'open' : ''}><summary>${esc(t('ui.timeline.details'))}</summary><pre>${esc(e.type === 'ORACLE_QUESTION' ? e.details?.question : e.details?.answer)}</pre></details></div></article>`;
     if (SYSTEM_TYPES.includes(e.type)) return `<div class="chat-system"><span class="chat-type">${esc(evLabel(e.type))}</span><b>${esc(names[e.from] || e.from)}</b> ${esc(cut(e.summary, 300))}<time>${time(e)}</time>${details(e)}</div>`;
     const mine = e.from === 'user', cls = [mine && 'mine', e.from === 'controller' && 'from-system', e.type === 'BLOCKER' && 'alert', e.type === 'QUESTION' && 'question', ['READY_FOR_MERGE', 'MERGED'].includes(e.type) && 'success'].filter(Boolean).join(' ');
     return `<article class="chat-msg ${cls}">${mine ? '' : avatar(e.from)}<div class="chat-body"><div class="chat-head"><strong>${esc(names[e.from] || e.from)}</strong><span class="chat-to">→ ${esc(names[e.to] || e.to)}</span><span class="chat-type">${esc(evLabel(e.type))}</span><time>${time(e)}</time></div><div class="chat-bubble">${esc(e.summary)}</div>${details(e)}</div></article>`;
@@ -1708,6 +1712,16 @@ $('start-login').onclick = () => attempt(async () => { $('start-login').disabled
 $('check-login').onclick = () => attempt(async () => { await api(`members/${loginId}/refresh`, {}); await refresh(); });
 $('cancel-login').onclick = () => attempt(async () => { await api(`members/${loginId}/cancel-login`, {}); await refresh(); });
 $('theme-select').onchange = () => { store.set('theme', $('theme-select').value); applyTheme($('theme-select').value); };
+$('oracle-toggle').onchange = async () => {
+  const toggle = $('oracle-toggle'), previous = !!state?.oracle?.enabled;
+  toggle.disabled = true;
+  try {
+    const result = await api('settings', { oracle: toggle.checked });
+    state.oracle = result.oracle;
+    toggle.checked = !!state.oracle?.enabled;
+  } catch (e) { notice(e.message); toggle.checked = previous; }
+  finally { toggle.disabled = !state?.oracle?.accounts; }
+};
 // Ngôn ngữ lưu ở server (team.config.json) để thông báo do server tạo cũng đổi theo.
 $('lang-select').onchange = () => attempt(async () => {
   const next = $('lang-select').value; store.set('lang', next);

@@ -1008,5 +1008,10 @@
   "ui.cleanup.kind.session": "Phiên CLI",
   "ui.cleanup.status.ok": "Đã dọn",
   "ui.cleanup.status.skipped": "Đã bỏ qua",
-  "ui.cleanup.status.error": "Lỗi"
+  "ui.cleanup.status.error": "Lỗi",
+  "ui.settings.oracle": "Lead tham khảo ChatGPT web",
+  "ui.settings.oracleHint": "Lead có thể hỏi ChatGPT web bằng quota web; nếu lỗi sẽ tự bỏ qua.",
+  "ui.settings.oracleUnavailable": "Cần cấu hình tài khoản ChatGPT web và server hỗ trợ để bật.",
+  "ui.ev.ORACLE_QUESTION": "Hỏi ChatGPT web",
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web trả lời"
 }

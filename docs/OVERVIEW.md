@@ -38,6 +38,7 @@ flowchart LR
 | Builder | Chỉ làm task được giao trong quyền đã cấp, báo contextGaps, checkpoint và bằng chứng. |
 | Reviewer | Đánh giá diff đúng base/revision hoặc kết luận research, trả verdict và findings có cấu trúc. |
 | Verifier | Đối chiếu mục tiêu, kiểm chứng kết quả và phân xử findings bị bác bỏ. |
+| ChatGPT web | `oracle: {enabled, command, accounts:[{id,args}], timeoutMin, maxPerJob}`: bật/tắt bằng `enabled` hoặc checkbox settings; `command` là CLI Oracle, `args` chọn browser profile riêng cho từng tài khoản (owner chọn 1–2 tài khoản), `timeoutMin` giới hạn thời gian hỏi, `maxPerJob` giới hạn số lần hỏi trong job. |
 | Controller | Phần mềm điều phối: định tuyến, quota/slot, Git/worktree, test, cổng duyệt, lưu SQLite, evidence và merge sau owner duyệt. |
 
 Đội hình lấy từ các trường không bí mật của `D:\work_team\team.config.json` ngày 14/10/2026; `pipeline` gán vai trò, tier là năng lực mặc định (effort cao có thể tăng mức phù hợp):
@@ -53,6 +54,8 @@ flowchart LR
 Member có thể được thay tạm khi quota thấp; checker ưu tiên người không viết code và khác provider. Owner đổi đội hình/model/prompt trong màn Quota & tài khoản. File mẫu dùng `claude-1` thay cho ID Claude của máy này.
 
 ## Chức năng hiện có trên master
+
+- Lead tham khảo ChatGPT web qua `oracle --engine browser`, dùng quota web, chỉ ở bước plan (kể cả vòng rework). ChatGPT chỉ tư vấn, không nhận task hay sửa code. Có thể hỏi tiếp trong cùng cuộc trò chuyện của một job; câu hỏi/câu trả lời lưu trong lịch sử job, toàn văn thu gọn khi xem job. Mỗi tài khoản dùng một browser profile riêng, đăng nhập thủ công một lần; mỗi tài khoản chỉ có một cuộc hỏi tại một thời điểm, job khác chờ. Lỗi/timeout/captcha/chưa đăng nhập/Too many requests thì Lead bỏ qua, ghi WARNING và tiếp tục bình thường.
 
 Cột Job ghi ID 8 ký tự đã đối chiếu lịch sử master và SQLite. `—` nghĩa là chức năng nền từ v1/v1.1 (01/10/2026) hoặc thay đổi cũ không có ID job trong commit; không suy đoán ID từ tên commit `new`/`test`. Bảng chỉ mô tả chức năng đã có trong code, không coi đề xuất trong báo cáo là tính năng.
 
