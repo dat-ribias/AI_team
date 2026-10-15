@@ -10,6 +10,12 @@
   "planApprovalRework": true,
   "resumeCodexTasks": false,
   "peerDialogue": true,
+  "oracle": {
+    "enabled": false,
+    "accounts": [{ "id": "chatgpt-1", "args": ["--browser-manual-login", "--browser-manual-login-profile-dir", "C:\\Users\\<USER>\\.oracle\\chatgpt-1"] }],
+    "timeoutMin": 10,
+    "maxPerJob": 3
+  },
   "codexWindowsSandbox": "unelevated",
   "agents": [
     {
