@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { removeTempDir } from '../src/preview.js';
@@ -21,6 +21,34 @@ test('removeTempDir logs and returns false when EPERM persists', async () => {
   assert.equal(removed, false);
   assert.equal(attempts, 21);
   assert.deepEqual(logs, ['[preview] could not remove temp dir locked-profile: EPERM']);
+});
+
+test('removeTempDir with retries=0 attempts and logs exactly once', async () => {
+  let attempts = 0;
+  const logs = [];
+  const removed = await removeTempDir('locked-profile', {
+    rm() { attempts++; throw Object.assign(new Error('locked'), { code: 'EPERM' }); },
+    retries: 0,
+    log: line => logs.push(line),
+  });
+  assert.equal(removed, false);
+  assert.equal(attempts, 1);
+  assert.deepEqual(logs, ['[preview] could not remove temp dir locked-profile: EPERM']);
+});
+
+test('removeTempDir returns false after exhausting EBUSY and ENOTEMPTY retries', async () => {
+  for (const code of ['EBUSY', 'ENOTEMPTY']) {
+    let attempts = 0;
+    const logs = [];
+    assert.equal(await removeTempDir('locked-profile', {
+      rm() { attempts++; throw Object.assign(new Error('locked'), { code }); },
+      retries: 2,
+      delayMs: 1,
+      log: line => logs.push(line),
+    }), false);
+    assert.equal(attempts, 3);
+    assert.deepEqual(logs, [`[preview] could not remove temp dir locked-profile: ${code}`]);
+  }
 });
 
 test('removeTempDir retries transient filesystem locks', async () => {
@@ -52,4 +80,10 @@ test('removeTempDir removes a real directory with rmSync', async t => {
   writeFileSync(join(dir, 'file.txt'), 'cleanup fixture', 'utf8');
   assert.equal(await removeTempDir(dir), true);
   assert.equal(existsSync(dir), false);
+});
+
+test('screenshot cleanup awaits removeTempDir from its finally block', () => {
+  const source = readFileSync(new URL('../src/preview.js', import.meta.url), 'utf8');
+  const screenshot = source.slice(source.indexOf('export async function screenshot'));
+  assert.match(screenshot, /finally\s*\{[\s\S]*await removeTempDir\(profile\);[\s\S]*\}\s*\}/);
 });
