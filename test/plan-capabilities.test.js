@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team } from '../src/team.js';
@@ -112,8 +112,9 @@ test('plan capabilities: valid research evidence plan runs with builder permissi
   assert.deepEqual(calls, ['plan', 'research']); assert.equal(done.kind, 'research');
   assert.equal(done.tasks[0].done, true); assert.equal(done.planRejects, 0);
   assert.equal(done.revision, done.base); assert.equal(done.conclusion.conclusion, 'Evidence saved');
-  assert.deepEqual(readFileSync(join(done.worktree, '.ai-team', 'evidence', 'x.png')), png);
-  assert.equal((await run(['git'], ['-C', done.worktree, 'status', '--porcelain'])).stdout.trim(), '');
+  const archive = done.evidence.find(e => e.stage === 'research');
+  assert.deepEqual(readFileSync(join(team.dataDir, 'evidence', job.id, archive.dir, '.ai-team', 'evidence', 'x.png')), png);
+  assert.ok(done.cleanedAt); assert.equal(existsSync(done.worktree), false);
   assert(!team.events(job.id).some(e => e.type === 'WARNING'));
 });
 

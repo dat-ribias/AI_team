@@ -63,8 +63,8 @@ for (const provider of ['codex', 'claude']) test(`research archives evidence wit
   assert(archive.files.some(f => f.path === '.ai-team/evidence/shot.txt'));
   assert.equal(readFileSync(join(team.dataDir, 'evidence', job.id, archive.dir, '.ai-team', 'evidence', 'shot.txt'), 'utf8'), 'research proof');
   assert.deepEqual(done.reports.find(r => r.stage === 'research').codeSnapshot, snapshot, 'Evidence did not change the code snapshot');
-  if (provider === 'claude') assert.equal(existsSync(worktree), false, 'Scratch evidence was archived before removal');
-  else assert.equal((await run(['git'], ['-C', worktree, 'status', '--porcelain'])).stdout.trim(), '');
+  assert.ok(done.cleanedAt);
+  assert.equal(existsSync(worktree), false, 'Research evidence was archived before worktree cleanup');
 });
 
 for (const throws of [false, true]) test(`research reverts forbidden tracked and new files${throws ? ' after agent failure' : ''}`, async t => {

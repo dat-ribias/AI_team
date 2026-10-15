@@ -5,13 +5,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Team } from '../src/team.js';
 import { UsageStore } from '../src/usage.js';
+import { run } from '../src/process.js';
+
+async function tempRepo() {
+  const path = mkdtempSync(join(tmpdir(), 'ai-team-usage-tree-'));
+  await run(['git'], ['init', '-b', 'main', path]);
+  await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '--allow-empty', '-m', 'initial']);
+  return path;
+}
 
 test('invoke records one accumulated usage row for every outcome', async t => {
   let outcome = 'ok';
+  const worktree = await tempRepo();
   const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100,
     agents: [{ id: 'agent', label: 'Agent', provider: 'mock', model: 'mock-model' }],
     pipeline: { manager: 'agent', builders: ['agent'], reviewer: 'agent', verifier: 'agent' },
-    projects: [{ id: 'project', path: process.cwd(), tests: [] }] };
+    projects: [{ id: 'project', path: worktree, tests: [] }] };
   const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-usage-invoke-')), { runAgent: async (agent, task, prompt, opts) => {
     if (outcome === 'ok') {
       opts.onEvent('USAGE', { summary: 'first', details: { input_tokens: 10, output_tokens: 5, cached_input_tokens: 2 } });
@@ -26,7 +35,7 @@ test('invoke records one accumulated usage row for every outcome', async t => {
   } });
   t.after(() => team.close());
   const job = { id: 'usage-job', project: 'project', sessionId: 'session-1', goal: 'Measure calls', kind: 'research', status: 'running', stage: 'plan',
-    worktree: process.cwd(), revision: 'revision', roster: { manager: 'agent', builders: ['agent'], reviewer: 'agent', verifier: 'agent' }, dialogueMode: 'off',
+    worktree: worktree, revision: 'revision', roster: { manager: 'agent', builders: ['agent'], reviewer: 'agent', verifier: 'agent' }, dialogueMode: 'off',
     tasks: [], taskIndex: 0, reports: [], messages: [], round: 0, usage: { calls: 0, tokens: 0 } };
   team.save(job);
 
@@ -58,10 +67,11 @@ test('invoke records one accumulated usage row for every outcome', async t => {
 
 async function reworkFixture(t) {
   let fail = false;
+  const worktree = await tempRepo();
   const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100,
     agents: [{ id: 'agent', label: 'Agent', provider: 'mock', model: 'mock-model' }],
     pipeline: { manager: 'agent', builders: ['agent'], reviewer: 'agent', verifier: 'agent' },
-    projects: [{ id: 'project', path: process.cwd(), tests: [] }] };
+    projects: [{ id: 'project', path: worktree, tests: [] }] };
   const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-usage-rework-')), { runAgent: async (agent, task, prompt, opts) => {
     opts.onEvent('USAGE', { details: { total_tokens: 10 } });
     if (fail) throw new Error('provider failed');
@@ -69,7 +79,7 @@ async function reworkFixture(t) {
   } });
   t.after(async () => { team.runs.clear(); await team.close(); });
   const job = { id: 'rework-job', project: 'project', sessionId: 'session-1', goal: 'Measure rework', kind: 'research', status: 'running', stage: 'plan',
-    worktree: process.cwd(), revision: 'revision', roster: { manager: 'agent', builders: ['agent'], reviewer: 'agent', verifier: 'agent' }, dialogueMode: 'off',
+    worktree: worktree, revision: 'revision', roster: { manager: 'agent', builders: ['agent'], reviewer: 'agent', verifier: 'agent' }, dialogueMode: 'off',
     tasks: [], taskIndex: 0, reports: [], messages: [], round: 0, usage: { calls: 0, tokens: 0 } };
   team.save(job);
   team.runs.set(job.id, { job: job.id, agents: new Set(), abort: new AbortController() });
