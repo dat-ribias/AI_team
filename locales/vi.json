@@ -1024,5 +1024,7 @@
   "ui.rework.open": "còn mở",
   "ui.rework.extraRound": "Cho thêm 1 vòng",
   "ui.rework.handoff": "Dừng, tôi tự xử lý",
-  "ui.rework.handedOff": "Owner đang tự xử lý"
+  "ui.rework.handedOff": "Owner đang tự xử lý",
+  "srv.team.rework_origin_unknown": "Chưa xác định nguồn finding",
+  "ui.rework.unknown": "Chưa xác định nguồn finding"
 }

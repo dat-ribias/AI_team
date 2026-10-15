@@ -1024,5 +1024,7 @@
   "ui.rework.open": "未解決",
   "ui.rework.extraRound": "もう1ラウンド許可",
   "ui.rework.handoff": "停止して自分で対応",
-  "ui.rework.handedOff": "オーナーが対応中"
+  "ui.rework.handedOff": "オーナーが対応中",
+  "srv.team.rework_origin_unknown": "指摘の発生要因は未確定",
+  "ui.rework.unknown": "指摘の発生要因は未確定"
 }
