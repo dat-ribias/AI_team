@@ -208,3 +208,125 @@ test('roster control: unchanged reviewer selection runs a real mock review succe
   assert.equal(next.reviewed, next.revision);
   assert(!team.events(job.id).some(e => e.type === 'BLOCKER'));
 });
+
+for (const [role, from, changes, to] of [
+  ['reviewer', 'gemini', { reviewer: 'codex-1', verifier: 'gemini' }, 'codex-1'],
+  ['verifier', 'codex-3', { verifier: 'codex-4', builders: ['codex-2', 'codex-3'] }, 'codex-4'],
+]) {
+  test(`roster F1: saved ${role} loses its original role while keeping another`, options, async t => {
+    const { team, job, pipeline } = await fixture(t);
+    pipeline(changes);
+    assert.equal(team.checker(job, role, job.roster), to);
+    assert.equal(job.flow[role], undefined);
+    assert.equal(job.flowRoles?.[role], undefined);
+    warning(team, job, from, to);
+    assert.equal(job.round, 0);
+    assert(!team.events(job.id).some(e => e.type === 'BLOCKER'));
+  });
+}
+
+for (const selector of ['pickMember', 'checker']) {
+  test(`roster F1: ${selector} keeps a manager-selected builder until its recorded role is revoked`, options, async t => {
+    const { team, job, pipeline } = await fixture(t);
+    const select = () => team[selector](job, 'reviewer', selector === 'checker' ? job.roster : {});
+    job.flow.reviewer = 'codex-4';
+    assert.equal(select(), 'codex-4');
+    assert.deepEqual(job.flowRoles.reviewer, ['builder']);
+    pipeline({ builders: ['codex-2'], verifier: 'codex-4' });
+    assert.equal(select(), 'gemini');
+    assert.equal(job.flow.reviewer, undefined);
+    assert.equal(job.flowRoles.reviewer, undefined);
+    pipeline({ builders: ['codex-2', 'codex-4'] });
+    assert.equal(select(), 'gemini', 'An expired flow choice must not become active again');
+    warning(team, job, 'codex-4', 'gemini');
+  });
+}
+
+for (const [stage, role, from, to] of [
+  ['plan', 'manager', 'codex-1', 'codex-4'],
+  ['review', 'reviewer', 'gemini', 'codex-1'],
+]) {
+  test(`roster F2: ${stage} warns after syncRoster and step refresh the saved roster`, options, async t => {
+    const { team, job, seen, pipeline } = await fixture(t);
+    job.stage = stage;
+    if (stage === 'plan') {
+      job.flowRoles = { reviewer: ['verifier'] };
+      // A valid one-step plan keeps this test focused on manager selection.
+      const call = team.call.bind(team);
+      team.call = async (...args) => {
+        const report = await call(...args);
+        return { ...report, kind: 'code', rigor: 'standard', risk: 'low', flow: { reviewer: 'codex-4' },
+          tasks: [{ kind: 'implement', agent: 'codex-2', difficulty: 2,
+            instruction: 'Update hello.txt', files: ['hello.txt'], dependsOn: [] }] };
+      };
+    } else job.flow.reviewer = null;
+    team.save(job);
+    pipeline({ [role]: to });
+    team.syncRoster();
+    const refreshed = team.get(job.id);
+    assert.equal(refreshed.roster[role], to);
+    assert.equal(refreshed.rosterSeen[role], from);
+    await team.runJob(refreshed);
+    const next = team.get(job.id);
+    assert.equal(seen.find(s => s.stage === stage)?.agent, to);
+    assert.equal(next.rosterSeen[role], to);
+    warning(team, next, from, to);
+    assert.equal(next.round, 0);
+    assert(!team.events(job.id).some(e => e.type === 'BLOCKER'));
+    if (stage === 'plan') {
+      assert.equal(team.checker(next, 'reviewer', next.roster), 'codex-4', 'New plans must not inherit the previous flow role snapshot');
+      assert.deepEqual(next.flowRoles.reviewer, ['manager', 'builder']);
+    }
+    const count = team.events(job.id).filter(e => e.type === 'WARNING').length;
+    if (role === 'manager') team.pickMember(next, role);
+    else team.checker(next, role, next.roster);
+    assert.equal(team.events(job.id).filter(e => e.type === 'WARNING').length, count);
+  });
+}
+
+for (const removed of [false, true]) {
+  test(`roster F3: ${removed ? 'removed' : 'disabled'} override falls back to the current reviewer`, options, async t => {
+    const { team, job, pipeline } = await fixture(t);
+    job.override = { reviewer: 'gemini', add: ['gemini'] };
+    pipeline({ reviewer: 'codex-4' });
+    team.config = { ...team.config, agents: removed ? team.config.agents.filter(a => a.id !== 'gemini')
+      : team.config.agents.map(a => a.id === 'gemini' ? { ...a, enabled: false } : a) };
+    assert.equal(team.jobRoster(job).reviewer, 'codex-4');
+    assert(!team.jobRoster(job).builders.includes('gemini'));
+    assert.equal(team.checker(job, 'reviewer', job.roster), 'codex-4');
+    warning(team, job, 'gemini', 'codex-4');
+    assert.equal(job.round, 0);
+  });
+}
+
+test('roster F3: a valid job override survives changes to the global role', options, async t => {
+  const { team, job, pipeline } = await fixture(t);
+  job.override = { reviewer: 'gemini' };
+  pipeline({ reviewer: 'codex-4', verifier: 'gemini' });
+  assert.equal(team.checker(job, 'reviewer', job.roster), 'gemini');
+  assert.equal(job.override.reviewer, 'gemini');
+});
+
+test('roster F3: control assign wakes a role-waiting job', options, async t => {
+  const { team, job, pipeline } = await fixture(t);
+  pipeline({ reviewer: null });
+  Object.assign(job, { status: 'waiting', error: 'No agent has role reviewer',
+    blockedReason: { kind: 'role', role: 'reviewer' } });
+  team.save(job);
+  const next = await team.control(job.id, 'assign', { role: 'reviewer', agent: 'codex-1' });
+  assert.equal(next.status, 'queued');
+  assert.equal(next.error, null);
+  assert.equal(next.blockedReason, undefined);
+  assert.equal(team.checker(next, 'reviewer', next.roster), 'codex-1');
+  assert.equal(next.round, 0);
+});
+
+test('roster selection probes leave stale flow, roster history and events unchanged', options, async t => {
+  const { team, job, pipeline } = await fixture(t);
+  pipeline({ reviewer: 'codex-2', verifier: 'gemini' });
+  const before = structuredClone(job), events = team.events(job.id).length;
+  assert.notEqual(team.pickMember(job, 'reviewer', { record: false }), 'gemini');
+  assert(!job.implementers.includes(team.checker(job, 'reviewer', job.roster, job.implementers, undefined, false)));
+  assert.deepEqual(job, before);
+  assert.equal(team.events(job.id).length, events);
+});

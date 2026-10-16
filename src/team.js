@@ -1060,8 +1060,21 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   currentRoster(job) {
     return job.comparison ? (job.roster || roster(this.config)) : this.jobRoster(job);
   }
+  refreshRoster(job) {
+    const previous = job.roster || roster(this.config);
+    job.rosterSeen ||= { manager: previous.manager, reviewer: previous.reviewer, verifier: previous.verifier };
+    job.roster = this.jobRoster(job);
+    return job.roster;
+  }
   hasRosterRole(job, role, id, flow = false, cur = this.currentRoster(job)) {
-    return !!id && this.config.agents.some(a => a.id === id && a.enabled !== false) && (flow ? rolesOf(cur, id).length > 0 : role === 'builder' ? cur.builders.includes(id) : cur[role] === id);
+    if (!id || !this.config.agents.some(a => a.id === id && a.enabled !== false)) return false;
+    if (flow) {
+      const roles = rolesOf(cur, id);
+      if (!role) return roles.length > 0;
+      const previous = job.flowRoles?.[role] || rolesOf({ ...job.roster, ...job.rosterSeen, builders: job.roster?.builders || [] }, id);
+      return roles.length > 0 && (previous.length ? previous : [role]).every(r => roles.includes(r));
+    }
+    return role === 'builder' ? cur.builders.includes(id) : cur[role] === id;
   }
   roleBlock(role) {
     return Object.assign(new Error(msg('srv.team.no_role_agent', { 0: role })), { roleBlock: { role } });
@@ -1073,16 +1086,31 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   pickMember(job, role, opts = {}) {
     const members = job.roster || roster(this.config), { exclude = [], busy = this.fullAgents(), record = true, preferOtherProvider = [] } = opts;
-    let preferred = 'preferred' in opts ? opts.preferred : role === 'challenger' ? null : job.override?.[role] || job.flow?.[role] || members[role];
+    const override = this.config.agents.some(a => a.id === job.override?.[role] && a.enabled !== false) ? job.override[role] : null;
+    let preferred = 'preferred' in opts ? opts.preferred : role === 'challenger' ? null : override || job.flow?.[role] || members[role];
     const cur = this.currentRoster(job);
-    if (role !== 'challenger' && !this.hasRosterRole(job, role, cur[role], false, cur)) { if (!record) return null; throw this.roleBlock(role); }
-    const stale = role !== 'challenger' && !('preferred' in opts) && !this.hasRosterRole(job, role, preferred, !job.override?.[role] && preferred === job.flow?.[role], cur);
-    const previous = preferred;
-    if (stale) { preferred = cur[role]; if (record) job.roster = cur; }
-    const chosen = id => { if (stale && record) this.rosterWarning(job, role, previous, id); return id; };
+    if (role !== 'challenger' && !this.hasRosterRole(job, role, cur[role], false, cur)) { if (!record && !opts.wait) return null; throw this.roleBlock(role); }
+    const stale = role !== 'challenger' && !('preferred' in opts) && !this.hasRosterRole(job, role, preferred, !override && preferred === job.flow?.[role], cur);
+    const previous = !('preferred' in opts) && job.override?.[role] && !override ? job.override[role] : preferred;
+    if (stale) {
+      if (record && preferred && preferred === job.flow?.[role]) { delete job.flow[role]; if (job.flowRoles) delete job.flowRoles[role]; if (job.checkers) delete job.checkers[role]; }
+      preferred = cur[role];
+    }
+    const chosen = id => {
+      if (record && role !== 'challenger' && opts.recordRoster !== false) {
+        job.rosterSeen ||= { manager: members.manager, reviewer: members.reviewer, verifier: members.verifier };
+        const seen = job.rosterSeen[role];
+        if (seen !== id && !this.hasRosterRole(job, role, seen, false, cur)) this.rosterWarning(job, role, seen, id);
+        if (stale || job.override?.[role] && !override) this.rosterWarning(job, role, previous, id);
+        job.rosterSeen[role] = cur[role];
+        if (id === job.flow?.[role]) job.flowRoles = { ...job.flowRoles, [role]: rolesOf(cur, id) };
+        if (stale) job.roster = cur;
+      }
+      return id;
+    };
     const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && (role === 'challenger' || rolesOf(cur, id).length > 0) && !this.unusable(id) && !exclude.includes(id); };
     if (usable(preferred) && !busy.has(preferred)) { if (record && job.substitutes) delete job.substitutes[role]; return chosen(preferred); }
-    const pinned = !!job.override?.[role], locked = pinned && this.unusable(preferred) && this.config.allowAutoReplacePinned === false;
+    const pinned = !!override, locked = pinned && this.unusable(preferred) && this.config.allowAutoReplacePinned === false;
     const cands = locked ? [] : this.config.agents.filter(a => usable(a.id)).sort((a, b) => busy.has(a.id) - busy.has(b.id) || tiers[tierOf(b)] - tiers[tierOf(a)] || preferOtherProvider.includes(a.provider) - preferOtherProvider.includes(b.provider) || (this.remaining(b.id) ?? 50) - (this.remaining(a.id) ?? 50));
     if (usable(preferred) && busy.has(preferred) && !cands.some(a => !busy.has(a.id))) return chosen(preferred);
     const cand = cands[0];
@@ -1094,7 +1122,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       }
       return chosen(cand.id);
     }
-    if (!record) return null;
+    if (!record && !opts.wait) return null;
     const resets = this.config.agents.filter(a => a.enabled !== false).map(a => ({ agent: a.id, at: this.resetAt(a.id) })).filter(r => r.at).sort((a, b) => a.at.localeCompare(b.at));
     const earliest = locked ? this.resetAt(preferred) : resets[0]?.at || null, earliestAgent = locked ? preferred : resets[0]?.agent;
     const downAgent = this.providerDown(preferred) ? preferred : this.config.agents.find(a => a.enabled !== false && !exclude.includes(a.id) && this.providerDown(a.id))?.id;
@@ -2081,18 +2109,30 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // khác, ưu tiên khác loại CLI với builder; không còn ai mới giữ người cũ và cảnh báo (assertIndependent).
   checker(job, role, members, impl = job.implementers || [], preferred = job.override?.[role] || job.flow?.[role], record = true) {
     const cur = this.currentRoster(job), previous = preferred || members[role];
-    const stale = !this.hasRosterRole(job, role, previous, !!preferred && !job.override?.[role] && preferred === job.flow?.[role], cur);
-    if (stale) { preferred = cur[role]; members = cur; if (record) job.roster = cur; }
-    let id = this.pickMember(job, role, { preferred: preferred || members[role], record });
-    if (!id) return this.pickMember(job, role, { preferred: preferred || members[role] }); // node review cũng phải chờ quota, không gọi member null
+    const override = this.config.agents.some(a => a.id === job.override?.[role] && a.enabled !== false) ? job.override[role] : null;
+    if (preferred === job.override?.[role] && !override) preferred = job.flow?.[role];
+    const stale = !this.hasRosterRole(job, role, preferred || members[role], !!preferred && !override && preferred === job.flow?.[role], cur);
+    const oldMembers = members;
+    if (stale) {
+      if (record && preferred === job.flow?.[role] && preferred) { delete job.flow[role]; if (job.flowRoles) delete job.flowRoles[role]; if (job.checkers) delete job.checkers[role]; }
+      preferred = cur[role]; members = cur;
+    }
+    let id = this.pickMember(job, role, { preferred: preferred || members[role], record, recordRoster: false, wait: true });
     if (impl.includes(id)) {
       const providers = new Set(impl.map(x => this.config.agents.find(a => a.id === x)?.provider));
       const alt = this.pickMember(job, role, { preferred: null, exclude: impl, preferOtherProvider: [...providers], record: false });
-      if (alt) { this.event(job.id, 'controller', members.manager, 'REROUTE', msg("srv.team.checker_rerouted", { 0: role, 1: id, 2: alt }), { role, from: id, to: alt }); id = alt; }
+      if (alt) { if (record) this.event(job.id, 'controller', members.manager, 'REROUTE', msg("srv.team.checker_rerouted", { 0: role, 1: id, 2: alt }), { role, from: id, to: alt }); id = alt; }
     }
-    if (record) { this.assertIndependent(job, id); job.checkers = { ...(job.checkers || {}), [role]: id }; }
-    else if (impl.includes(id)) this.assertIndependent(job, id); // không còn ai khác: cảnh báo + bắt xác nhận khi merge
-    if (record && stale) this.rosterWarning(job, role, previous, id);
+    if (record) {
+      this.assertIndependent(job, id); job.checkers = { ...(job.checkers || {}), [role]: id };
+      job.rosterSeen ||= { manager: oldMembers.manager, reviewer: oldMembers.reviewer, verifier: oldMembers.verifier };
+      const seen = job.rosterSeen[role];
+      if (seen !== id && !this.hasRosterRole(job, role, seen, false, cur)) this.rosterWarning(job, role, seen, id);
+      if (stale || job.override?.[role] && !override) this.rosterWarning(job, role, previous, id);
+      job.rosterSeen[role] = cur[role];
+      if (id === job.flow?.[role]) job.flowRoles = { ...job.flowRoles, [role]: rolesOf(cur, id) };
+      if (stale) job.roster = cur;
+    }
     return id;
   }
   // Số đo để so sánh "1 builder" với "builder + phản biện" sau ~20 việc thật: phản đối kế hoạch, finding, bị bác bỏ, verifier giữ / lật.
@@ -2171,7 +2211,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
   }
   async step(job) {
-    if (!job.comparison) job.roster = this.jobRoster(job);
+    if (!job.comparison) this.refreshRoster(job);
     const members = job.roster || roster(this.config);
     if (['implement', 'test', 'review', 'verify', 'final'].includes(job.stage) && this.planBlocked(job)) {
       const p = job.plans.at(-1), proposed = job.planGate?.version === p.version && job.planGate?.hash === p.hash;
@@ -2250,6 +2290,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         const requested = { reviewer: fl.reviewer ? String(fl.reviewer) : null, verifier: fl.verifier ? String(fl.verifier) : null, steps: Array.isArray(fl.steps) ? fl.steps.filter(x => ['review', 'verify', 'final'].includes(x)) : undefined };
         for (const role of ['reviewer', 'verifier']) if (requested[role] && !valid(requested[role])) this.event(job.id, 'controller', members.manager, 'WARNING', msg("srv.team.flow_invalid_member", { 0: requested[role], 1: role, 2: members[role] || '—' }));
         job.flow = { requested, reviewer: valid(requested.reviewer) ? requested.reviewer : null, verifier: valid(requested.verifier) ? requested.verifier : null, overrides: [] };
+        job.flowRoles = {};
         this.recordPlan(job);
         if (job.obligations?.some(o => o.status === 'unmapped')) { job.status = 'waiting'; job.peerWait = true; job.questions = ['Map or resolve imported discussion obligations before continuing']; }
         this.event(job.id, members.manager, 'team', 'DECISION', `${msg("srv.team.plan_mode", { 0: job.kind, 1: job.rigor })}\n${plan.summary}`, plan.tasks); break;
@@ -2353,15 +2394,16 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           run.rosterAbort = true;
           run.abort.abort(new DOMException(msg('srv.team.roster_changed', { 0: removed, 1: cur[stageRole[job.stage]] || cur.builders.join(', ') || '—' }), 'AbortError'));
         }
-      } else if (['queued', 'paused', 'blocked'].includes(job.status) || job.status === 'waiting' && job.blockedReason?.kind === 'role') { job.roster = cur; this.save(job); }
+      } else if (['queued', 'paused', 'blocked'].includes(job.status) || job.status === 'waiting' && job.blockedReason?.kind === 'role') { this.refreshRoster(job); this.save(job); }
     }
     this.kick();
   }
   // Đội hình của một việc = đội chung + những gì bạn đổi riêng cho việc đó (job.override); đổi vai trò chung không xóa lựa chọn riêng.
   jobRoster(job) {
     const r = roster(this.config), o = job.override || {};
-    for (const role of ['manager', 'reviewer', 'verifier']) if (o[role]) r[role] = o[role];
-    r.builders = [...new Set([...r.builders.filter(id => !o.drop?.includes(id)), ...(o.add || [])])];
+    const enabled = id => this.config.agents.some(a => a.id === id && a.enabled !== false);
+    for (const role of ['manager', 'reviewer', 'verifier']) if (o[role] && enabled(o[role])) r[role] = o[role];
+    r.builders = [...new Set([...r.builders.filter(id => !o.drop?.includes(id)), ...(o.add || []).filter(enabled)])];
     return r;
   }
   async assertReady(job) {
@@ -2384,7 +2426,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         const { role } = job.blockedReason, cur = this.currentRoster(job);
         const available = role === 'builder' ? cur.builders.some(id => this.hasRosterRole(job, role, id, false, cur)) : this.hasRosterRole(job, role, cur[role], false, cur);
         if (!available) continue;
-        job.status = 'queued'; job.error = null; delete job.blockedReason; job.roster = cur; this.save(job);
+        job.status = 'queued'; job.error = null; delete job.blockedReason; this.refreshRoster(job); this.save(job);
         this.event(job.id, 'controller', 'team', 'REQUEUE', msg('srv.team.roster_changed', { 0: '—', 1: role === 'builder' ? cur.builders.join(', ') : cur[role] }));
         continue;
       }
@@ -2398,7 +2440,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         }
       } else available = !!this.pickMember(job, role, { record: false });
       if (!(resetsAt && Date.parse(resetsAt) <= Date.now()) && !available) continue;
-      job.status = 'queued'; job.error = null; delete job.blockedReason; job.roster = this.jobRoster(job); this.save(job);
+      job.status = 'queued'; job.error = null; delete job.blockedReason; this.refreshRoster(job); this.save(job);
       this.event(job.id, 'controller', 'team', 'REQUEUE', msg('srv.team.quota_requeue'));
     }
     const started = [];
@@ -2548,7 +2590,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (job.usage?.calls >= job.callBudget || job.usage?.tokens >= job.tokenBudget) throw new Error('Comparison budget exhausted; create a new comparison instead of extending it');
       }
       // Đổi vai trò trong màn Thành viên sẽ áp dụng khi tiếp tục.
-      job.roster = this.jobRoster(job);
+      this.refreshRoster(job);
       // Dừng vì hết ngân sách token: tính lại theo cách đếm hiện tại; vẫn vượt thì bạn bấm Tiếp tục = cấp thêm một lượt ngân sách.
       const cap = job.tokenBudget || this.config.maxTokensPerJob;
       if (!job.comparison && !job.fixedTokenBudget && cap && (job.usage?.tokens || 0) >= cap) {
@@ -2575,7 +2617,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (job.status === 'waiting') { if (!job.peerWait) { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); } job.planGate = null; job.questions = null; delete job.peerWait; }
       // Chat vào task đang dừng/vướng = muốn nhóm làm tiếp: tự xếp hàng lại, chỉ dẫn được giao ở lượt kế tiếp.
       if (['ready', 'waiting', 'paused', 'blocked'].includes(job.status) && !this.runs.has(id)) {
-        job.roster = this.jobRoster(job); job.status = 'queued'; job.error = null; job.reworkDigest = null; delete job.handoff; setImmediate(() => this.kick());
+        this.refreshRoster(job); job.status = 'queued'; job.error = null; job.reworkDigest = null; delete job.handoff; setImmediate(() => this.kick());
       }
       this.save(job); this.event(id, 'user', (job.roster || roster(this.config)).manager, 'MESSAGE', payload.message, { delivery: 'next invocation' });
     } else if (action === 'approve-plan') {
@@ -2583,7 +2625,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const p = job.plans.at(-1);
       if (payload.version !== p.version || payload.hash !== p.hash) throw new Error(msg("srv.team.plan_changed"));
       p.approvedAt = now(); p.approvedBy = 'user'; job.approvedPlan = { version: p.version, hash: p.hash, at: p.approvedAt, by: 'user' };
-      job.planGate = null; job.status = 'queued'; job.error = null; job.roster = this.jobRoster(job); this.save(job);
+      job.planGate = null; job.status = 'queued'; job.error = null; this.refreshRoster(job); this.save(job);
       this.event(id, 'user', 'team', 'PLAN_APPROVED', msg("srv.team.plan_approved", { 0: p.version }), { version: p.version, hash: p.hash }); this.kick();
     } else if (action === 'assign') {
       // Đổi người cho riêng việc này (bấm ô trên sơ đồ). Lượt đang chạy không bị ngắt: áp dụng từ lượt sau.
@@ -2608,9 +2650,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         for (const [i, t] of job.tasks.entries()) if (!t.auto && p.tasks[i]) p.tasks[i].agent = t.agent;
         p.hash = planHash(p); job.planGate = { ...job.planGate, hash: p.hash };
       }
-      job.roster = this.jobRoster(job); job.assignSeq = (job.assignSeq || 0) + 1; this.save(job);
+      this.refreshRoster(job); job.assignSeq = (job.assignSeq || 0) + 1; this.save(job);
       this.event(id, 'user', agent.id, 'REASSIGN', msg(this.runs.has(id) ? "srv.team.assign_next_turn" : "srv.team.assign_ok", { 0: task ? `T${payload.task + 1}` : payload.role, 1: agent.label || agent.id }), { task: payload.task ?? null, role: payload.role ?? null, agent: agent.id });
-      if (['blocked', 'paused'].includes(job.status) && !this.runs.has(id)) { job.status = 'queued'; job.error = null; delete job.blockedReason; this.save(job); this.kick(); }
+      if ((['blocked', 'paused'].includes(job.status) || job.status === 'waiting' && job.blockedReason?.kind === 'role') && !this.runs.has(id)) { job.status = 'queued'; job.error = null; delete job.blockedReason; this.save(job); this.kick(); }
     } else if (action === 'reassign') {
       if (!['paused', 'blocked'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.dung_task_truoc_khi_doi_nguoi"));
       if (!(job.roster || roster(this.config)).builders.includes(payload.agent)) throw new Error(msg("srv.team.thanh_vien_nay_khong_thuoc_nhom"));
