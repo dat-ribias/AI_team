@@ -17,7 +17,14 @@ async function api(path, data) {
   const result = await response.json();
   return { content: [{ type: 'text', text: JSON.stringify(result) }], isError: !response.ok };
 }
-server.registerTool('team_status', { description: 'Read agents, jobs, quota and resources.', inputSchema: {} }, () => api('state'));
+server.registerTool('team_status', { description: 'Read compact, paginated job summaries, agents, quota and resources. Use job_detail for reports, tasks and full job details.', inputSchema: { project: z.string().optional(), status: z.string().optional(), limit: z.number().int().min(1).max(200).optional(), cursor: z.number().int().min(0).optional() } }, (input = {}) => {
+  const query = new URLSearchParams(Object.entries(input).filter(([, value]) => value !== undefined));
+  return api(`status?${query}`);
+});
+server.registerTool('job_detail', { description: 'Read a job summary, reports, tasks, full job, events, diff or evidence on demand.', inputSchema: { task_id: z.string(), part: z.enum(['summary', 'reports', 'tasks', 'job', 'events', 'diff', 'evidence']), after: z.number().int().min(0).optional() } }, ({ task_id, part, after = 0 }) => {
+  const path = `jobs/${encodeURIComponent(task_id)}`;
+  return api(part === 'events' ? `${path}/events?after=${after}` : ['diff', 'evidence'].includes(part) ? `${path}/${part}` : `${path}/detail?part=${part}`);
+});
 server.registerTool('usage_report', { description: 'Read AI token usage, previous-period comparison, breakdowns, rankings and per-call records. Dates use the configured timezone (Asia/Tokyo by default); from is inclusive and to is exclusive. Use YYYY-MM-DD or ISO timestamps with a timezone.', annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, inputSchema: { from: z.string().min(1).optional(), to: z.string().min(1).optional(), groupBy: z.enum(['day', 'project', 'session', 'job', 'agent', 'stage', 'model']).optional(), project: z.string().optional(), session: z.string().optional(), job: z.string().optional() } }, input => {
   const query = new URLSearchParams(Object.entries(input).filter(([, value]) => value !== undefined));
   return api(`usage?${query}`);
