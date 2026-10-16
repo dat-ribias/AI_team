@@ -849,6 +849,8 @@
   "ui.evidence.selfTests": "Tests do AI tự khai",
   "ui.evidence.openLog": "Mở log",
   "ui.evidence.exit": "Mã thoát: {code}",
+  "ui.evidence.targeted": "Test chọn lọc (không phải full suite)",
+  "ui.evidence.targetedFiles": "Chỉ chạy: {files}",
   "ui.evidence.seconds": "{n} giây",
   "ui.evidence.selectJob": "Chọn công việc để xem hồ sơ kiểm tra.",
   "ui.evidence.empty": "Chưa có bằng chứng kiểm tra cho công việc này.",

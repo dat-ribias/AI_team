@@ -849,6 +849,8 @@
   "ui.evidence.selfTests": "Tests reported by AI",
   "ui.evidence.openLog": "Open log",
   "ui.evidence.exit": "Exit code: {code}",
+  "ui.evidence.targeted": "Targeted tests (not full suite)",
+  "ui.evidence.targetedFiles": "Ran only: {files}",
   "ui.evidence.seconds": "{n} seconds",
   "ui.evidence.selectJob": "Select a job to view its evidence.",
   "ui.evidence.empty": "No check evidence collected for this job yet.",
