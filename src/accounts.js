@@ -180,6 +180,7 @@ export class Accounts {
       if (input.systemPrompt.trim()) member.systemPrompt = input.systemPrompt.trim(); else delete member.systemPrompt;
     }
     this.persist(config);
+    if ('enabled' in input) this.team.syncRoster();
     return member;
   }
   // Đăng ký dự án từ giao diện. Thư mục chưa có git thì có thể khởi tạo kèm một commit rỗng.

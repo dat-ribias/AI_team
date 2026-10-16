@@ -988,11 +988,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // Controller kiểm lại quyết định của Manager: đủ năng lực, còn quota, đang bật. Không đạt thì tự đổi người.
   // busy: member đang chạy việc khác. Người tốt nhất đang bận → so thời điểm xong: chờ họ, hay giao người rảnh làm ngay (null = chờ).
   pickBuilder(job, task, busy = new Set()) {
-    const pinned = job.assignee || (task.pinned ? task.agent : null), index = job.tasks?.indexOf(task) ?? -1;
+    const cur = this.currentRoster(job), valid = id => this.hasRosterRole(job, 'builder', id, false, cur);
+    if (!cur.builders.some(valid)) throw this.roleBlock('builder');
+    const pinned = valid(job.assignee) ? job.assignee : task.pinned && valid(task.agent) ? task.agent : null, index = job.tasks?.indexOf(task) ?? -1;
     if (pinned && this.unusable(pinned) && this.config.allowAutoReplacePinned === false) throw Object.assign(new Error(msg("srv.team.duoi_nguong_quota_hay_doi_nguoi", { 0: pinned })), this.availabilityBlock(pinned, 'builder', index));
-    if (job.assignee && !this.unusable(job.assignee)) return busy.has(job.assignee) ? null : job.assignee; // người dùng chỉ định thì ưu tiên tuyệt đối
+    if (valid(job.assignee) && !this.unusable(job.assignee)) return busy.has(job.assignee) ? null : job.assignee; // người dùng chỉ định thì ưu tiên tuyệt đối
     // Bạn chỉ định riêng task này: chờ người đó rảnh; chỉ đổi người khi họ bị tắt hoặc hết quota.
-    if (!job.assignee && task.pinned && this.config.agents.some(a => a.id === task.agent && a.enabled !== false) && !this.unusable(task.agent)) return busy.has(task.agent) ? null : task.agent;
+    if (!valid(job.assignee) && task.pinned && valid(task.agent) && !this.unusable(task.agent)) return busy.has(task.agent) ? null : task.agent;
     const ideal = this.chooseBuilder({ ...job, riskReasons: [...(job.riskReasons || [])] }, { ...task });
     const chosen = id => {
       if (pinned && this.unusable(pinned) && task.autoSub !== id) {
@@ -1010,7 +1012,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     return null;
   }
   chooseBuilder(job, task, busy = new Set()) {
-    const members = job.roster || roster(this.config);
+    const members = this.currentRoster(job);
+    if (!members.builders.some(id => this.hasRosterRole(job, 'builder', id, false, members))) throw this.roleBlock('builder');
+    const stale = task.agent && !this.hasRosterRole(job, 'builder', task.agent, false, members);
+    const chosen = id => {
+      if (stale && job.tasks?.includes(task)) { job.roster = members; this.rosterWarning(job, 'builder', task.agent, id); }
+      return id;
+    };
     const available = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.unusable(id) && !busy.has(id); };
     const pool0 = members.builders.some(available) ? members.builders : this.config.agents.filter(a => a.enabled !== false && a.provider !== 'antigravity').map(a => a.id);
     const usable = id => pool0.includes(id) && available(id);
@@ -1028,15 +1036,15 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const enough = id => remaining(id) >= (this.config.minRemainingPercent ?? 15) + this.estimate(id, task) * (this.config.quotaPercentPerMinute ?? 0.3);
     // Lead đã chọn người này và họ rảnh, đủ quota: giữ nguyên. Nếu họ cũng là reviewer/verifier, checker() tự đổi người kiểm lúc review/verify,
     // nên không đẩy task sang member yếu hơn hay ít quota hơn chỉ để né vai trò kiểm.
-    if (fits(task.agent) && !load(task.agent) && enough(task.agent)) return task.agent;
+    if (fits(task.agent) && !load(task.agent) && enough(task.agent)) return chosen(task.agent);
     // Ưu tiên người đang rảnh, rồi người không kiêm review/verify (kiêm thì checker() tự đổi người kiểm), rồi người Manager chọn, rồi mạnh nhất còn quota.
     const pool = pool0.filter(fits).sort((x, y) => Math.min(load(x), 1) - Math.min(load(y), 1) || enough(y) - enough(x) || checker(x) - checker(y) || (y === task.agent) - (x === task.agent) || level(y) - level(x) || remaining(y) - remaining(x));
-    if (fits(task.agent) && (!pool.length || checker(pool[0]))) return task.agent;
-    if (pool.length) return pool[0];
+    if (fits(task.agent) && (!pool.length || checker(pool[0]))) return chosen(task.agent);
+    if (pool.length) return chosen(pool[0]);
     // Người mạnh hết quota/đang tắt: tăng mức suy luận cho người còn quota nếu nhờ đó đủ năng lực.
     const boost = pool0.filter(id => usable(id) && effortsOf(this.agent(id)).includes('high') && level(id, 'high') >= task.difficulty)
       .sort((x, y) => checker(x) - checker(y) || remaining(y) - remaining(x))[0];
-    if (boost) { task.effort = 'high'; task.boosted = true; return boost; }
+    if (boost) { task.effort = 'high'; task.boosted = true; return chosen(boost); }
     // Không ai đủ năng lực: giao cho người mạnh nhất còn quota, và bắt buộc xác nhận khi merge.
     const strongest = pool0.filter(usable).sort((x, y) => checker(x) - checker(y) || level(y) - level(x) || remaining(y) - remaining(x))[0];
     if (!strongest) {
@@ -1047,16 +1055,36 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       throw error;
     }
     job.risk = 'high'; job.riskReasons = [...new Set([...(job.riskReasons || []), msg("srv.team.task_do_kho_do_nang_luc", { 0: task.difficulty, 1: strongest, 2: tierOf(this.agent(strongest)) })])];
-    return strongest;
+    return chosen(strongest);
+  }
+  currentRoster(job) {
+    return job.comparison ? (job.roster || roster(this.config)) : this.jobRoster(job);
+  }
+  hasRosterRole(job, role, id, flow = false, cur = this.currentRoster(job)) {
+    return !!id && this.config.agents.some(a => a.id === id && a.enabled !== false) && (flow ? rolesOf(cur, id).length > 0 : role === 'builder' ? cur.builders.includes(id) : cur[role] === id);
+  }
+  roleBlock(role) {
+    return Object.assign(new Error(msg('srv.team.no_role_agent', { 0: role })), { roleBlock: { role } });
+  }
+  rosterWarning(job, role, from, to) {
+    if (!from || !to || from === to || job.rosterChanges?.[role]?.from === from && job.rosterChanges[role].to === to) return;
+    job.rosterChanges = { ...job.rosterChanges, [role]: { from, to } };
+    this.event(job.id, 'controller', to, 'WARNING', msg('srv.team.roster_changed', { 0: from, 1: to }), { role, from, to });
   }
   pickMember(job, role, opts = {}) {
     const members = job.roster || roster(this.config), { exclude = [], busy = this.fullAgents(), record = true, preferOtherProvider = [] } = opts;
-    const preferred = 'preferred' in opts ? opts.preferred : role === 'challenger' ? null : job.override?.[role] || job.flow?.[role] || members[role];
-    const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && !this.unusable(id) && !exclude.includes(id); };
-    if (usable(preferred) && !busy.has(preferred)) { if (record && job.substitutes) delete job.substitutes[role]; return preferred; }
+    let preferred = 'preferred' in opts ? opts.preferred : role === 'challenger' ? null : job.override?.[role] || job.flow?.[role] || members[role];
+    const cur = this.currentRoster(job);
+    if (role !== 'challenger' && !this.hasRosterRole(job, role, cur[role], false, cur)) { if (!record) return null; throw this.roleBlock(role); }
+    const stale = role !== 'challenger' && !('preferred' in opts) && !this.hasRosterRole(job, role, preferred, !job.override?.[role] && preferred === job.flow?.[role], cur);
+    const previous = preferred;
+    if (stale) { preferred = cur[role]; if (record) job.roster = cur; }
+    const chosen = id => { if (stale && record) this.rosterWarning(job, role, previous, id); return id; };
+    const usable = id => { const a = this.config.agents.find(a => a.id === id); return !!a && a.enabled !== false && (role === 'challenger' || rolesOf(cur, id).length > 0) && !this.unusable(id) && !exclude.includes(id); };
+    if (usable(preferred) && !busy.has(preferred)) { if (record && job.substitutes) delete job.substitutes[role]; return chosen(preferred); }
     const pinned = !!job.override?.[role], locked = pinned && this.unusable(preferred) && this.config.allowAutoReplacePinned === false;
     const cands = locked ? [] : this.config.agents.filter(a => usable(a.id)).sort((a, b) => busy.has(a.id) - busy.has(b.id) || tiers[tierOf(b)] - tiers[tierOf(a)] || preferOtherProvider.includes(a.provider) - preferOtherProvider.includes(b.provider) || (this.remaining(b.id) ?? 50) - (this.remaining(a.id) ?? 50));
-    if (usable(preferred) && busy.has(preferred) && !cands.some(a => !busy.has(a.id))) return preferred;
+    if (usable(preferred) && busy.has(preferred) && !cands.some(a => !busy.has(a.id))) return chosen(preferred);
     const cand = cands[0];
     if (cand) {
       if (record) {
@@ -1064,7 +1092,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         job.substitutes = { ...job.substitutes, [role]: { from: preferred, to: cand.id, at: now(), resetsAt, tier: tierOf(cand), pinned } };
         if (changed) this.event(job.id, 'controller', cand.id, 'REASSIGN', this.reassignMessage(preferred, cand.id, role, pinned, resetsAt), { role, from: preferred, to: cand.id, auto: true, pinned, resetsAt });
       }
-      return cand.id;
+      return chosen(cand.id);
     }
     if (!record) return null;
     const resets = this.config.agents.filter(a => a.enabled !== false).map(a => ({ agent: a.id, at: this.resetAt(a.id) })).filter(r => r.at).sort((a, b) => a.at.localeCompare(b.at));
@@ -2052,7 +2080,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // Ai review/verify: flow của Manager → roster; kiểm lại lúc thực thi (đang bật, còn quota). Trùng người đã viết code → tự tìm người
   // khác, ưu tiên khác loại CLI với builder; không còn ai mới giữ người cũ và cảnh báo (assertIndependent).
   checker(job, role, members, impl = job.implementers || [], preferred = job.override?.[role] || job.flow?.[role], record = true) {
-    if (preferred && !this.config.agents.some(a => a.id === preferred && a.enabled !== false)) this.event(job.id, 'controller', members.manager, 'WARNING', msg("srv.team.flow_invalid_member", { 0: preferred, 1: role, 2: members[role] || '—' }));
+    const cur = this.currentRoster(job), previous = preferred || members[role];
+    const stale = !this.hasRosterRole(job, role, previous, !!preferred && !job.override?.[role] && preferred === job.flow?.[role], cur);
+    if (stale) { preferred = cur[role]; members = cur; if (record) job.roster = cur; }
     let id = this.pickMember(job, role, { preferred: preferred || members[role], record });
     if (!id) return this.pickMember(job, role, { preferred: preferred || members[role] }); // node review cũng phải chờ quota, không gọi member null
     if (impl.includes(id)) {
@@ -2062,6 +2092,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (record) { this.assertIndependent(job, id); job.checkers = { ...(job.checkers || {}), [role]: id }; }
     else if (impl.includes(id)) this.assertIndependent(job, id); // không còn ai khác: cảnh báo + bắt xác nhận khi merge
+    if (record && stale) this.rosterWarning(job, role, previous, id);
     return id;
   }
   // Số đo để so sánh "1 builder" với "builder + phản biện" sau ~20 việc thật: phản đối kế hoạch, finding, bị bác bỏ, verifier giữ / lật.
@@ -2140,6 +2171,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
   }
   async step(job) {
+    if (!job.comparison) job.roster = this.jobRoster(job);
     const members = job.roster || roster(this.config);
     if (['implement', 'test', 'review', 'verify', 'final'].includes(job.stage) && this.planBlocked(job)) {
       const p = job.plans.at(-1), proposed = job.planGate?.version === p.version && job.planGate?.hash === p.hash;
@@ -2311,7 +2343,19 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   // Đổi vai trò áp dụng ngay cho các công việc chưa chạy / đang dừng.
   syncRoster() {
-    for (const job of this.jobs()) if (['queued', 'paused', 'blocked'].includes(job.status) && !this.runs.has(job.id)) { job.roster = this.jobRoster(job); this.save(job); }
+    for (const job of this.jobs()) {
+      if (job.comparison) continue;
+      const cur = this.jobRoster(job), run = this.runs.get(job.id);
+      if (run) {
+        const ids = new Set([job.current?.agent, ...run.agents].filter(Boolean).map(id => id.replace(/#\d+$/, '')));
+        const removed = [...ids].find(id => !this.hasRosterRole(job, null, id, true, cur));
+        if (removed && !run.abort.signal.aborted) {
+          run.rosterAbort = true;
+          run.abort.abort(new DOMException(msg('srv.team.roster_changed', { 0: removed, 1: cur[stageRole[job.stage]] || cur.builders.join(', ') || '—' }), 'AbortError'));
+        }
+      } else if (['queued', 'paused', 'blocked'].includes(job.status) || job.status === 'waiting' && job.blockedReason?.kind === 'role') { job.roster = cur; this.save(job); }
+    }
+    this.kick();
   }
   // Đội hình của một việc = đội chung + những gì bạn đổi riêng cho việc đó (job.override); đổi vai trò chung không xóa lựa chọn riêng.
   jobRoster(job) {
@@ -2336,6 +2380,14 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (this.closed || this.accountLoginBusy) return;
     for (const job of this.jobs()) {
+      if (['waiting', 'blocked'].includes(job.status) && job.blockedReason?.kind === 'role' && !this.runs.has(job.id)) {
+        const { role } = job.blockedReason, cur = this.currentRoster(job);
+        const available = role === 'builder' ? cur.builders.some(id => this.hasRosterRole(job, role, id, false, cur)) : this.hasRosterRole(job, role, cur[role], false, cur);
+        if (!available) continue;
+        job.status = 'queued'; job.error = null; delete job.blockedReason; job.roster = cur; this.save(job);
+        this.event(job.id, 'controller', 'team', 'REQUEUE', msg('srv.team.roster_changed', { 0: '—', 1: role === 'builder' ? cur.builders.join(', ') : cur[role] }));
+        continue;
+      }
       if (job.status !== 'blocked' || !['quota', 'transient'].includes(job.blockedReason?.kind) || this.runs.has(job.id)) continue;
       const { role, task, resetsAt } = job.blockedReason;
       let available = false;
@@ -2378,14 +2430,21 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       this.save(job);
     } catch (error) {
       const fresh = this.get(job.id);
+      if (this.runs.get(job.id)?.rosterAbort && !this.closed && !['paused', 'cancelled'].includes(fresh.status)) {
+        job.status = 'queued'; job.error = null; job.messages = fresh.messages; job.running = []; job.current = null; delete job.blockedReason;
+        job.roster = this.currentRoster(job); this.save(job);
+        this.event(job.id, 'controller', 'team', 'WARNING', this.runs.get(job.id).abort.signal.reason.message); return;
+      }
       if (this.closed && fresh.status !== 'cancelled') {
         job.status = 'paused'; job.error = null; job.messages = fresh.messages; job.running = []; job.current = null; this.save(job);
         this.event(job.id, 'controller', 'user', 'RECOVERY', 'Server closed; task checkpoints kept for resume'); return;
       }
       if (fresh.status === 'paused' && error.peerReport) { job.status = 'paused'; job.messages = fresh.messages; job.running = []; job.current = null; this.save(job); }
       if (!['paused', 'cancelled'].includes(fresh.status)) {
-        job.status = error.peerWait ? 'waiting' : 'blocked'; job.messages = fresh.messages; job.error = redact(error.message).slice(0, 8000); job.running = []; job.current = null;
-        if (!error.peerWait && error.transientBlock) {
+        job.status = error.peerWait || error.roleBlock ? 'waiting' : 'blocked'; job.messages = fresh.messages; job.error = redact(error.message).slice(0, 8000); job.running = []; job.current = null;
+        if (error.roleBlock) {
+          job.blockedReason = { kind: 'role', ...error.roleBlock, at: now() };
+        } else if (!error.peerWait && error.transientBlock) {
           job.blockedReason = { kind: 'transient', ...error.transientBlock, at: now() };
           job.error = msg('srv.team.transient_blocked', { provider: error.transientBlock.provider, time: tokyo(error.transientBlock.resetsAt) });
         } else if (!error.peerWait && (error.quotaBlock || QUOTA_ERROR.test(error.message))) {
@@ -2395,7 +2454,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         } else delete job.blockedReason;
         if (error.peerWait) { job.peerWait = error.thread || true; job.questions = [job.error]; job.reviewed = job.verified = job.tested = null; }
         this.save(job);
-        this.event(job.id, 'controller', 'user', error.peerWait ? 'QUESTION' : 'BLOCKER', job.error);
+        this.event(job.id, 'controller', 'user', error.peerWait || error.roleBlock ? 'QUESTION' : 'BLOCKER', job.error);
       }
     } finally { this.runs.delete(job.id); this.emit('change'); this.kick(); }
   }

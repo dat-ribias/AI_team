@@ -1046,5 +1046,7 @@
   "ui.rework.handoff": "Stop, I'll handle it",
   "ui.rework.handedOff": "Owner is handling it",
   "srv.team.rework_origin_unknown": "Finding origin undetermined",
-  "ui.rework.unknown": "Finding origin undetermined"
+  "ui.rework.unknown": "Finding origin undetermined",
+  "srv.team.roster_changed": "Reassigned due to roster change: {0} → {1}",
+  "srv.team.no_role_agent": "No agent has role {0}"
 }

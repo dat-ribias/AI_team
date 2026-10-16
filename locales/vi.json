@@ -1046,5 +1046,7 @@
   "ui.rework.handoff": "Dừng, tôi tự xử lý",
   "ui.rework.handedOff": "Owner đang tự xử lý",
   "srv.team.rework_origin_unknown": "Chưa xác định nguồn finding",
-  "ui.rework.unknown": "Chưa xác định nguồn finding"
+  "ui.rework.unknown": "Chưa xác định nguồn finding",
+  "srv.team.roster_changed": "Đổi người do roster thay đổi: {0} → {1}",
+  "srv.team.no_role_agent": "Không còn agent có vai trò {0}"
 }
