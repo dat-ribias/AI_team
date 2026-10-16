@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { rm as rmAsync } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
@@ -9,6 +10,16 @@ import { msg } from './i18n.js';
 import { DEMO } from './capabilities.js';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
+export async function removeTempDir(dir, { rm = rmAsync, retries = 20, delayMs = 100, log = console.warn } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try { await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); return true; }
+    catch (error) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error;
+      if (attempt >= retries) { log(`[preview] could not remove temp dir ${dir}: ${error.code}`); return false; }
+      await delay(delayMs);
+    }
+  }
+}
 export function validatePreview(p) {
   if (p == null) return null;
   const invalid = reason => { throw new Error(msg('srv.preview.invalid_config', { 0: reason })); };
@@ -81,10 +92,7 @@ export async function startDemoServer({ command, cwd, portRange, exclude = [], m
     clearTimeout(timer);
     try { await stopTree(server?.pid); }
     finally {
-      for (let attempt = 0; ; attempt++) {
-        try { rmSync(dataDir, { recursive: true, force: true }); break; }
-        catch (error) { if (attempt >= 20 || !['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error; await delay(100); }
-      }
+      await removeTempDir(dataDir);
     }
   })();
   const url = `http://127.0.0.1:${port}`, lifetime = Math.min(maxMinutes, DEMO.maxMinutes) * 60_000;
@@ -140,10 +148,7 @@ export async function screenshot({ chrome, url, width, height, file }) {
     finally {
       if (child && child.exitCode === null && !child.signalCode) await new Promise(resolve => { const timeout = setTimeout(resolve, 3000); child.once('close', () => { clearTimeout(timeout); resolve(); }); });
       // Windows may release Chromium's profile handles shortly after taskkill finishes.
-      for (let attempt = 0; ; attempt++) {
-        try { rmSync(profile, { recursive: true, force: true }); break; }
-        catch (error) { if (attempt >= 20 || !['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error; await delay(100); }
-      }
+      await removeTempDir(profile);
     }
   }
 }

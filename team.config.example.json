@@ -4,6 +4,7 @@
   "dataDir": "D:\\<TEAM_DIR>\\.team\\state",
   "maxRamPercent": 85,
   "maxCpuPercent": 90,
+  "maxConcurrentTests": 1,
   "minRemainingPercent": 15,
   "maxReworkRounds": 3,
   "planApproval": true,

@@ -1,6 +1,7 @@
 # Luật chung cho mọi AI member
 
 1. Mã hóa
+   - Claude builder chỉ chạy được `node --test`, `node --check`, `npm test` và lệnh test của project (không có `node -e`); ghi/sửa locale bằng công cụ Edit.
    - Mọi file ghi bằng UTF-8. Trên Windows KHÔNG dùng PowerShell `Set-Content`, `Out-File` hoặc pipe `>` để ghi file có tiếng Việt/Nhật (console cp932 làm hỏng dấu → mojibake). Dùng `apply_patch` hoặc `node -e` với `fs.writeFileSync(path, text, 'utf8')`. Sau khi sửa `locales/*.json`, phải `JSON.parse` lại và kiểm tra không có 'Ã', 'á»', '\uFFFD'.
 2. Test
    - Builder KHÔNG chạy cả `test/system.test.js` (~13 phút, controller tự chạy ở bước test). Chỉ chạy test liên quan bằng `--test-name-pattern` hoặc file test riêng, luôn kèm `--test-timeout`; mỗi lượt gọi phải xong trong dưới 25 phút.

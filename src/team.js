@@ -94,6 +94,47 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { re
 const normFindings = list => (Array.isArray(list) ? list : []).slice(0, 10).map((f, i) => f && typeof f === 'object'
   ? { ...f, id: String(f.id || `F${i + 1}`).slice(0, 20), claim: String(f.claim || f.problem || f.summary || '').slice(0, 1000), impact: ['high', 'medium', 'low'].includes(f.impact) ? f.impact : 'medium' }
   : { id: `F${i + 1}`, claim: String(f).slice(0, 1000), impact: 'medium' });
+// Chỉ giữ nguồn khi cùng ID và claim đầy đủ; thứ tự báo cáo không chứng minh nguồn.
+const reworkFindings = (reports, scopeAdds = []) => {
+  const seen = new Map();
+  return reports.map((r, i) => !['review', 'verify'].includes(r.stage) ? [] : normFindings(r.findings).map(f => {
+    const key = JSON.stringify([f.id, f.claim]), prior = seen.get(key);
+    const source = prior || { first: i, origin: 'unknown', originReason: '', scopeAddId: '' };
+    const reason = typeof f.originReason === 'string' ? f.originReason.trim().slice(0, 1000) : '';
+    if (source.origin === 'unknown' && reason) {
+      if (f.origin === 'builder' && typeof f.evidence === 'string' && f.evidence.trim()) Object.assign(source, { origin: 'builder', originReason: reason });
+      if (f.origin === 'owner' && typeof f.scopeAddId === 'string' && scopeAdds.some(s => s.id === f.scopeAddId && Number.isInteger(s.reports) && s.reports >= 0 && s.reports <= source.first)) Object.assign(source, { origin: 'owner', originReason: reason, scopeAddId: f.scopeAddId });
+    }
+    seen.set(key, source);
+    return { ...f, origin: source.origin, originReason: source.originReason, scopeAddId: source.scopeAddId };
+  }));
+};
+// Tóm tắt các vòng sửa khi chạm giới hạn, giữ unknown cho dữ liệu thiếu bằng chứng.
+export function reworkDigest(job, limit) {
+  const reports = job.reports || [], scopeAdds = job.scopeAdds || [], rounds = [];
+  const findings = reworkFindings(reports, scopeAdds);
+  reports.forEach((r, i) => {
+    if (r.stage === 'test' && String(r.summary || '').startsWith('Test failed')) { rounds.push({ n: rounds.length + 1, stage: 'test', agent: r.agent || 'controller', verdict: 'failed', summary: r.summary, findings: [] }); return; }
+    if (!['review', 'verify'].includes(r.stage)) return;
+    rounds.push({ n: rounds.length + 1, stage: r.stage, agent: r.agent, verdict: r.verdict, findings: findings[i].map(f => ({ id: f.id, claim: f.claim.length > 120 ? f.claim.slice(0, 120) + '…' : f.claim, impact: f.impact, origin: f.origin, open: false })) });
+  });
+  const last = rounds.at(-1), open = last && last.stage !== 'test' ? last.findings : [];
+  open.forEach(f => { f.open = true; });
+  return { limit, round: job.round, rounds, open: open.map(f => f.id), scopeAdds: scopeAdds.length };
+}
+export function reworkSummaryText(d) {
+  const lines = [msg('srv.team.rework_digest_head', { limit: d.limit, scope: d.scopeAdds })];
+  let lastStart = 1;
+  for (const r of d.rounds) {
+    lastStart = lines.length;
+    lines.push(msg('srv.team.rework_digest_round', { n: r.n, who: r.agent, stage: r.stage, verdict: r.verdict }));
+    for (const f of r.findings) lines.push(`  - [${f.id}] ${f.claim} (${msg(f.origin === 'owner' ? 'srv.team.rework_origin_owner' : f.origin === 'builder' ? 'srv.team.rework_origin_builder' : 'srv.team.rework_origin_unknown')}${f.open ? ', ' + msg('srv.team.rework_still_open') : ''})`);
+  }
+  const text = lines.join('\n');
+  if (text.length <= 7000) return text;
+  const last = lines.slice(lastStart).join('\n');
+  return lines.slice(0, lastStart).join('\n').slice(0, 6997 - last.length) + '\n…\n' + last;
+}
 const RISKY = /auth|login|password|passwd|(?:access|api|auth|refresh|jwt|bearer)[ _-]?token|secret|credential|permission|quyền|bảo mật|security|migrat|database|schema|\bdb\b|xóa (?:dữ liệu|data|bảng|db|database|tài khoản|user)|delete (?:data|table|user|account|database)|drop (?:table|database|column)|deploy|production|payment|thanh toán|refactor|kiến trúc|architecture|toàn bộ|whole project|nhiều file|many files|rewrite|viết lại/i;
 const RESEARCHY = /^(?!.*\b(fix|sửa|implement|thêm|add|tạo|create|update|cập nhật|đổi|change)\b).*(review|kiểm tra|nghiên cứu|so sánh|điều tra|tìm hiểu|giải thích|đánh giá|research|investigate|compare|explain|audit|analy[sz]e|phân tích|tại sao|why)/is;
 export function routeGoal(goal, mode = 'full', attachments = 0) {
@@ -190,6 +231,7 @@ export function roster(config) {
 }
 
 export function validateConfig(config) {
+  config.maxConcurrentTests = Number.isFinite(config.maxConcurrentTests) ? Math.max(1, Math.floor(config.maxConcurrentTests)) : 1;
   for (const key of ['idleTimeoutMin', 'maxCallMin', 'silenceWarnMin']) if (config[key] !== undefined && (!Number.isFinite(config[key]) || config[key] <= 0)) throw new Error(`${key} must be a positive number`);
   if (config.retentionDays === undefined) config.retentionDays = 30;
   if (config.maxBackups === undefined) config.maxBackups = config.backupKeep ?? 14;
@@ -392,9 +434,10 @@ export class Team extends EventEmitter {
   }
   // Member đã dùng hết slot: không nhận thêm việc lúc này.
   fullAgents() { return new Set(this.config.agents.map(a => a.id).filter(id => this.useOf(id) >= this.maxJobs(id))); }
+  runningSlots() { return [...this.runs.values()].filter(r => !r.waitingForTest).length + this.extra + this.previews.size; }
   capacity() {
     const r = this.config.resources || {};
-    const slots = computeSlots({ freeGB: freemem() / 2 ** 30, totalGB: totalmem() / 2 ** 30, running: this.runs.size + this.extra + this.previews.size,
+    const slots = computeSlots({ freeGB: freemem() / 2 ** 30, totalGB: totalmem() / 2 ** 30, running: this.runningSlots(),
       reserveGB: r.reserveGB ?? 4, ramPerAgentGB: r.ramPerAgentGB ?? 1.5, maxAgents: r.maxAgents ?? 3, maxAgentsHard: r.maxAgentsHard, hardStopRamPercent: r.hardStopRamPercent ?? Math.max(90, this.config.maxRamPercent ?? 90) });
     if (slots.hardStop) return { ...slots, reason: msg("srv.team.ram_cao_cho_tai_nguyen") };
     if (this.cpuPercent > (this.config.maxCpuPercent ?? 90)) return { start: 0, reason: msg("srv.team.cpu_cao_cho_tai_nguyen") };
@@ -668,6 +711,7 @@ export class Team extends EventEmitter {
       if (saved.titleBy === 'user' && !rename) { job.title = saved.title; job.titleBy = 'user'; }
       if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; job.acceptance = null; }
       if (Array.isArray(saved.messages) && saved.messages.length > (job.messages?.length || 0)) { job.messages = saved.messages; if (this.runs.has(job.id)) job.steered = true; }
+      if ((saved.scopeAdds?.length || 0) > (job.scopeAdds?.length || 0)) job.scopeAdds = saved.scopeAdds;
       // Bạn đổi người (control 'assign') trong lúc việc đang chạy: bản đang chạy lưu đè thì vẫn giữ lựa chọn đó.
       if ((saved.assignSeq || 0) > (job.assignSeq || 0)) {
         Object.assign(job, { assignSeq: saved.assignSeq, override: saved.override, roster: saved.roster, checkers: saved.checkers });
@@ -704,14 +748,15 @@ export class Team extends EventEmitter {
     return { cpuPercent: Math.round(this.cpuPercent), ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
   state() {
-    const busy = this.busyAgents(), cap = this.capacity(), used = this.runs.size + this.extra + this.previews.size;
+    const busy = this.busyAgents(), cap = this.capacity(), used = this.runningSlots();
     return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, title: jobTitle(j), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       quotaCheck: this.quotaCheck || null,
-      resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, slots: used + cap.start, active: used, waitingReason: this.waitingReason },
+      flaky: this.jobs().flatMap(j => (j.flaky || []).map(({ test, revision, at }) => ({ job: j.id, title: jobTitle(j), test, revision, at }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 50),
+      resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, maxConcurrentTests: this.testLimit(), slots: used + cap.start, active: used, waitingReason: this.waitingReason },
       storage: this.storage(),
     };
   }
@@ -1239,6 +1284,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       // Task phụ thuộc (vd. tổng hợp sau T1, T2) cần chính kết quả của các task trước, không chỉ tên việc.
       ...(opts.task?.dependsOn?.length ? { inputs: this.inputsOf(job, opts.task.dependsOn).map(brief) } : {}), ...(opts.task?.handover ? { handover: opts.task.handover } : {}), ...(opts.task?.files?.length ? { files: opts.task.files } : {}), ...(job.round ? { lastChecks } : {}) };
     else if (['review', 'verify'].includes(stage)) scoped = { acceptance: job.planSummary, diff: opts.ranges ? opts.ranges.map(([a, b]) => `${a}..${b}`).join(' + ') : `${job.base}..${job.revision}`,
+      findingOrigins: { note: 'Use origin unknown unless supported by evidence. For owner, cite a recorded scopeAddId and explain in originReason how that addition caused this finding; a later timestamp, reused ID or keywords are not evidence. A finding present before the cited addition cannot originate from it. For builder, provide code/check evidence and originReason. Keep the same ID and exact claim when reporting the same unresolved finding.', scopeAdds: (job.scopeAdds || []).map(s => ({ ...s, message: job.messages[s.message]?.text })) },
       ...(opts.ranges ? { scope: 'Review ONLY this part of the job: the listed commit ranges (other tasks are reviewed separately).', taskContext: opts.task?.context || undefined } : {}),
       changedFiles: job.kind === 'research' ? undefined : (await Promise.all((opts.ranges || [[job.base, job.revision]]).map(([a, b]) => git(job.worktree, ['diff', '--stat', a, b])))).join('\n').split('\n').slice(-40).join('\n'),
       tests: job.kind === 'research' ? undefined : job.tested === job.revision ? 'all configured test commands passed on this revision' : 'not run',
@@ -1256,7 +1302,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const memory = stage === 'assess' ? null : await this.memoryContext(job, stage === 'final', opts.task || (['implement', 'research', 'review', 'verify'].includes(stage) ? { instruction, files: [] } : null), opts.worktree || job.worktree);
     if (opts.task && memory) opts.task.memoryIds = memory.records.map(r => r.id);
     const context = JSON.stringify({ ...common, ...(memory ? { memory } : {}), ...scoped });
-    const finding = '{"id":"F1","claim":"what is wrong","failsWhen":"input or condition that breaks it","evidence":"file:line or command output","check":"how to confirm","impact":"high|medium|low"}';
+    const finding = '{"id":"F1","claim":"what is wrong","failsWhen":"input or condition that breaks it","evidence":"file:line or command output","check":"how to confirm","impact":"high|medium|low"' + (['review', 'verify'].includes(stage) ? ',"origin":"owner|builder|unknown","scopeAddId":"recorded scope addition id, only for owner","originReason":"evidence explaining the source; unknown if unproven"' : '') + '}';
     let shape = stage === 'challenge' ? `{"summary":"one sentence","status":"completed","objections":[${finding}]}`
       : stage === 'plan'
       ? `{"summary":"at most 2 sentences: approach and delegation rationale; do not restate the goal","title":"short job title ≤60 chars in the goal's language","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task","context":"files:lines, symbols, callers/callees and pitfalls the builder needs","files":["paths this task edits"],"dependsOn":[],"estMinutes":10}],"reviewSkills":["optional skills for the reviewer/verifier"],"flow":{"reviewer":"optional member id","verifier":"optional member id","steps":["optional subset of review,verify,final"]},"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
@@ -1347,7 +1393,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const resume = this.config.resumeCodexTasks === true && stage === 'implement' && agent.provider === 'codex' && opts.task;
     const sessionId = resume && opts.task.cliSession?.key === sessionKey ? opts.task.cliSession.id : undefined;
     let report, cliSessionId = sessionId, lastActivitySavedAt = 0;
-    const taskObj = { ...job, idleTimeoutMin: base.idleTimeoutMin ?? this.config.idleTimeoutMin ?? 15, maxCallMin: base.maxCallMin ?? this.config.maxCallMin ?? 120, sessionId, stage, worktree, promptFile, demoServer, slot: opts.slot || 1, checks: checking && access.shell ? this.project(job.project).tests : [], network: access.network, readDirs: [...readDirs, ...(job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(l => l.worktree)], addDirs: stage === 'implement' ? (job.linked || []).filter(l => granted(l.members, agentId)).map(l => l.worktree) : [], researchWeb: ['consult', 'assess'].includes(stage) ? false : this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox, agyAutoApprove: this.config.agyAutoApprove === true };
+    const taskObj = { ...job, idleTimeoutMin: base.idleTimeoutMin ?? this.config.idleTimeoutMin ?? 15, maxCallMin: base.maxCallMin ?? this.config.maxCallMin ?? 120, sessionId, stage, worktree, promptFile, demoServer, slot: opts.slot || 1, checks: (checking || stage === 'implement' && agent.provider === 'claude') && access.shell ? this.project(job.project).tests : [], network: access.network, readDirs: [...readDirs, ...(job.linked || []).filter(l => stage !== 'implement' || !granted(l.members, agentId)).map(l => l.worktree)], addDirs: stage === 'implement' ? (job.linked || []).filter(l => granted(l.members, agentId)).map(l => l.worktree) : [], researchWeb: ['consult', 'assess'].includes(stage) ? false : this.config.researchWeb !== false, codexWindowsSandbox: this.config.codexWindowsSandbox, agyAutoApprove: this.config.agyAutoApprove === true };
     const onEvent = (type, data) => { job.lastActivityAt = now(); if (opts.entry) opts.entry.lastActivityAt = job.lastActivityAt;
         if (type === 'ACTIVITY' && opts.entry) data = { ...data, details: { ...data.details, task: opts.entry.task, stage: opts.entry.stage, startedAt: opts.entry.startedAt } };
         if (type === 'SESSION' && typeof data.details?.id === 'string' && /^[\w-]{1,100}$/.test(data.details.id)) { cliSessionId = data.details.id; if (resume) opts.task.cliSession = { id: cliSessionId, key: sessionKey }; } if (type === 'SPAWN' && opts.entry) opts.entry.pid = data.details.pid;
@@ -1415,6 +1461,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     job.durations = [...(job.durations || []), Date.now() - started].slice(-20);
     // Đo thật tốc độ và token mỗi lượt để Lead cân nhắc nhanh-nhưng-tốn hay rẻ-nhưng-chậm; est để học hệ số ETA.
     this.db.prepare('INSERT INTO member_stats (agent, model, effort, stage, ms, tokens, at, est) VALUES (?,?,?,?,?,?,?,?)').run(agentId, agent.model || '', agent.effort || '', stage, Date.now() - started, tokens, now(), opts.task?.estMinutes || null);
+    if (['review', 'verify'].includes(stage)) report.findings = reworkFindings([...job.reports, { stage, findings: report.findings }], job.scopeAdds).at(-1);
     const entry = { ...scrub(report), agent: agentId, stage, revision: job.revision, ...(opts.taskIndex != null ? { task: opts.taskIndex } : {}) };
     job.reports.push(entry);
     this.event(job.id, agentId, stage === 'final' ? 'user' : agentId === members.manager ? 'controller' : members.manager, stage === 'review' ? 'REVIEW_RESULT' : 'RESULT', report.summary, report);
@@ -1726,17 +1773,133 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (runtime) runtime.stopping = stopping;
     return stopping;
   }
+  updateTestQueue() {
+    for (const [i, entry] of this.testQueue.entries()) {
+      this.saveTestWaiting(entry.job, msg('srv.team.wait_test', { 0: i + 1 }));
+    }
+    this.emit('change');
+  }
+  saveTestWaiting(job, waiting) {
+    job.waiting = waiting;
+    // Update only the queue field, including after cancellation (save() freezes cancelled snapshots).
+    this.db.prepare("UPDATE jobs SET body=json_set(body, '$.waiting', ?, '$.updatedAt', ?) WHERE id=?").run(waiting, now(), job.id);
+    this.emit('change');
+  }
+  testLimit() { return Number.isFinite(this.config.maxConcurrentTests) ? Math.max(1, Math.floor(this.config.maxConcurrentTests)) : 1; }
+  async acquireTest(job, signal) {
+    this.testQueue ??= []; this.activeTests ??= 0;
+    const runtime = this.runs.get(job.id);
+    signal?.throwIfAborted();
+    if (!this.testQueue.length && this.activeTests < this.testLimit()) {
+      this.saveTestWaiting(job, null); this.activeTests++; return;
+    }
+    await new Promise((resolve, reject) => {
+      const entry = { job, resolve: () => {
+        signal?.removeEventListener('abort', aborted);
+        if (runtime) runtime.waitingForTest = false;
+        resolve();
+      } };
+      const aborted = () => {
+        const i = this.testQueue.indexOf(entry);
+        if (i < 0) return;
+        this.testQueue.splice(i, 1);
+        if (runtime) runtime.waitingForTest = false;
+        this.saveTestWaiting(job, null); this.updateTestQueue();
+        reject(signal.reason);
+      };
+      this.testQueue.push(entry);
+      if (runtime) runtime.waitingForTest = true;
+      signal?.addEventListener('abort', aborted, { once: true });
+      this.updateTestQueue();
+      this.kick();
+    });
+    try { this.saveTestWaiting(job, null); signal?.throwIfAborted(); }
+    catch (error) { this.releaseTest(); throw error; }
+  }
+  releaseTest() {
+    this.activeTests--;
+    while (this.testQueue.length && this.activeTests < this.testLimit()) {
+      const entry = this.testQueue.shift(); this.activeTests++; entry.resolve();
+    }
+    this.updateTestQueue();
+  }
   async runTests(job, cwd, revision, tests) {
     const manager = (job.roster || roster(this.config)).manager, signal = this.runs.get(job.id)?.abort.signal;
-    for (const test of tests) {
-      const { command, cwd: testCwd = cwd, label } = Array.isArray(test) ? { command: test } : test;
+    const parser = testCwd => {
+      const parents = [], records = [], summary = {};
+      const tapName = name => name.replace(/\\([\\#nr])/g, (_, char) => ({ '\\': '\\', '#': '#', n: '\n', r: '\r' })[char]);
+      let bytes = 0, invalid = false, recap = false, diagnostic = null;
+      const add = (indent, name, status, tap) => {
+        const path = [...parents.filter(p => p.indent < indent).map(p => p.name), name], full = path.join(' ');
+        bytes += full.length * 2 + 128;
+        // Bound recognition independently of the process output/evidence buffers.
+        if (bytes > 1024 * 1024 || path.length > 256) { invalid = true; return; }
+        const record = { path, full, status, tap, type: null, failureType: null };
+        records.push(record); diagnostic = tap ? { indent: indent + 2, record } : null;
+        if (status === 'fail' && (/\.[cm]?[jt]sx?(?::\d+){0,2}$/i.test(name) || existsSync(resolve(testCwd, name)))) invalid = true;
+        while (parents.length && parents.at(-1).indent >= indent) parents.pop();
+      };
+      return {
+        line(line) {
+          if (invalid || recap) return;
+          const clean = line.replace(/\x1b\[[0-9;]*m/g, '');
+          if (/^\s*✖ failing tests:\s*$/.test(clean)) { recap = true; return; }
+          const count = /^(?:#|ℹ) (tests|suites|pass|fail|cancelled|skipped|todo) (\d+)\s*$/.exec(clean);
+          if (count) { summary[count[1]] = Number(count[2]); return; }
+          if (/^\s*Bail out!/i.test(clean)) { invalid = true; return; }
+          if (diagnostic) {
+            const field = /^(\s*)(type|failureType): ['"]?([^'"\s]+)['"]?\s*$/.exec(clean);
+            if (field && field[1].length === diagnostic.indent) diagnostic.record[field[2]] = field[3];
+            if (clean === ' '.repeat(diagnostic.indent) + '...') diagnostic = null;
+            // YAML error messages/stacks are not reporter results.
+            if (diagnostic && clean.length - clean.trimStart().length >= diagnostic.indent) return;
+          }
+          const header = /^(\s*)(?:# Subtest: |▶ )(.+)$/.exec(clean);
+          if (header) {
+            const indent = header[1].length;
+            while (parents.length && parents.at(-1).indent >= indent) parents.pop();
+            const name = clean.trimStart().startsWith('#') ? tapName(header[2]) : header[2];
+            bytes += name.length * 2 + 64;
+            if (bytes > 1024 * 1024 || parents.length >= 256) { invalid = true; return; }
+            parents.push({ indent, name }); return;
+          }
+          const tap = /^(\s*)(not ok|ok) \d+ - (.+?)(?:\s+#\s*(SKIP|TODO)\b.*)?$/.exec(clean);
+          if (tap) { add(tap[1].length, tapName(tap[3]), tap[4] ? 'skip' : tap[2] === 'ok' ? 'pass' : 'fail', true); return; }
+          const spec = /^(\s*)(✔|✖|﹣|-) (.+) \((?:[\d.e+-]+\s*(?:ns|μs|µs|us|ms|s|m|h)\s*)+\)(?:\s+#\s*(SKIP|TODO)\b.*)?$/.exec(clean);
+          if (spec) { add(spec[1].length, spec[3], spec[4] || !['✔', '✖'].includes(spec[2]) ? 'skip' : spec[2] === '✔' ? 'pass' : 'fail', false); return; }
+          if (/^\s*(?:not ok\b|✖ )/.test(clean)) invalid = true;
+        },
+        finish() {
+          const failed = records.filter(r => r.status === 'fail'), passed = new Map(), required = new Map(), ancestors = new Set(), seen = new Set();
+          for (const r of records) {
+            // Reporters cannot distinguish identical full names in different files: fail closed.
+            if (seen.has(r.full)) invalid = true;
+            seen.add(r.full);
+            if (r.status === 'pass') passed.set(r.full, (passed.get(r.full) || 0) + 1);
+          }
+          for (const r of failed) {
+            required.set(r.full, (required.get(r.full) || 0) + 1);
+            for (let i = 1; i < r.path.length; i++) ancestors.add(JSON.stringify(r.path.slice(0, i)));
+            if (r.tap && !['testCodeFailure', 'subtestsFailed'].includes(r.failureType)) invalid = true;
+          }
+          const leaves = failed.filter(r => !ancestors.has(JSON.stringify(r.path))), names = [...new Set(leaves.map(r => r.full))];
+          const knownFails = failed.filter(r => r.type !== 'suite').length;
+          const valid = !invalid && Number.isSafeInteger(summary.tests) && Number.isSafeInteger(summary.pass) && Number.isSafeInteger(summary.fail)
+            && summary.cancelled === 0 && summary.fail >= leaves.length && summary.fail <= knownFails;
+          return { valid, names, passed, required, summary, others: records.filter(r => !required.has(r.full)).map(r => r.full) };
+        },
+      };
+    };
+    const execute = async (command, testCwd, label) => {
       this.event(job.id, 'controller', manager, 'TEST_START', (label ? `[${label}] ` : '') + command.join(' '));
       const started = Date.now(), chunks = [], maxBytes = (this.config.evidenceMaxMB ?? 50) * 2 ** 20;
+      const output = parser(testCwd);
       let logBytes = 0, log = null;
       // Stream the complete output: run() bounds its stdout/stderr buffers.
       const result = await run(/[\\/]/.test(command[0]) ? [command[0]] : executable(command[0]), command.slice(1), { cwd: testCwd, signal, allowFailure: true,
         onLine: (line, stream) => {
           this.event(job.id, 'controller', manager, 'TEST_OUTPUT', line.slice(0, 8000), { stream });
+          output.line(line);
           const text = redact(line) + '\n'; logBytes += Buffer.byteLength(text);
           if ((job.evidenceBytes || 0) + logBytes <= maxBytes) chunks.push(text);
         } });
@@ -1759,12 +1922,41 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       await this.captureEvidence(job, testCwd, 'test', 'controller', revision);
       this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision, ms, log });
       job.checkResults = [...(job.checkResults || []), scrub({ command, project: label || job.project, code: result.code, revision, ms, log, output: compressOutput(redact(result.stderr + result.stdout)), at: now() })].slice(-100);
-      if (result.code !== 0) {
-        job.reports.push({ stage: 'test', summary: `Test failed: ${label ? `[${label}] ` : ''}${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
-        return false;
+      return { ...result, parsed: output.finish() };
+    };
+    let acquired = false;
+    try {
+      await this.acquireTest(job, signal); acquired = true;
+      for (const test of tests) {
+        const { command, cwd: testCwd = cwd, label } = Array.isArray(test) ? { command: test } : test;
+        const result = await execute(command, testCwd, label);
+        if (result.code !== 0) {
+          const { names, valid, required } = result.parsed;
+          const retryCommand = command.filter((arg, i) => !arg.startsWith('--test-name-pattern=') && arg !== '--test-name-pattern' && command[i - 1] !== '--test-name-pattern');
+          const union = names => `^(?:${names.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`;
+          // Dynamic t.test() children need their parent selected; exclude its passing/skipped siblings.
+          const patterns = [`--test-name-pattern=${union([...required.keys()])}`];
+          if (required.size > names.length && result.parsed.others.length) patterns.push(`--test-skip-pattern=${union(result.parsed.others)}`);
+          retryCommand.splice(retryCommand.indexOf('--test') + 1, 0, ...patterns);
+          // A single union avoids Node's repeated-pattern semantics; leave room for Windows argv quoting.
+          if (result.code === 1 && valid && /^node(?:\.exe)?$/i.test(basename(command[0])) && command.includes('--test') && names.length && JSON.stringify(retryCommand).length <= 24000) {
+            const retry = await execute(retryCommand, testCwd, label);
+            // Node can count a successful file wrapper when no named test matched.
+            if (retry.code === 0 && retry.parsed.valid && retry.parsed.summary.pass > 0 && retry.parsed.summary.fail === 0
+              && [...required].every(([name, count]) => (retry.parsed.passed.get(name) || 0) >= count)) {
+              this.event(job.id, 'controller', 'user', 'FLAKY_WARNING', msg('srv.team.flaky_test', { 0: names.join(', ') }), { names, revision, command });
+              job.flaky = [...(job.flaky || []), ...names.map(test => ({ test, revision, command: command.join(' '), at: now() }))].slice(-50);
+              continue;
+            }
+          }
+          job.reports.push({ stage: 'test', summary: `Test failed: ${label ? `[${label}] ` : ''}${command.join(' ')}`, output: compressOutput(redact(result.stderr + result.stdout)) });
+          return false;
+        }
       }
+      return true;
+    } finally {
+      if (acquired) this.releaseTest();
     }
-    return true;
   }
   async testJob(job) {
     // Test của repo liên kết chạy trong worktree của nó; repo chính chạy sau cùng ở job.worktree.
@@ -2086,18 +2278,24 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (r.verdict === 'approved') { job.verified = job.revision; await this.finish(job, members); }
         else job.stage = 'rework'; break;
       }
-      case 'rework':
-        if (++job.round > (this.config.maxReworkRounds ?? 3)) {
-          const open = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).filter(f => f.impact === 'high');
-          if (!open.length) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua"));
+      case 'rework': {
+        // Mỗi lần owner bổ sung phạm vi và mỗi lần owner cho thêm vòng đều nới giới hạn +1; bị chặn thì không tăng round.
+        const limit = (this.config.maxReworkRounds ?? 3) + (job.scopeAdds?.length || 0) + (job.extraRounds || 0);
+        if (job.round + 1 > limit) {
+          job.reworkDigest = reworkDigest(job, limit);
+          const open = job.reworkDigest.rounds.at(-1)?.stage === 'test' ? [] : normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).filter(f => f.impact === 'high');
+          if (!open.length) throw new Error(msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest));
+          job.error = msg("srv.team.da_dat_gioi_han_vong_sua") + '\n' + reworkSummaryText(job.reworkDigest);
           job.questions = open.slice(0, 5).map(f => `${f.id}: ${f.claim}${f.evidence ? ' — ' + f.evidence : ''}`.slice(0, 600)); job.status = 'waiting';
-          this.event(job.id, 'controller', 'user', 'QUESTION', `${msg("srv.team.disagreement_needs_human")}\n${job.questions.join('\n')}`); break;
+          this.event(job.id, 'controller', 'user', 'QUESTION', `${msg("srv.team.disagreement_needs_human")}\n${job.questions.join('\n')}\n${reworkSummaryText(job.reworkDigest)}`); break;
         }
+        job.round++;
         usageFor(this.db, { timezone: this.config.timezone, retentionDays: this.config.usageRetentionDays }).markReworked(job.id);
         if (job.fast) { this.escalate(job, members, msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round })); break; }
         this.event(job.id, 'controller', members.manager, 'REWORK_REQUEST', msg("srv.team.vong_sua_xu_ly_findings_test", { 0: job.round }));
         job.skipped = []; job.stage = 'plan'; job.planReason = 'rework';
         job.planTrigger = normFindings(job.reports.findLast(r => ['review', 'verify'].includes(r.stage))?.findings).map(f => f.id).join(', ') || 'test failed'; break;
+      }
       case 'final': await this.finish(job, members); break;
       default: throw new Error(msg("srv.team.stage_khong_hop_le"));
     }
@@ -2273,10 +2471,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     }
     if (action === 'pause' || action === 'cancel') {
       if (action === 'cancel') { job.error = null; job.current = null; job.running = []; }
+      // "Dừng, tôi tự xử lý": giữ worktree, đánh dấu owner đang tự làm.
+      const handoff = action === 'pause' && payload.handoff === true && ['blocked', 'waiting'].includes(job.status);
+      if (handoff) job.handoff = { at: now() };
       job.status = action === 'pause' ? 'paused' : 'cancelled'; this.save(job);
-      if (action === 'cancel') await this.stopPreview(id, 'cancelled');
       if (this.runs.has(id)) this.runs.get(id).abort.abort(new DOMException(action === 'cancel' ? msg("srv.team.huy_task_giu_worktree_de_khong") : msg("srv.team.dung_tien_trinh_khi_tiep_tuc"), 'AbortError'));
-      this.event(id, 'user', 'team', 'CONTROL', action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
+      if (action === 'cancel') await this.stopPreview(id, 'cancelled');
+      this.event(id, 'user', 'team', 'CONTROL', handoff ? msg("srv.team.owner_takes_over") : action === 'pause' ? msg("srv.team.dung_tien_trinh_khi_tiep_tuc") : msg("srv.team.huy_task_giu_worktree_de_khong"));
       if (action === 'cancel') await this.cleanupJob(id).catch(e => this.emit('fault', e));
     } else if (action === 'resume') {
       if (!['blocked', 'paused', 'waiting'].includes(job.status)) throw new Error(msg("srv.team.chi_tiep_tuc_task_paused_blocked"));
@@ -2296,6 +2497,11 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (job.usage.tokens >= cap) job.tokenBudget = job.usage.tokens + this.config.maxTokensPerJob;
         this.event(id, 'user', 'team', 'CONTROL', msg("srv.team.token_budget_extended", { 0: job.usage.tokens, 1: job.tokenBudget || cap }));
       }
+      if (payload.extraRound === true) {
+        job.extraRounds = (job.extraRounds || 0) + 1; job.reworkDigest = null; job.questions = null;
+        this.event(id, 'user', 'team', 'CONTROL', msg("srv.team.extra_round_granted", { 0: job.extraRounds }));
+      }
+      delete job.handoff;
       job.status = 'queued'; job.error = null; this.save(job); this.kick();
     } else if (action === 'message') {
       if (typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 20000) throw new Error(msg("srv.team.message_khong_hop_le"));
@@ -2303,12 +2509,14 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       job.acceptance = null;
       const names = await this.attach(job, payload.files);
       job.messages.push({ time: now(), text: payload.message.trim(), ...(names.length ? { attachments: names } : {}) });
+      // Đã có plan (trừ trả lời cổng duyệt plan / câu hỏi của teammate) = owner bổ sung phạm vi: nới giới hạn vòng sửa +1.
+      if ((job.plans?.length || job.tasks.length) && !job.planGate && !job.peerWait) (job.scopeAdds ||= []).push({ id: randomUUID(), at: now(), round: job.round, reports: job.reports.length, message: job.messages.length - 1 });
       // Steering invalidates a ready-to-merge result; it must go through planning/review again.
       if (job.status === 'ready') { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); job.planGate = null; job.reviewed = job.verified = job.tested = null; }
       if (job.status === 'waiting') { if (!job.peerWait) { job.stage = 'plan'; job.planReason = 'feedback'; job.planTrigger = payload.message.trim().slice(0, 200); } job.planGate = null; job.questions = null; delete job.peerWait; }
       // Chat vào task đang dừng/vướng = muốn nhóm làm tiếp: tự xếp hàng lại, chỉ dẫn được giao ở lượt kế tiếp.
       if (['ready', 'waiting', 'paused', 'blocked'].includes(job.status) && !this.runs.has(id)) {
-        job.roster = this.jobRoster(job); job.status = 'queued'; job.error = null; setImmediate(() => this.kick());
+        job.roster = this.jobRoster(job); job.status = 'queued'; job.error = null; job.reworkDigest = null; delete job.handoff; setImmediate(() => this.kick());
       }
       this.save(job); this.event(id, 'user', (job.roster || roster(this.config)).manager, 'MESSAGE', payload.message, { delivery: 'next invocation' });
     } else if (action === 'approve-plan') {
