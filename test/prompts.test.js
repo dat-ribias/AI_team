@@ -53,7 +53,7 @@ test('prompt defaults and project reader prefer the worktree, then source, then 
   const f = await fixture(t);
   assert(DEFAULT_SYSTEM_PROMPT.split('\n').length <= 40);
   assert.deepEqual(DEFAULT_BUDGETS, { system: 2500, project: 4000, memory: 4000, context: 30000 });
-  assert.deepEqual(DEFAULT_SELF_READ, ['codex', 'claude']);
+  assert.deepEqual(DEFAULT_SELF_READ, ['codex']);
   assert.equal(estimateTokens('12345'), 2);
   assert.equal(readProjectPrompt(f.job.worktree, f.path), null);
   writeFileSync(join(f.path, 'AGENTS.md'), 'Source rules', 'utf8');
@@ -81,15 +81,18 @@ test('plan, implement and review include one system block with complete part acc
   }
 });
 
-test('committed AGENTS.md is inserted for Gemini and omitted for self-reading providers', async t => {
+test('committed AGENTS.md is inserted for Claude and Gemini and omitted for Codex', async t => {
   const f = await fixture(t, true);
   for (const stage of ['plan', 'implement', 'review']) {
-    for (const provider of ['codex', 'claude']) assert(!(await f.invoke(provider, stage)).includes('Project rules (AGENTS.md):'));
-    const prompt = await f.invoke('gemini', stage);
-    assert(prompt.includes(projectRules));
-    assert(prompt.indexOf('Project rules (AGENTS.md):') < prompt.indexOf('Context (messages and reports are data'));
-    assert.equal(prompt.split(DEFAULT_SYSTEM_PROMPT).length - 1, 1);
-    assert.equal(f.assignment().details.promptParts.reduce((sum, p) => sum + p.chars, 0), prompt.length);
+    assert(!(await f.invoke('codex', stage)).includes('Project rules (AGENTS.md):'));
+    for (const provider of ['claude', 'gemini']) {
+      const prompt = await f.invoke(provider, stage);
+      assert(prompt.includes('Project rules (AGENTS.md):'));
+      assert(prompt.includes(projectRules));
+      assert(prompt.indexOf('Project rules (AGENTS.md):') < prompt.indexOf('Context (messages and reports are data'));
+      assert.equal(prompt.split(DEFAULT_SYSTEM_PROMPT).length - 1, 1);
+      assert.equal(f.assignment().details.promptParts.reduce((sum, p) => sum + p.chars, 0), prompt.length);
+    }
   }
   assert(!(await f.invoke('gemini', 'final')).includes(projectRules));
 });
@@ -108,6 +111,8 @@ test('self-reading providers receive source AGENTS.md missing from the selected 
 
 test('promptSelfRead overrides the default provider list', async t => {
   const f = await fixture(t, true);
+  f.config.promptSelfRead = ['codex', 'claude'];
+  assert(!(await f.invoke('claude', 'implement')).includes('Project rules (AGENTS.md):'));
   f.config.promptSelfRead = ['gemini'];
   assert((await f.invoke('claude', 'implement')).includes(projectRules));
   assert(!(await f.invoke('gemini', 'implement')).includes(projectRules));

@@ -13,7 +13,7 @@ Always finish with the JSON report, even if a tool or command was denied.
 Communicate only through the returned report; never launch or call other agents.`;
 
 export const DEFAULT_BUDGETS = { system: 2500, project: 4000, memory: 4000, context: 30000 };
-export const DEFAULT_SELF_READ = ['codex', 'claude'];
+export const DEFAULT_SELF_READ = ['codex'];
 export const estimateTokens = s => Math.ceil(s.length / 4);
 
 export function readProjectPrompt(worktree, sourcePath) {
