@@ -162,6 +162,8 @@ Agent có thể hỏi một thành viên khác trong roster của job khi một 
 
 ## Điều khiển và giới hạn
 
+- `maxConcurrentTests` (mặc định 1, đặt ở cấp gốc cấu hình) giới hạn số lượt test controller chạy cùng lúc trên toàn bộ job. Hết lượt, job ở bước test hiển thị **chờ lượt test #n** theo vị trí hàng đợi; chờ lượt không giữ slot agent.
+- Khi full suite thất bại, controller chạy lại riêng các test lỗi **một lần** bằng `--test-name-pattern`. Nếu tất cả đều pass khi chạy lại, lượt test được tính pass, ghi cảnh báo `flaky: <tên test>` và thêm vào danh sách flaky trên dashboard (hiển thị tối đa 10 mục). Nếu vẫn fail, job tiếp tục vòng sửa (rework) như trước.
 - `resources.maxAgents` (mặc định 3) là mức song song khuyến nghị; đặt `resources.maxAgentsHard: true` để dùng nó làm trần cứng (mặc định `false`). Task độc lập có thể chạy song song khi còn đủ RAM. CPU toàn máy được lấy mẫu mỗi 5 giây và làm mượt theo trung bình khoảng 30 giây; tạm hoãn lượt mới khi CPU này > `maxCpuPercent` (90) hoặc chạm ngưỡng RAM (`resources.hardStopRamPercent`, mặc định 90; `maxRamPercent` cũ chỉ còn tác dụng nếu > 90). Đây là ngưỡng khởi chạy, không phải giới hạn cứng CPU/RAM của lệnh con; một build đơn lẻ vẫn có thể nặng.
 - `maxTokensPerJob` (không đặt = không giới hạn): job dùng hết ngân sách token thì dừng chờ bạn; bấm tiếp tục để cấp thêm một lần ngân sách.
 - Pause kết thúc cây tiến trình. Resume gọi lại bước hiện tại với dữ liệu đã lưu, không tiếp tục nội bộ cùng một CLI session. Thay đổi trong worktree được giữ; nên xem diff sau khi dừng giữa chừng.

@@ -1015,5 +1015,10 @@
   "ui.settings.oracleHint": "Lead can ask ChatGPT web using web quota; errors are skipped automatically.",
   "ui.settings.oracleUnavailable": "Configure a ChatGPT web account and use a supported server to enable.",
   "ui.ev.ORACLE_QUESTION": "Ask ChatGPT web",
-  "ui.ev.ORACLE_ANSWER": "ChatGPT web answer"
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web answer",
+"srv.team.wait_test": "Waiting for test slot #{0}",
+  "srv.team.flaky_test": "flaky: {0}",
+  "ui.flaky.title": "Recent flaky tests",
+  "ui.flaky.empty": "No flaky tests yet",
+  "ui.flaky.item": "{test} · job {job} · {at}"
 }

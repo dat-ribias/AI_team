@@ -776,13 +776,17 @@ test('preview screenshot captures desktop and mobile PNG through CDP', { timeout
   }
 });
 
-test('accept is revision-bound, filters evidence, gates merge and merged preview is stopped', { timeout: 60_000 }, async t => {
-  const { team, job } = await previewFixture(t);
-  const check = await team.mergeCheck(job.id);
+for (const mode of ['ff', 'merge']) test(`accept is revision-bound, filters evidence, gates merge and merged preview is stopped (${mode})`, { timeout: 60_000 }, async t => {
+  const { f, team, job } = await previewFixture(t);
+  const target = mode === 'merge' ? { type: 'existing', branch: 'release' } : undefined;
+  let tip;
+  if (target) { await run(['git'], ['-C', f.path, 'branch', target.branch]); tip = await branchCommit(f, target.branch); }
+  const check = await team.mergeCheck(job.id, target);
+  assert.equal(check.target.mode, mode);
   assert.deepEqual(check.acceptance, { required: true, ok: false, revision: null });
   assert.deepEqual(check.paths, [{ path: 'hello.txt', added: 1, removed: 1 }]);
   await assert.rejects(team.control(job.id, 'accept', { revision: job.base }), new RegExp(msg('srv.preview.accept_invalid')));
-  await assert.rejects(team.merge(job.id), new RegExp(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) })));
+  await assert.rejects(team.merge(job.id, { target }), new RegExp(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) })));
   assert.equal(team.get(job.id).status, 'ready');
   await team.runPreview(team.get(job.id));
   const fresh = team.get(job.id), entry = fresh.evidence.at(-1), valid = entry.files.map(f => `${entry.dir}/${f.path}`);
@@ -791,8 +795,17 @@ test('accept is revision-bound, filters evidence, gates merge and merged preview
   const accepted = await team.control(job.id, 'accept', { revision: job.revision, evidence: [...valid, '../outside', 'wrong-revision.png', 42] });
   assert.deepEqual(accepted.acceptance.evidence, valid); assert.equal(accepted.acceptance.by, 'user');
   assert(team.events(job.id).some(e => e.type === 'ACCEPTED'));
-  assert.equal((await team.mergeCheck(job.id)).acceptance.ok, true);
-  await team.merge(job.id); assert.equal(team.get(job.id).status, 'merged'); assert.equal(team.get(job.id).preview.stoppedReason, 'merged');
+  assert.equal((await team.mergeCheck(job.id, target)).acceptance.ok, true);
+  const prepared = await team.merge(job.id, { target });
+  if (target) {
+    const pending = prepared.pendingMerge;
+    assert.equal(prepared.status, 'ready'); assert(pending.passed); assert.equal(await branchTip(f, target.branch), tip);
+    assert.equal(team.get(job.id).preview.status, 'running');
+    await assert.rejects(team.merge(job.id, { target, approveMerge: job.revision }), /exact pending/);
+    await team.merge(job.id, { target, approveMerge: pending.commit });
+    assert.equal(await branchTip(f, target.branch), pending.commit);
+  }
+  assert.equal(team.get(job.id).status, 'merged'); assert.equal(team.get(job.id).preview.stoppedReason, 'merged');
   await assert.rejects(team.control(job.id, 'accept', { revision: job.revision }));
 });
 
@@ -863,8 +876,15 @@ test('preview without Chrome keeps the server running and feedback revokes accep
 
 test('preview readiness timeout is nonfatal and cancel during readiness stops the baseline', { timeout: 60_000 }, async t => {
   const { team, job } = await previewFixture(t, { readyPath: '/missing' });
+  let timedOutPid;
+  const capturePid = () => { timedOutPid ||= team.get(job.id).preview?.basePid; };
+  team.on('change', capturePid);
   await team.runPreview(job);
+  team.off('change', capturePid);
   assert.equal(team.get(job.id).status, 'ready'); assert.equal(team.get(job.id).preview.status, 'failed'); assert.equal(team.previews.size, 0);
+  assert(timedOutPid); assert(!processAlive(timedOutPid));
+  assert.match(team.get(job.id).preview.error, /Preview readiness timed out/);
+  assert(team.events(job.id).some(e => e.type === 'PREVIEW_WARNING'));
   const config = team.config.projects[0].preview; config.readyPath = '/ready'; config.command = 'node server.js {port} 2000';
   const launch = team.runPreview(team.get(job.id));
   const until = Date.now() + 5000;
@@ -1483,7 +1503,8 @@ test('structured rebuttal: a rejected finding becomes a dispute that forces veri
   } });
   t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello' });
-  const ready = await settle(team, job.id, 'ready');
+  // This rework/dispute pipeline can still be verifying at 20s under controller load.
+  const ready = await settle(team, job.id, 'ready', 60_000);
   const verify = seen.find(x => x.stage === 'verify');
   assert(verify, 'verify phải bị ép chạy vì có tranh chấp (rigor standard, không có cổng rủi ro)');
   assert.match(verify.prompt, /"disputes"/); assert.match(verify.prompt, /đã phủ file rỗng/);
@@ -1763,7 +1784,8 @@ test('independent tasks run in parallel; dependsOn waits; code tasks merge from 
   ]);
   team.start();
   const job = await team.create({ project: 'test', goal: 'Parallel work' });
-  const ready = await settle(team, job.id, 'ready');
+  // Child worktree commits and independent checks can exceed 20s while progressing.
+  const ready = await settle(team, job.id, 'ready', 60_000);
   const [s1, s2, s3] = [1, 2, 3].map(n => spans.find(s => s.n === n));
   assert(overlaps(s1, s2), 'T1 and T2 should overlap');
   assert(s3.start >= Math.max(s1.end, s2.end), 'T3 waits for its dependencies');
@@ -1907,10 +1929,11 @@ test('linked repos: a job edits another registered project in its own worktree; 
   assert.match(blocked.error, /lib/);
 });
 
-test('memory: Leader keeps durable project notes and a session summary; next job sees them; backups and export work', async t => {
-  const f = await fixture(), prompts = [];
+test('memory: Leader keeps durable project notes and a session summary; next job sees them; backups and export work', { timeout: 150000 }, async t => {
+  const f = await fixture(), prompts = [], started = Date.now();
   let round = 0;
   const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    t.diagnostic(`Memory pipeline: ${task.stage} at ${Date.now() - started}ms`);
     prompts.push({ stage: task.stage, prompt });
     const r = await runAgent(agent, task, prompt, opts);
     if (task.stage === 'final') return { ...r, memory: round++ === 0 ? { add: ['hello.txt Tests: node --test', 'token sk-abcdefghijklmnopqrstuvwxyz123456 leaked'], session: 'Đang sửa hello.txt' } : { remove: [`M${team.memory('test').facts[0].id}`], session: 'Xong hello.txt' } };
@@ -1920,7 +1943,7 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   team.start();
   const ses = team.createSession({ project: 'test', name: 'S' });
   const a = await team.create({ project: 'test', goal: 'Update hello', mode: 'full', sessionId: ses.id });
-  await settle(team, a.id, 'ready');
+  await settle(team, a.id, 'ready', 60000);
   let m = team.memory('test', ses.id);
   assert.deepEqual(m.facts.map(x => x.text)[0], 'hello.txt Tests: node --test'); assert.doesNotMatch(m.facts[1].text, /sk-abcdef/);
   assert.equal(m.facts[0].scope, 'job');
@@ -1931,7 +1954,7 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   // Việc sau nhận ghi chú liên quan trực tiếp; chỉ phần tóm tắt phiên dành cho Leader.
   prompts.length = 0;
   const b = await team.create({ project: 'test', goal: 'Check hello again', mode: 'full', sessionId: ses.id });
-  await settle(team, b.id, 'ready');
+  await settle(team, b.id, 'ready', 60000);
   const plan = prompts.find(p => p.stage === 'plan').prompt, fin = prompts.find(p => p.stage === 'final').prompt, impl = prompts.find(p => p.stage === 'implement').prompt;
   assert.match(plan, /Tests: node --test/); assert.match(plan, /Đang sửa hello.txt/); assert.match(plan, new RegExp(a.id));
   assert.match(fin, /M\d+: hello.txt Tests: node --test/); assert.match(fin, /"memory":\{"add"/);

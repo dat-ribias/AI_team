@@ -1015,5 +1015,10 @@
   "ui.settings.oracleHint": "Lead は web の利用枠で ChatGPT web に相談できます。エラー時はスキップします。",
   "ui.settings.oracleUnavailable": "有効にするには ChatGPT web アカウントの設定と対応サーバーが必要です。",
   "ui.ev.ORACLE_QUESTION": "ChatGPT web への質問",
-  "ui.ev.ORACLE_ANSWER": "ChatGPT web の回答"
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web の回答",
+"srv.team.wait_test": "テスト順番待ち #{0}",
+  "srv.team.flaky_test": "flaky: {0}",
+  "ui.flaky.title": "最近の不安定なテスト",
+  "ui.flaky.empty": "不安定なテストはまだありません",
+  "ui.flaky.item": "{test} · ジョブ {job} · {at}"
 }

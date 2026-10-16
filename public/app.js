@@ -453,6 +453,8 @@ function drawState() {
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuAverage30s')],
   ].map(([label, value, note, warning]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small>${warning ? `<small class="metric-agents-warning">${esc(warning)}</small>` : ''}</div>`).join('');
+  if (!$('recent-flaky')) $('metrics').insertAdjacentHTML('afterend', '<section id="recent-flaky" class="panel history" aria-labelledby="recent-flaky-title"></section>');
+  $('recent-flaky').innerHTML = `<h2 id="recent-flaky-title">${esc(t('ui.flaky.title'))}</h2>` + ((state.flaky || []).slice(0, 10).map(item => `<p class="muted">${esc(t('ui.flaky.item', { test: item.test, job: item.job, at: clock(item.at) }))}</p>`).join('') || `<p class="muted">${esc(t('ui.flaky.empty'))}</p>`);
   const resultJob = state.jobs.find(j => j.id === selected);
   if (resultsSelection !== selected) {
     resultsSelection = selected;

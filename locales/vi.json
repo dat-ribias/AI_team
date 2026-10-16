@@ -1015,5 +1015,10 @@
   "ui.settings.oracleHint": "Lead có thể hỏi ChatGPT web bằng quota web; nếu lỗi sẽ tự bỏ qua.",
   "ui.settings.oracleUnavailable": "Cần cấu hình tài khoản ChatGPT web và server hỗ trợ để bật.",
   "ui.ev.ORACLE_QUESTION": "Hỏi ChatGPT web",
-  "ui.ev.ORACLE_ANSWER": "ChatGPT web trả lời"
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web trả lời",
+"srv.team.wait_test": "Chờ lượt test #{0}",
+  "srv.team.flaky_test": "flaky: {0}",
+  "ui.flaky.title": "Test flaky gần đây",
+  "ui.flaky.empty": "Chưa có test flaky",
+  "ui.flaky.item": "{test} · job {job} · {at}"
 }
