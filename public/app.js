@@ -448,11 +448,13 @@ function drawState() {
   if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
   const ready = state.jobs.filter(j => j.status === 'ready').length;
   $('metrics').innerHTML = [
-    [t('ui.metric.agents'), `${state.resources.active} <small>/ ${state.resources.slots ?? 1}</small>`, state.resources.waitingReason || t('ui.metric.onDemand')],
+    [t('ui.metric.agents'), `${state.resources.active} <small>/ ${state.resources.slots ?? 1}</small>`, state.resources.waitingReason || t('ui.metric.onDemand'), state.resources.active > state.resources.maxAgents ? t('ui.metric.agentsAboveRecommended', { n: state.resources.active, m: state.resources.maxAgents }) : ''],
     [t('ui.metric.jobs'), state.jobs.length, t('ui.metric.jobsNote', { running: state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length, ready })],
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
-    [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuNote')],
-  ].map(([label, value, note]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small></div>`).join('');
+    [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuAverage30s')],
+  ].map(([label, value, note, warning]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small>${warning ? `<small class="metric-agents-warning">${esc(warning)}</small>` : ''}</div>`).join('');
+  if (!$('recent-flaky')) $('metrics').insertAdjacentHTML('afterend', '<section id="recent-flaky" class="panel history" aria-labelledby="recent-flaky-title"></section>');
+  $('recent-flaky').innerHTML = `<h2 id="recent-flaky-title">${esc(t('ui.flaky.title'))}</h2>` + ((state.flaky || []).slice(0, 10).map(item => `<p class="muted">${esc(t('ui.flaky.item', { test: item.test, job: item.job, at: clock(item.at) }))}</p>`).join('') || `<p class="muted">${esc(t('ui.flaky.empty'))}</p>`);
   const resultJob = state.jobs.find(j => j.id === selected);
   if (resultsSelection !== selected) {
     resultsSelection = selected;
@@ -877,6 +879,9 @@ function drawInspector() {
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
   const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b><button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
+  const reworkOpen = $('inspector').querySelector('[data-rework-digest]')?.open;
+  const digest = job.reworkDigest;
+  const rework = digest ? `<details class="rework-digest" data-rework-digest ${reworkOpen ? 'open' : ''}><summary>${esc(t('ui.rework.title'))} · ${esc(t('ui.rework.summary', { rounds: digest.round, open: digest.open.length, scope: digest.scopeAdds }))}</summary><ol class="rework-rounds">${digest.rounds.map(round => `<li><p>${esc(t('ui.rework.round', { n: round.n, who: names[round.agent] || round.agent, verdict: round.verdict }))} · ${esc(round.stage)}</p><ul>${round.findings.map(finding => `<li><b>${esc(finding.id)}</b> ${esc(finding.claim)} <span class="tag ${finding.origin === 'owner' ? 'rework-owner' : ''}">${esc(t(finding.origin === 'owner' ? 'ui.rework.owner' : finding.origin === 'builder' ? 'ui.rework.builder' : 'ui.rework.unknown'))}</span>${finding.open ? ` <span class="tag rework-open">${esc(t('ui.rework.open'))}</span>` : ''}</li>`).join('')}</ul></li>`).join('')}</ol>${job.handoff ? `<p class="muted">${esc(t('ui.rework.handedOff'))}</p>` : ['blocked', 'waiting'].includes(job.status) ? `<div class="controls"><button type="button" class="primary" data-rework-extra>${esc(t('ui.rework.extraRound'))}</button><button type="button" data-rework-handoff>${esc(t('ui.rework.handoff'))}</button></div>` : ''}</details>` : '';
   const openTasks = new Set([...$('inspector').querySelectorAll('details[data-task-detail][open]')].map(d => Number(d.dataset.taskDetail)));
   const tasks = job.tasks.length ? '<ul class="task-list">' + job.tasks.map((x, i) => '<li>' + taskDetailHTML(job, x, i, openTasks.has(i)) + '</li>').join('') + '</ul>' : '';
 
@@ -886,7 +891,7 @@ function drawInspector() {
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<h2 class="job-title" data-rename tabindex="0" role="button" title="${esc(t('ui.jobs.renameHint'))}">${esc(jobTitle(job))}</h2><details data-inspector-goal ${goalOpen ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details>${badge(job)}${tokenJobLink(job)}${quotaWait}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  $('inspector').innerHTML = `<h2 class="job-title" data-rename tabindex="0" role="button" title="${esc(t('ui.jobs.renameHint'))}">${esc(jobTitle(job))}</h2><details data-inspector-goal ${goalOpen ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details>${badge(job)}${tokenJobLink(job)}${quotaWait}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}${rework}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
   if ($('quota-replace')) $('quota-replace').onclick = () => openSlot(br.role, br.agent, br.task ?? undefined, job.id);
   const heading = $('inspector').querySelector('[data-rename]');
   const rename = () => {
@@ -924,6 +929,10 @@ function drawInspector() {
     if (b.dataset.action === 'cancel' && !confirm(t('ui.inspector.confirmCancel'))) return;
     if (b.dataset.action === 'delete' && !confirm(t('ui.inspector.confirmDelete'))) return;
     b.disabled = true; try { await api(`jobs/${selected}/control`, { action: b.dataset.action }); if (b.dataset.action === 'delete') { selected = undefined; events = []; } await refresh(); } finally { b.disabled = false; }
+  }));
+  $('inspector').querySelectorAll('[data-rework-extra], [data-rework-handoff]').forEach(b => b.onclick = () => attempt(async () => {
+    const extra = b.hasAttribute('data-rework-extra');
+    b.disabled = true; try { await api(`jobs/${job.id}/control`, extra ? { action: 'resume', extraRound: true } : { action: 'pause', handoff: true }); await refresh(); } finally { b.disabled = false; }
   }));
   $('reassign').onchange = () => attempt(async () => { if ($('reassign').value) await api(`jobs/${selected}/control`, { action: 'reassign', agent: $('reassign').value }); await refresh(); });
   $('view-diff').onclick = () => attempt(showDiff);
@@ -1058,7 +1067,7 @@ async function loadBaseBranches() {
     $('base-branch').disabled = false;
   } catch (e) { if (request === baseBranchesRequest) { $('base-branch-error').textContent = e.message; $('base-branch-error').hidden = false; } }
 }
-let mergeJob, mergeCheck, mergeRequest = 0, mergeSending = false;
+let mergeJob, mergeCheck, mergeRequest = 0, mergeSending = false, resyncSending = false;
 function mergeTarget() {
   const type = document.querySelector('input[name="merge-target"]:checked')?.value || 'base';
   return { type, branch: type === 'new' ? $('merge-new-branch').value.trim() : type === 'existing' ? $('merge-branch').value : state?.jobs?.find(j => j.id === mergeJob)?.baseBranch };
@@ -1066,9 +1075,12 @@ function mergeTarget() {
 function updateMergeButton() {
   const c = mergeCheck, checks = c?.checks, target = mergeTarget();
   $('merge-go').disabled = mergeSending || !checks || c?.acceptance?.required && !c.acceptance.ok || !['tested', 'reviewed', 'verified', 'baseUnchanged', 'ready'].every(key => checks[key]) || !!c?.target?.error || target.type !== 'base' && (!c?.target || !target.branch) || !!c?.pendingMerge && c.pendingMerge.passed !== true || !!c?.needsConfirm && $('merge-confirm').value.trim() !== String(c.code);
+  $('merge-go').disabled ||= resyncSending;
+  $('merge-go').title = $('merge-go').disabled ? t(checks?.baseUnchanged === false ? 'ui.merge.blockedBase' : 'ui.merge.notStarted') : '';
 }
 async function refreshMergeCheck() {
   const id = mergeJob, target = mergeTarget(), request = ++mergeRequest;
+  $('merge-error').textContent = ''; $('merge-error').hidden = true;
   mergeCheck = null; updateMergeButton();
   $('merge-branch').disabled = target.type !== 'existing'; $('merge-new-branch').disabled = target.type !== 'new';
   const c = await api(`jobs/${encodeURIComponent(id)}/merge-check?target=${encodeURIComponent(target.type)}&branch=${encodeURIComponent(target.branch || '')}`);
@@ -1077,7 +1089,33 @@ async function refreshMergeCheck() {
   const checks = [...(c.acceptance?.required ? [[t('ui.results.accepted'), c.acceptance.ok]] : []), [t('ui.merge.tested'), c.checks?.tested], [t(c.checks?.reviewSkipped ? 'ui.merge.reviewSkipped' : 'ui.merge.reviewed'), c.checks?.reviewed], [t(c.checks?.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks?.verified], [t('ui.merge.baseUnchanged', { branch }), c.checks?.baseUnchanged]];
   const evidence = c.evidence, tests = Array.isArray(evidence?.controllerTests) ? evidence.controllerTests : [], files = Array.isArray(evidence?.files) ? evidence.files.reduce((n, item) => n + (item.files?.length || 0), 0) : evidence?.files ?? 0;
   const p = c.pendingMerge;
+  const resync = c.checks?.baseUnchanged === false, recheck = resync || ['tested', 'reviewed', 'verified'].some(key => c.checks?.[key] === false);
+  const busyTests = state.jobs.filter(j => j.id !== id && j.status === 'running' && j.stage === 'test').length;
   $('merge-check').innerHTML = `<p>${esc(t('ui.merge.summary', { code: c.code, branch, files: c.files, added: c.added, removed: c.removed }))}</p><p>${esc(t('ui.merge.risk'))} <b class="${c.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + c.risk))}</b></p>${c.target?.mode ? `<p>${esc(t('ui.merge.targetMode'))}: <b>${esc(t('ui.merge.targetMode.' + c.target.mode))}</b></p>` : ''}${c.target?.error || target.type !== 'base' && !c.target ? `<p class="error-box" role="alert">${esc(c.target?.error || t('ui.merge.targetUnavailable'))}</p>` : ''}<ul class="check-list">${checks.map(([label, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(label)}</li>`).join('')}${(c.reasons || []).map(reason => `<li class="bad">⚠ ${esc(reason)}</li>`).join('')}</ul>${evidence ? `<section class="merge-evidence"><h3>${esc(t('ui.evidence.title'))} <code>${esc(evidence.revision)}</code></h3><p>${esc(t('ui.evidence.controller'))}: ${esc(t('ui.evidence.testCounts', { pass: tests.filter(x => x.code === 0).length, fail: tests.filter(x => x.code !== 0).length }))} · ${esc(t('ui.evidence.fileCount', { n: files }))}</p>${(evidence.aiChecks || []).map(report => `<p><span class="tag">${esc(t('ui.evidence.ai'))}</span> ${esc(report.stage)} · ${esc(names[report.agent] || report.agent)} · <b>${esc(report.verdict || '—')}</b></p>`).join('')}${evidence.warnNoControllerTest ? `<p class="evidence-warning" role="alert">${esc(t('ui.evidence.noControllerTest'))}</p>` : ''}<button type="button" id="merge-open-evidence">${esc(t('ui.evidence.view'))}</button></section>` : ''}${p ? `<section class="merge-pending"><h3>${esc(t('ui.merge.secondApproval'))}</h3><p><code>${esc(p.commit)}</code> · ${esc(p.target?.branch || p.target || branch)}</p><p class="${p.passed ? 'evidence-pass' : 'evidence-fail'}">${esc(t(p.passed ? 'ui.merge.pendingPassed' : 'ui.merge.pendingFailed'))}</p><div id="merge-pending-tests"></div><pre class="merge-pending-diff">${esc(p.diff || '')}</pre></section>` : ''}`;
+  if (busyTests) $('merge-check').innerHTML += `<p class="evidence-warning merge-busy">${esc(t('ui.merge.busyTests', { n: busyTests }))}</p>`;
+  if (recheck) {
+    $('merge-check').innerHTML += `<section class="merge-resync"><p>${esc(t(resync ? 'ui.merge.resyncHint' : 'ui.merge.recheckHint', { branch: job?.baseBranch || branch }))}</p><button type="button" id="merge-resync">${esc(t(resync ? 'ui.merge.resync' : 'ui.merge.recheck'))}</button></section>`;
+    const button = $('merge-resync');
+    button.disabled = resyncSending || mergeSending || !['ready', 'paused', 'blocked'].includes(job?.status);
+    button.onclick = async () => {
+      if (button.disabled || resyncSending || mergeSending || !['ready', 'paused', 'blocked'].includes(state.jobs.find(j => j.id === id)?.status)) return;
+      resyncSending = true; button.disabled = true; updateMergeButton();
+      $('merge-error').textContent = ''; $('merge-error').hidden = true;
+      try {
+        await api(`jobs/${encodeURIComponent(id)}/control`, { action: resync ? 'sync' : 'review' });
+        await refresh();
+        const job = state.jobs.find(j => j.id === id);
+        $('merge-dialog').close();
+        notice(t('ui.merge.resyncStarted', { status: `${job?.status || 'queued'}/${job?.stage || 'test'}` }));
+      } catch (e) {
+        $('merge-error').textContent = e.message; $('merge-error').hidden = false;
+      } finally {
+        resyncSending = false;
+        button.disabled = !['ready', 'paused', 'blocked'].includes(state.jobs.find(j => j.id === id)?.status);
+        updateMergeButton();
+      }
+    };
+  }
   $('merge-open-evidence')?.addEventListener('click', () => { $('merge-dialog').close(); selected = id; document.querySelector('[data-tab="evidence"]').click(); });
   $('merge-confirm-label').textContent = t('ui.merge.confirm', { code: c.code });
   $('merge-confirm').hidden = $('merge-confirm-label').hidden = !c.needsConfirm;
@@ -1090,6 +1128,7 @@ async function refreshMergeCheck() {
 }
 async function openMerge() {
   mergeJob = selected; mergeCheck = null; ++mergeRequest;
+  $('merge-error').textContent = ''; $('merge-error').hidden = true;
   const job = state.jobs.find(j => j.id === mergeJob);
   document.querySelector('input[name="merge-target"][value="base"]').checked = true;
   $('merge-target-base').textContent = t('ui.merge.targetBase', { branch: job?.baseBranch || '—' });
@@ -1706,7 +1745,10 @@ $('merge-go').onclick = () => attempt(async () => {
     await refresh();
     const job = state?.jobs?.find(j => j.id === id);
     if (job?.pendingMerge || result?.pendingMerge || result?.job?.pendingMerge) await refreshMergeCheck();
+    else if (job?.status === 'ready' || result?.job?.status === 'ready' || result?.status === 'ready') throw new Error(t('ui.merge.notStarted'));
     else $('merge-dialog').close();
+  } catch (e) {
+    $('merge-error').textContent = e.message; $('merge-error').hidden = false;
   } finally { mergeSending = false; $('merge-target').disabled = false; updateMergeButton(); }
 });
 $('close-login').onclick = () => $('login-dialog').close();

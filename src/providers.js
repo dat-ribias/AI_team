@@ -221,9 +221,12 @@ export function sandboxArgs(task, checks = [], writes = task.stage === 'research
 }
 export function claudeToolArgs(task, checks = [], web = false, writes = task.stage === 'research' && capabilitiesFor(task.kind, 'builder').write.length > 0) {
   const args = ['--permission-mode', task.stage === 'implement' ? 'acceptEdits' : 'default'];
-  if (task.stage !== 'implement') {
+  const allowed = `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${checks.map(c => `,Bash(${c}),Bash(${c} *)`).join('')}`;
+  if (task.stage === 'implement') {
+    args.push('--allowedTools', `${allowed},Bash(node --test),Bash(node --test *),Bash(node --check *),Bash(npm test),Bash(npm test *)`);
+  } else {
     const edits = writes ? capabilitiesFor(task.kind, 'builder').write.flatMap(prefix => [`Write(${prefix}**)`, `Edit(${prefix}**)`]) : [];
-    args.push('--tools', `Read,Glob,Grep,Bash${writes ? ',Write,Edit' : ''}${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `Read,Glob,Grep,Bash(git diff *),Bash(git show *),Bash(git status *),Bash(git log *),Bash(git grep *)${checks.map(c => `,Bash(${c}),Bash(${c} *)`).join('')}${edits.map(tool => `,${tool}`).join('')}${web ? ',WebSearch,WebFetch' : ''}`);
+    args.push('--tools', `Read,Glob,Grep,Bash${writes ? ',Write,Edit' : ''}${web ? ',WebSearch,WebFetch' : ''}`, '--allowedTools', `${allowed}${edits.map(tool => `,${tool}`).join('')}${web ? ',WebSearch,WebFetch' : ''}`);
   }
   return args;
 }
