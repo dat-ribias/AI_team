@@ -849,6 +849,8 @@
   "ui.evidence.selfTests": "AI が申告したテスト",
   "ui.evidence.openLog": "ログを開く",
   "ui.evidence.exit": "終了コード: {code}",
+  "ui.evidence.targeted": "対象テストのみ（フルスイートではない）",
+  "ui.evidence.targetedFiles": "実行したファイル: {files}",
   "ui.evidence.seconds": "{n} 秒",
   "ui.evidence.selectJob": "ジョブを選択して検証記録を表示してください。",
   "ui.evidence.empty": "このジョブの検証記録はまだありません。",
