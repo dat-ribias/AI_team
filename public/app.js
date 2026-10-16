@@ -1058,7 +1058,7 @@ async function loadBaseBranches() {
     $('base-branch').disabled = false;
   } catch (e) { if (request === baseBranchesRequest) { $('base-branch-error').textContent = e.message; $('base-branch-error').hidden = false; } }
 }
-let mergeJob, mergeCheck, mergeRequest = 0, mergeSending = false;
+let mergeJob, mergeCheck, mergeRequest = 0, mergeSending = false, resyncSending = false;
 function mergeTarget() {
   const type = document.querySelector('input[name="merge-target"]:checked')?.value || 'base';
   return { type, branch: type === 'new' ? $('merge-new-branch').value.trim() : type === 'existing' ? $('merge-branch').value : state?.jobs?.find(j => j.id === mergeJob)?.baseBranch };
@@ -1066,9 +1066,12 @@ function mergeTarget() {
 function updateMergeButton() {
   const c = mergeCheck, checks = c?.checks, target = mergeTarget();
   $('merge-go').disabled = mergeSending || !checks || c?.acceptance?.required && !c.acceptance.ok || !['tested', 'reviewed', 'verified', 'baseUnchanged', 'ready'].every(key => checks[key]) || !!c?.target?.error || target.type !== 'base' && (!c?.target || !target.branch) || !!c?.pendingMerge && c.pendingMerge.passed !== true || !!c?.needsConfirm && $('merge-confirm').value.trim() !== String(c.code);
+  $('merge-go').disabled ||= resyncSending;
+  $('merge-go').title = $('merge-go').disabled ? t(checks?.baseUnchanged === false ? 'ui.merge.blockedBase' : 'ui.merge.notStarted') : '';
 }
 async function refreshMergeCheck() {
   const id = mergeJob, target = mergeTarget(), request = ++mergeRequest;
+  $('merge-error').textContent = ''; $('merge-error').hidden = true;
   mergeCheck = null; updateMergeButton();
   $('merge-branch').disabled = target.type !== 'existing'; $('merge-new-branch').disabled = target.type !== 'new';
   const c = await api(`jobs/${encodeURIComponent(id)}/merge-check?target=${encodeURIComponent(target.type)}&branch=${encodeURIComponent(target.branch || '')}`);
@@ -1077,7 +1080,33 @@ async function refreshMergeCheck() {
   const checks = [...(c.acceptance?.required ? [[t('ui.results.accepted'), c.acceptance.ok]] : []), [t('ui.merge.tested'), c.checks?.tested], [t(c.checks?.reviewSkipped ? 'ui.merge.reviewSkipped' : 'ui.merge.reviewed'), c.checks?.reviewed], [t(c.checks?.verifySkipped ? 'ui.merge.verifySkipped' : 'ui.merge.verified'), c.checks?.verified], [t('ui.merge.baseUnchanged', { branch }), c.checks?.baseUnchanged]];
   const evidence = c.evidence, tests = Array.isArray(evidence?.controllerTests) ? evidence.controllerTests : [], files = Array.isArray(evidence?.files) ? evidence.files.reduce((n, item) => n + (item.files?.length || 0), 0) : evidence?.files ?? 0;
   const p = c.pendingMerge;
+  const resync = c.checks?.baseUnchanged === false, recheck = resync || ['tested', 'reviewed', 'verified'].some(key => c.checks?.[key] === false);
+  const busyTests = state.jobs.filter(j => j.id !== id && j.status === 'running' && j.stage === 'test').length;
   $('merge-check').innerHTML = `<p>${esc(t('ui.merge.summary', { code: c.code, branch, files: c.files, added: c.added, removed: c.removed }))}</p><p>${esc(t('ui.merge.risk'))} <b class="${c.risk === 'high' ? 'risk-high' : ''}">${esc(t('ui.risk.' + c.risk))}</b></p>${c.target?.mode ? `<p>${esc(t('ui.merge.targetMode'))}: <b>${esc(t('ui.merge.targetMode.' + c.target.mode))}</b></p>` : ''}${c.target?.error || target.type !== 'base' && !c.target ? `<p class="error-box" role="alert">${esc(c.target?.error || t('ui.merge.targetUnavailable'))}</p>` : ''}<ul class="check-list">${checks.map(([label, ok]) => `<li class="${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✗'} ${esc(label)}</li>`).join('')}${(c.reasons || []).map(reason => `<li class="bad">⚠ ${esc(reason)}</li>`).join('')}</ul>${evidence ? `<section class="merge-evidence"><h3>${esc(t('ui.evidence.title'))} <code>${esc(evidence.revision)}</code></h3><p>${esc(t('ui.evidence.controller'))}: ${esc(t('ui.evidence.testCounts', { pass: tests.filter(x => x.code === 0).length, fail: tests.filter(x => x.code !== 0).length }))} · ${esc(t('ui.evidence.fileCount', { n: files }))}</p>${(evidence.aiChecks || []).map(report => `<p><span class="tag">${esc(t('ui.evidence.ai'))}</span> ${esc(report.stage)} · ${esc(names[report.agent] || report.agent)} · <b>${esc(report.verdict || '—')}</b></p>`).join('')}${evidence.warnNoControllerTest ? `<p class="evidence-warning" role="alert">${esc(t('ui.evidence.noControllerTest'))}</p>` : ''}<button type="button" id="merge-open-evidence">${esc(t('ui.evidence.view'))}</button></section>` : ''}${p ? `<section class="merge-pending"><h3>${esc(t('ui.merge.secondApproval'))}</h3><p><code>${esc(p.commit)}</code> · ${esc(p.target?.branch || p.target || branch)}</p><p class="${p.passed ? 'evidence-pass' : 'evidence-fail'}">${esc(t(p.passed ? 'ui.merge.pendingPassed' : 'ui.merge.pendingFailed'))}</p><div id="merge-pending-tests"></div><pre class="merge-pending-diff">${esc(p.diff || '')}</pre></section>` : ''}`;
+  if (busyTests) $('merge-check').innerHTML += `<p class="evidence-warning merge-busy">${esc(t('ui.merge.busyTests', { n: busyTests }))}</p>`;
+  if (recheck) {
+    $('merge-check').innerHTML += `<section class="merge-resync"><p>${esc(t(resync ? 'ui.merge.resyncHint' : 'ui.merge.recheckHint', { branch: job?.baseBranch || branch }))}</p><button type="button" id="merge-resync">${esc(t(resync ? 'ui.merge.resync' : 'ui.merge.recheck'))}</button></section>`;
+    const button = $('merge-resync');
+    button.disabled = resyncSending || mergeSending || !['ready', 'paused', 'blocked'].includes(job?.status);
+    button.onclick = async () => {
+      if (button.disabled || resyncSending || mergeSending || !['ready', 'paused', 'blocked'].includes(state.jobs.find(j => j.id === id)?.status)) return;
+      resyncSending = true; button.disabled = true; updateMergeButton();
+      $('merge-error').textContent = ''; $('merge-error').hidden = true;
+      try {
+        await api(`jobs/${encodeURIComponent(id)}/control`, { action: resync ? 'sync' : 'review' });
+        await refresh();
+        const job = state.jobs.find(j => j.id === id);
+        $('merge-dialog').close();
+        notice(t('ui.merge.resyncStarted', { status: `${job?.status || 'queued'}/${job?.stage || 'test'}` }));
+      } catch (e) {
+        $('merge-error').textContent = e.message; $('merge-error').hidden = false;
+      } finally {
+        resyncSending = false;
+        button.disabled = !['ready', 'paused', 'blocked'].includes(state.jobs.find(j => j.id === id)?.status);
+        updateMergeButton();
+      }
+    };
+  }
   $('merge-open-evidence')?.addEventListener('click', () => { $('merge-dialog').close(); selected = id; document.querySelector('[data-tab="evidence"]').click(); });
   $('merge-confirm-label').textContent = t('ui.merge.confirm', { code: c.code });
   $('merge-confirm').hidden = $('merge-confirm-label').hidden = !c.needsConfirm;
@@ -1090,6 +1119,7 @@ async function refreshMergeCheck() {
 }
 async function openMerge() {
   mergeJob = selected; mergeCheck = null; ++mergeRequest;
+  $('merge-error').textContent = ''; $('merge-error').hidden = true;
   const job = state.jobs.find(j => j.id === mergeJob);
   document.querySelector('input[name="merge-target"][value="base"]').checked = true;
   $('merge-target-base').textContent = t('ui.merge.targetBase', { branch: job?.baseBranch || '—' });
@@ -1704,7 +1734,10 @@ $('merge-go').onclick = () => attempt(async () => {
     await refresh();
     const job = state?.jobs?.find(j => j.id === id);
     if (job?.pendingMerge || result?.pendingMerge || result?.job?.pendingMerge) await refreshMergeCheck();
+    else if (job?.status === 'ready' || result?.job?.status === 'ready' || result?.status === 'ready') throw new Error(t('ui.merge.notStarted'));
     else $('merge-dialog').close();
+  } catch (e) {
+    $('merge-error').textContent = e.message; $('merge-error').hidden = false;
   } finally { mergeSending = false; $('merge-target').disabled = false; updateMergeButton(); }
 });
 $('close-login').onclick = () => $('login-dialog').close();

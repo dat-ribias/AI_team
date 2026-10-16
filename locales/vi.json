@@ -1015,5 +1015,13 @@
   "ui.settings.oracleHint": "Lead có thể hỏi ChatGPT web bằng quota web; nếu lỗi sẽ tự bỏ qua.",
   "ui.settings.oracleUnavailable": "Cần cấu hình tài khoản ChatGPT web và server hỗ trợ để bật.",
   "ui.ev.ORACLE_QUESTION": "Hỏi ChatGPT web",
-  "ui.ev.ORACLE_ANSWER": "ChatGPT web trả lời"
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web trả lời",
+  "ui.merge.resync": "Đồng bộ master & kiểm tra lại",
+  "ui.merge.resyncHint": "{branch} đã có commit mới; hệ thống sẽ gộp {branch} vào nhánh rồi test/review/verify lại (khoảng 20–30 phút).",
+  "ui.merge.recheck": "Kiểm tra lại",
+  "ui.merge.recheckHint": "Hệ thống sẽ chạy lại test/review/verify (khoảng 20–30 phút).",
+  "ui.merge.resyncStarted": "Đã lên lịch kiểm tra lại: {status}.",
+  "ui.merge.notStarted": "Không thể bắt đầu merge. Hãy kiểm tra các điều kiện hoặc kiểm tra lại job.",
+  "ui.merge.blockedBase": "Nhánh gốc đã có commit mới. Hãy đồng bộ và kiểm tra lại.",
+  "ui.merge.busyTests": "Đang có {n} job chạy test, nên chờ"
 }

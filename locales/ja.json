@@ -1015,5 +1015,13 @@
   "ui.settings.oracleHint": "Lead は web の利用枠で ChatGPT web に相談できます。エラー時はスキップします。",
   "ui.settings.oracleUnavailable": "有効にするには ChatGPT web アカウントの設定と対応サーバーが必要です。",
   "ui.ev.ORACLE_QUESTION": "ChatGPT web への質問",
-  "ui.ev.ORACLE_ANSWER": "ChatGPT web の回答"
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web の回答",
+  "ui.merge.resync": "master を同期して再チェック",
+  "ui.merge.resyncHint": "{branch} に新しいコミットがあります。{branch} をこのブランチにマージし、テスト・レビュー・検証を再実行します（約20〜30分）。",
+  "ui.merge.recheck": "再チェック",
+  "ui.merge.recheckHint": "テスト・レビュー・検証を再実行します（約20〜30分）。",
+  "ui.merge.resyncStarted": "再チェックを予約しました: {status}。",
+  "ui.merge.notStarted": "マージを開始できませんでした。条件を確認するか、このジョブを再チェックしてください。",
+  "ui.merge.blockedBase": "ベースブランチに新しいコミットがあります。同期して再チェックしてください。",
+  "ui.merge.busyTests": "{n} 件のジョブがテスト中です。待つことをおすすめします"
 }

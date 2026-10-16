@@ -1015,5 +1015,13 @@
   "ui.settings.oracleHint": "Lead can ask ChatGPT web using web quota; errors are skipped automatically.",
   "ui.settings.oracleUnavailable": "Configure a ChatGPT web account and use a supported server to enable.",
   "ui.ev.ORACLE_QUESTION": "Ask ChatGPT web",
-  "ui.ev.ORACLE_ANSWER": "ChatGPT web answer"
+  "ui.ev.ORACLE_ANSWER": "ChatGPT web answer",
+  "ui.merge.resync": "Sync master & recheck",
+  "ui.merge.resyncHint": "{branch} has new commits; the system will merge {branch} into this branch and rerun tests, review and verification (about 20–30 minutes).",
+  "ui.merge.recheck": "Recheck",
+  "ui.merge.recheckHint": "The system will rerun tests, review and verification (about 20–30 minutes).",
+  "ui.merge.resyncStarted": "Recheck scheduled: {status}.",
+  "ui.merge.notStarted": "Merge did not start. Check the requirements or recheck this job.",
+  "ui.merge.blockedBase": "The base branch has new commits. Sync and recheck first.",
+  "ui.merge.busyTests": "{n} jobs are running tests; consider waiting"
 }
