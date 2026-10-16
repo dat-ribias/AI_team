@@ -766,6 +766,8 @@ function drawFlow() {
   const runs = readonly ? [] : runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
   const active = new Set(job?.status === 'running' && runs.length ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', challenge: 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
   if (challenge) { live.delete('reviewer'); live.add('manager'); active.delete('tests>reviewer'); active.delete('rework'); active.add('user>manager'); }
+  if (!readonly && job?.status === 'running' && job.stage === 'test' && !runs.length) { live.add('tests'); active.add('b>tests'); }
+  if (!readonly && job?.status === 'ready') live.add('merge');
   const edge = (a, b, cls, label = '') => {
     const A = nodes[a], B = nodes[b]; if (!A || !B) return '';
     const x1 = A.x + A.w, x2 = B.x, mx = (x1 + x2) / 2, on = active.has(`${a}>${b}`) || active.has('b>tests') && b === 'tests' && cls.includes('used');
@@ -1620,7 +1622,7 @@ $('token-nav').onclick = () => view('token');
 $('overview').onclick = () => view('work');
 $('security-nav').onclick = () => view('security');
 $('quota-nav').onclick = () => attempt(async () => { view('members'); recheckMembers(); $('quota-history').textContent = JSON.stringify(await api('quota-history'), null, 2); });
-$('refresh-quota').onclick = () => attempt(async () => { const r = await api('quota', {}); notice(r.running && r.total ? t('ui.quota.checkingProgress', { done: r.done, total: r.total }) : t('ui.members.refreshing')); });
+$('refresh-quota').onclick = () => attempt(async () => { await api('quota', {}); });
 $('add-member').onclick = () => { if (state.demo) { location.href = 'http://127.0.0.1:3333/?members=1&add=1'; return; } providerHint(); $('member-dialog').showModal(); };
 $('member-provider').onchange = providerHint;
 $('close-member').onclick = () => $('member-dialog').close();
