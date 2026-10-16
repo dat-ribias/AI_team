@@ -806,6 +806,38 @@ export class Team extends EventEmitter {
       storage: this.storage(),
     };
   }
+  statusSummary({ project, status, limit = 50, cursor = 0 } = {}) {
+    limit = Math.max(1, Math.min(200, Math.trunc(Number(limit)) || 1));
+    cursor = Number.isFinite(Number(cursor)) ? Math.max(0, Math.trunc(Number(cursor))) : 0;
+    const statuses = status ? String(status).split(',').map(s => s.trim()) : [];
+    const jobs = this.jobs().filter(j => (!project || j.project === project) && (!statuses.length || statuses.includes(j.status)));
+    const busy = this.busyAgents();
+    return { total: jobs.length, cursor, nextCursor: cursor + limit < jobs.length ? cursor + limit : null,
+      jobs: jobs.slice(cursor, cursor + limit).map(j => this.jobSummary(j)),
+      agents: this.config.agents.map(a => ({ id: a.id, state: busy.has(a.id) ? 'working' : 'idle', quotaPct: this.remaining(a.id) })),
+      resources: { active: this.runningSlots(), maxAgents: this.config.resources?.maxAgents ?? 3, maxConcurrentTests: this.testLimit(), waitingReason: this.waitingReason ?? null },
+    };
+  }
+  jobSummary(j) {
+    const progress = this.db.prepare(`SELECT MAX(json_extract(body, '$.timestamp')) AS timestamp FROM events WHERE job=?
+      AND json_extract(body, '$.type') IN ('RESULT', 'REVIEW_RESULT', 'TEST_RESULT', 'READY_FOR_MERGE')
+      AND (json_extract(body, '$.type') != 'TEST_RESULT' OR COALESCE(json_extract(body, '$.details.skipped'), 0) = 0)`).get(j.id);
+    const reason = j.blockedReason ? [j.blockedReason.kind, j.blockedReason.resetsAt].filter(Boolean).join(' ') : j.waiting || j.questions?.[0] || j.error;
+    const next = j.status === 'waiting' && j.planGate ? 'approve_plan' : j.status === 'waiting' && j.questions?.length ? 'answer_questions'
+      : j.status === 'blocked' ? (j.blockedReason?.kind === 'quota' ? 'wait_quota' : 'diagnose')
+      : j.status === 'paused' ? 'resume' : j.status === 'ready' ? 'review_merge' : 'none';
+    return { id: j.id, project: j.project ?? null, sessionId: j.sessionId ?? null, kind: j.kind ?? null, title: jobTitle(j).slice(0, 200), status: j.status, stage: j.stage ?? null,
+      round: j.round ?? null, reason: reason ? String(reason).slice(0, 200) : null, lastProgressAt: progress.timestamp ?? null,
+      revision: j.revision ?? null, base: j.base ?? null, baseBranch: j.baseBranch ?? null, branch: j.branch ?? null, next };
+  }
+  jobDetail(id, part) {
+    if (!['summary', 'reports', 'tasks', 'job'].includes(part)) throw new Error('Invalid job detail part');
+    const job = this.get(id);
+    if (part === 'summary') return this.jobSummary(job);
+    if (part === 'reports') return (job.reports || []).map(r => ({ stage: r.stage, agent: r.agent, task: r.task, verdict: r.verdict, summary: String(r.summary || '').slice(0, 2000), findings: r.findings || [] }));
+    if (part === 'tasks') return (job.tasks || []).map(t => ({ agent: t.agent, instruction: String(t.instruction || '').slice(0, 500), done: t.done, dependsOn: t.dependsOn }));
+    return job;
+  }
   comparisonSignature(project, sessionId) {
     return hash(JSON.stringify({ agents: this.config.agents, pipeline: this.config.pipeline, roles: this.config.roleCaps, project: this.project(project), session: this.sessions().find(s => s.id === sessionId)?.access, peerDialogue: this.config.peerDialogue, sandbox: this.config.codexWindowsSandbox, resume: this.config.resumeCodexTasks }));
   }

@@ -183,10 +183,12 @@ const server = createServer(async (req, res) => {
       return send(res, 202, { refreshing: true, ...(team.quotaCheck ? { done: team.quotaCheck.done, total: team.quotaCheck.total, running: team.quotaCheck.running } : {}) });
     }
     if (req.method === 'GET' && url.pathname === '/api/quota-history') return send(res, 200, team.db.prepare('SELECT agent,body FROM quota_history ORDER BY seq DESC LIMIT 400').all().map(r => ({ agent: r.agent, ...JSON.parse(r.body) })));
-    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer|evidence|evidence-file))?$/.exec(url.pathname);
+    if (req.method === 'GET' && url.pathname === '/api/status') return send(res, 200, team.statusSummary(Object.fromEntries(url.searchParams)));
+    const match = /^\/api\/jobs\/([a-z0-9-]+)(?:\/(events|diff|control|merge|merge-check|export|transfer|evidence|evidence-file|detail))?$/.exec(url.pathname);
     if (match) {
       const [, id, action] = match;
       if (req.method === 'GET' && !action) return send(res, 200, team.get(id));
+      if (req.method === 'GET' && action === 'detail') return send(res, 200, team.jobDetail(id, url.searchParams.get('part')));
       if (req.method === 'GET' && action === 'events') return send(res, 200, team.events(id, Math.max(0, Number(url.searchParams.get('after')) || 0)));
       if (req.method === 'GET' && action === 'diff') return send(res, 200, await team.diff(id));
       if (req.method === 'GET' && action === 'evidence') return send(res, 200, team.evidence(id));
