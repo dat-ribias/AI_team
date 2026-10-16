@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { removeTempDir } from '../src/preview.js';
 
 test('removeTempDir logs and returns false when EPERM persists', async () => {
   let attempts = 0;
   const logs = [];
   const removed = await removeTempDir('locked-profile', {
-    rm(dir, options) {
+    async rm(dir, options) {
       attempts++;
       assert.equal(dir, 'locked-profile');
       assert.deepEqual(options, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
@@ -27,7 +28,7 @@ test('removeTempDir with retries=0 attempts and logs exactly once', async () => 
   let attempts = 0;
   const logs = [];
   const removed = await removeTempDir('locked-profile', {
-    rm() { attempts++; throw Object.assign(new Error('locked'), { code: 'EPERM' }); },
+    async rm() { attempts++; throw Object.assign(new Error('locked'), { code: 'EPERM' }); },
     retries: 0,
     log: line => logs.push(line),
   });
@@ -41,7 +42,7 @@ test('removeTempDir returns false after exhausting EBUSY and ENOTEMPTY retries',
     let attempts = 0;
     const logs = [];
     assert.equal(await removeTempDir('locked-profile', {
-      rm() { attempts++; throw Object.assign(new Error('locked'), { code }); },
+      async rm() { attempts++; throw Object.assign(new Error('locked'), { code }); },
       retries: 2,
       delayMs: 1,
       log: line => logs.push(line),
@@ -55,7 +56,7 @@ test('removeTempDir retries transient filesystem locks', async () => {
   for (const code of ['EPERM', 'EBUSY', 'ENOTEMPTY']) {
     let attempts = 0;
     assert.equal(await removeTempDir('profile', {
-      rm() { if (++attempts <= 2) throw Object.assign(new Error('locked'), { code }); },
+      async rm() { if (++attempts <= 2) throw Object.assign(new Error('locked'), { code }); },
       delayMs: 1,
       log() { assert.fail('successful cleanup must not warn'); },
     }), true);
@@ -67,14 +68,39 @@ test('removeTempDir propagates unrelated filesystem errors', async () => {
   const error = Object.assign(new Error('invalid'), { code: 'EINVAL' });
   let attempts = 0;
   await assert.rejects(removeTempDir('profile', {
-    rm() { attempts++; throw error; },
+    async rm() { attempts++; throw error; },
     delayMs: 1,
     log() { assert.fail('unrelated errors must propagate'); },
   }), actual => actual === error);
   assert.equal(attempts, 1);
 });
 
-test('removeTempDir removes a real directory with rmSync', async t => {
+test('removeTempDir keeps the event loop responsive while EPERM persists', async () => {
+  let lastTick = performance.now();
+  let maxGap = 0;
+  let ticks = 0;
+  const interval = setInterval(() => {
+    const now = performance.now();
+    maxGap = Math.max(maxGap, now - lastTick);
+    lastTick = now;
+    ticks++;
+  }, 10);
+  try {
+    assert.equal(await removeTempDir('locked-profile', {
+      async rm() { throw Object.assign(new Error('locked'), { code: 'EPERM' }); },
+      retries: 10,
+      delayMs: 20,
+      log() {},
+    }), false);
+    maxGap = Math.max(maxGap, performance.now() - lastTick);
+    assert(ticks > 0, 'interval must tick during cleanup');
+    assert(maxGap < 50, `event loop tick gap was ${maxGap.toFixed(1)}ms`);
+  } finally {
+    clearInterval(interval);
+  }
+});
+
+test('removeTempDir removes a real directory with fs.promises.rm', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ai-team-preview-cleanup-'));
   t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
   writeFileSync(join(dir, 'file.txt'), 'cleanup fixture', 'utf8');

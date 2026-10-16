@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { rm as rmAsync } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
@@ -9,9 +10,9 @@ import { msg } from './i18n.js';
 import { DEMO } from './capabilities.js';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
-export async function removeTempDir(dir, { rm = rmSync, retries = 20, delayMs = 100, log = console.warn } = {}) {
+export async function removeTempDir(dir, { rm = rmAsync, retries = 20, delayMs = 100, log = console.warn } = {}) {
   for (let attempt = 0; ; attempt++) {
-    try { rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); return true; }
+    try { await rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); return true; }
     catch (error) {
       if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(error.code)) throw error;
       if (attempt >= retries) { log(`[preview] could not remove temp dir ${dir}: ${error.code}`); return false; }
