@@ -147,6 +147,15 @@ export function routeGoal(goal, mode = 'full', attachments = 0) {
   if (risky) return { fast: false, kind, reason: `risky keyword: ${risky[0]}` };
   return { fast: true, kind, reason: 'short, no risky keywords' };
 }
+export function selectTargetedTests(changed, testFiles) {
+  if (!changed.length || changed.some(path => ['src/team.js', 'src/server.js', 'package.json', 'test/system.test.js'].includes(path))) return null;
+  const isTest = path => /^test\/[^/]+\.test\.js$/.test(path);
+  const sources = changed.filter(path => !isTest(path)).map(path => posix.basename(path));
+  // ponytail: basename matching can miss indirect dependencies or match unrelated files with the same name.
+  const selected = testFiles.filter(({ path, text }) => isTest(path) && path !== 'test/system.test.js'
+    && (changed.includes(path) || sources.some(name => text.includes(name)))).map(({ path }) => path);
+  return selected.length ? [...new Set(selected)].sort() : null;
+}
 // Nén output lệnh trước khi đưa lại cho AI: giữ dòng lỗi + phần cuối (kiểu context-compress, không cần thư viện).
 export function compressOutput(text, max = 4000) {
   const lines = String(text).split(/\r?\n/).filter(l => l.trim());
@@ -1890,8 +1899,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         },
       };
     };
-    const execute = async (command, testCwd, label) => {
-      this.event(job.id, 'controller', manager, 'TEST_START', (label ? `[${label}] ` : '') + command.join(' '));
+    const execute = async (command, testCwd, label, targeted) => {
+      this.event(job.id, 'controller', manager, 'TEST_START', (targeted ? '[targeted] ' : '') + (label ? `[${label}] ` : '') + command.join(' '), targeted ? { targeted } : undefined);
       const started = Date.now(), chunks = [], maxBytes = (this.config.evidenceMaxMB ?? 50) * 2 ** 20;
       const output = parser(testCwd);
       let logBytes = 0, log = null;
@@ -1920,16 +1929,16 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         job.evidence = [...(job.evidence || []), { revision, stage: 'test', agent: 'controller', at: now(), dir, files, skipped }].slice(-200);
       } catch (e) { this.event(job.id, 'controller', 'user', 'EVIDENCE_WARNING', e.message); }
       await this.captureEvidence(job, testCwd, 'test', 'controller', revision);
-      this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision, ms, log });
-      job.checkResults = [...(job.checkResults || []), scrub({ command, project: label || job.project, code: result.code, revision, ms, log, output: compressOutput(redact(result.stderr + result.stdout)), at: now() })].slice(-100);
+      this.event(job.id, 'controller', manager, 'TEST_RESULT', `Exit ${result.code}`, { command, code: result.code, revision, ms, log, ...(targeted ? { targeted } : {}) });
+      job.checkResults = [...(job.checkResults || []), scrub({ command, project: label || job.project, code: result.code, revision, ms, log, ...(targeted ? { targeted } : {}), output: compressOutput(redact(result.stderr + result.stdout)), at: now() })].slice(-100);
       return { ...result, parsed: output.finish() };
     };
     let acquired = false;
     try {
       await this.acquireTest(job, signal); acquired = true;
       for (const test of tests) {
-        const { command, cwd: testCwd = cwd, label } = Array.isArray(test) ? { command: test } : test;
-        const result = await execute(command, testCwd, label);
+        const { command, cwd: testCwd = cwd, label, targeted } = Array.isArray(test) ? { command: test } : test;
+        const result = await execute(command, testCwd, label, targeted);
         if (result.code !== 0) {
           const { names, valid, required } = result.parsed;
           const retryCommand = command.filter((arg, i) => !arg.startsWith('--test-name-pattern=') && arg !== '--test-name-pattern' && command[i - 1] !== '--test-name-pattern');
@@ -1940,7 +1949,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           retryCommand.splice(retryCommand.indexOf('--test') + 1, 0, ...patterns);
           // A single union avoids Node's repeated-pattern semantics; leave room for Windows argv quoting.
           if (result.code === 1 && valid && /^node(?:\.exe)?$/i.test(basename(command[0])) && command.includes('--test') && names.length && JSON.stringify(retryCommand).length <= 24000) {
-            const retry = await execute(retryCommand, testCwd, label);
+            const retry = await execute(retryCommand, testCwd, label, targeted);
             // Node can count a successful file wrapper when no named test matched.
             if (retry.code === 0 && retry.parsed.valid && retry.parsed.summary.pass > 0 && retry.parsed.summary.fail === 0
               && [...required].every(([name, count]) => (retry.parsed.passed.get(name) || 0) >= count)) {
@@ -1960,7 +1969,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   async testJob(job) {
     // Test của repo liên kết chạy trong worktree của nó; repo chính chạy sau cùng ở job.worktree.
-    const tests = [...(job.linked || []).flatMap(l => this.project(l.project).tests.map(command => ({ command, cwd: l.worktree, label: l.project }))), ...this.project(job.project).tests.map(command => ({ command, cwd: job.worktree }))];
+    let tests = [...(job.linked || []).flatMap(l => this.project(l.project).tests.map(command => ({ command, cwd: l.worktree, label: l.project }))), ...this.project(job.project).tests.map(command => ({ command, cwd: job.worktree }))];
     const manager = (job.roster || roster(this.config)).manager;
     // Project không có lệnh test (tài liệu, cấu hình, script nhỏ...): bỏ qua bước test, cổng rủi ro sẽ buộc AI review thay thế.
     if (!tests.length) {
@@ -1968,6 +1977,15 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       this.event(job.id, 'controller', manager, 'TEST_RESULT', msg("srv.team.chua_cau_hinh_lenh_kiem_thu"), { skipped: true, revision: job.revision });
       await this.captureEvidence(job, job.worktree, 'test', 'controller', job.revision);
       return true;
+    }
+    if ((job.fast || job.rigor === 'light') && job.risk === 'low' && !job.linked?.length
+      && tests.every(({ command }) => /^node(?:\.exe)?$/i.test(basename(command[0])) && command[1] === '--test')) {
+      const changed = (await git(job.worktree, ['diff', '--no-ext-diff', '--name-only', '-z', job.base, job.revision])).split('\0').filter(Boolean);
+      const testDir = join(job.worktree, 'test');
+      const testFiles = existsSync(testDir) ? readdirSync(testDir, { withFileTypes: true }).filter(file => file.isFile() && /^[^/]+\.test\.js$/.test(file.name))
+        .map(file => ({ path: `test/${file.name}`, text: readFileSync(join(testDir, file.name), 'utf8') })) : [];
+      const files = selectTargetedTests(changed, testFiles);
+      if (files) tests = [{ command: ['node', '--test', '--test-timeout=60000', ...files], cwd: job.worktree, targeted: files }];
     }
     if (!await this.runTests(job, job.worktree, job.revision, tests)) return false;
     if (await git(job.worktree, ['status', '--porcelain']) || await git(job.worktree, ['rev-parse', 'HEAD']) !== job.revision) throw new Error(msg("srv.team.tests_lam_thay_doi_worktree_khong"));
