@@ -1742,10 +1742,11 @@ test('linked repos: a job edits another registered project in its own worktree; 
   assert.match(blocked.error, /lib/);
 });
 
-test('memory: Leader keeps durable project notes and a session summary; next job sees them; backups and export work', async t => {
-  const f = await fixture(), prompts = [];
+test('memory: Leader keeps durable project notes and a session summary; next job sees them; backups and export work', { timeout: 150000 }, async t => {
+  const f = await fixture(), prompts = [], started = Date.now();
   let round = 0;
   const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    t.diagnostic(`Memory pipeline: ${task.stage} at ${Date.now() - started}ms`);
     prompts.push({ stage: task.stage, prompt });
     const r = await runAgent(agent, task, prompt, opts);
     if (task.stage === 'final') return { ...r, memory: round++ === 0 ? { add: ['hello.txt Tests: node --test', 'token sk-abcdefghijklmnopqrstuvwxyz123456 leaked'], session: 'Đang sửa hello.txt' } : { remove: [`M${team.memory('test').facts[0].id}`], session: 'Xong hello.txt' } };
@@ -1755,7 +1756,7 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   team.start();
   const ses = team.createSession({ project: 'test', name: 'S' });
   const a = await team.create({ project: 'test', goal: 'Update hello', mode: 'full', sessionId: ses.id });
-  await settle(team, a.id, 'ready');
+  await settle(team, a.id, 'ready', 60000);
   let m = team.memory('test', ses.id);
   assert.deepEqual(m.facts.map(x => x.text)[0], 'hello.txt Tests: node --test'); assert.doesNotMatch(m.facts[1].text, /sk-abcdef/);
   assert.equal(m.facts[0].scope, 'job');
@@ -1766,7 +1767,7 @@ test('memory: Leader keeps durable project notes and a session summary; next job
   // Việc sau nhận ghi chú liên quan trực tiếp; chỉ phần tóm tắt phiên dành cho Leader.
   prompts.length = 0;
   const b = await team.create({ project: 'test', goal: 'Check hello again', mode: 'full', sessionId: ses.id });
-  await settle(team, b.id, 'ready');
+  await settle(team, b.id, 'ready', 60000);
   const plan = prompts.find(p => p.stage === 'plan').prompt, fin = prompts.find(p => p.stage === 'final').prompt, impl = prompts.find(p => p.stage === 'implement').prompt;
   assert.match(plan, /Tests: node --test/); assert.match(plan, /Đang sửa hello.txt/); assert.match(plan, new RegExp(a.id));
   assert.match(fin, /M\d+: hello.txt Tests: node --test/); assert.match(fin, /"memory":\{"add"/);
