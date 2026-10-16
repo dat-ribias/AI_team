@@ -1368,22 +1368,36 @@ test('Gemini/Antigravity get the prompt via a file (Windows command-line limit) 
 });
 
 test('review/verify run the project checks themselves in a detached worktree', async t => {
-  const f = await fixture(); f.config.demo = false;
-  f.config.agents = f.config.agents.map(a => ({ ...a, provider: 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
-  const seen = [];
-  const team = new Team(f.config, f.data, { runAgent: (agent, task, prompt, opts) => {
-    seen.push({ stage: task.stage, checks: task.checks, worktree: task.worktree, prompt });
-    if (task.stage === 'review') writeFileSync(join(task.worktree, 'coverage.tmp'), 'x'); // check sinh file tạm: không được chặn
-    return runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
-  }, readQuota: async () => ({ buckets: [] }) });
-  t.after(() => team.close());
-  const job = await team.create({ project: 'test', goal: 'Update hello' });
-  const ready = await settle(team, job.id, 'ready');
-  const review = seen.find(s => s.stage === 'review'), impl = seen.find(s => s.stage === 'implement');
-  assert.deepEqual(review.checks, f.config.projects[0].tests);
-  assert.notEqual(review.worktree, ready.worktree);
-  assert.match(review.prompt, /Run the commands in "checks" yourself/);
-  assert.deepEqual(impl.checks, []);
+  for (const [provider, shell] of [['codex', true], ['claude', true], ['claude', false]]) {
+    const f = await fixture(); f.config.demo = false;
+    f.config.pipeline.builders = ['codex-2'];
+    f.config.agents = f.config.agents.map(a => ({ ...a, provider: a.id === 'codex-2' ? provider : 'codex', home: mkdtempSync(join(tmpdir(), 'h-')) }));
+    f.config.projects[0].access = { shell: shell ? ['*'] : f.config.agents.filter(a => a.id !== 'codex-2').map(a => a.id) };
+    const seen = [];
+    const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+      seen.push({ agent: agent.id, provider: agent.provider, stage: task.stage, checks: task.checks, worktree: task.worktree, prompt });
+      if (['review', 'verify'].includes(task.stage)) assert.equal((await run(['git'], ['-C', task.worktree, 'rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim(), 'HEAD');
+      if (task.stage === 'review') writeFileSync(join(task.worktree, 'coverage.tmp'), 'x'); // check sinh file tạm: không được chặn
+      const report = await runAgent({ ...agent, provider: 'mock' }, task, prompt, opts);
+      if (task.stage === 'plan') report.flow = { steps: ['review', 'verify'] };
+      return report;
+    }, readQuota: async () => ({ buckets: [] }) });
+    t.after(() => team.close());
+    const job = await team.create({ project: 'test', goal: 'Update hello' });
+    const ready = await settle(team, job.id, 'ready');
+    for (const stage of ['review', 'verify']) {
+      const checker = seen.find(s => s.stage === stage);
+      assert(checker, `${provider}: missing ${stage}`);
+      assert.deepEqual(checker.checks, f.config.projects[0].tests);
+      assert.notEqual(checker.worktree, ready.worktree);
+      assert.match(checker.prompt, /Run the commands in "checks" yourself/);
+    }
+    const impl = seen.find(s => s.stage === 'implement' && s.agent === 'codex-2' && s.provider === provider);
+    assert(impl, `missing ${provider} builder`);
+    if (provider === 'codex') assert.deepEqual(impl.checks, []);
+    else assert.deepEqual(impl.checks, shell ? f.config.projects[0].tests : []);
+    t.diagnostic(JSON.stringify({ provider, shell, calls: seen.map(({ agent, provider, stage, checks }) => ({ agent, provider, stage, checks })) }));
+  }
 });
 
 test('agy quota counts only the bucket group of the member model', async t => {
@@ -1583,10 +1597,10 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     { instruction: 'write b.txt', files: ['b.txt'], dependsOn: [], difficulty: 2 },
     { kind: 'review', dependsOn: [0] }, { kind: 'review', dependsOn: [1] }];
   const go = async (reviewVerdict) => {
-    const f = await fixture(); const calls = []; let plans = 0, nodeReviews = 0;
+    const f = await fixture(); const calls = [], started = Date.now(); let plans = 0, nodeReviews = 0;
     const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
       const r = await runAgent(agent, task, prompt, opts);
-      calls.push({ stage: task.stage, agent: agent.id, prompt });
+      calls.push({ stage: task.stage, agent: agent.id, prompt, elapsedMs: Date.now() - started });
       if (task.stage === 'plan' && plans++ === 0) { r.tasks = structuredClone(graph); r.flow = { steps: ['verify'] }; }
       if (task.stage === 'implement') {
         const entry = task.running.find(e => e.agent === agent.id && e.slot === task.slot), file = task.tasks[entry.task].files[0];
@@ -1597,8 +1611,11 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
     } });
     t.after(() => team.close());
     const job = await team.create({ project: 'test', goal: 'Update hello' });
+    t.after(() => t.diagnostic(JSON.stringify({ job: job.id, elapsedMs: Date.now() - started, calls: calls.map(({ stage, agent, elapsedMs }) => ({ stage, agent, elapsedMs })) })));
     return { team, job, calls };
   };
+  // The repair scenario can reach verify near 20s on Windows; allow final checks to finish.
+  const deadlineMs = 40000;
   // (a) 2 task → 2 review theo task → verify cuối; review cấp job bị Manager bỏ
   { const { team, job, calls } = await go(() => 'approved'); const ready = await waitForReady(team, job.id);
     const nodeRev = calls.filter(c => c.stage === 'review' && /Review ONLY this part/.test(c.prompt));
@@ -1619,6 +1636,9 @@ test('task graph: per-task review nodes review exact commits, auto-fix on failur
   // (c) luôn fail → sau 2 lần sửa thì về Leader lập kế hoạch lại (kế hoạch 2 không có node review)
   { const { team, job, calls } = await go(() => 'changes_requested'); await waitForReady(team, job.id);
     assert.equal(calls.filter(c => c.stage === 'plan').length, 2);
+    const fixes = team.events(job.id).filter(e => e.type === 'FIX_TASK');
+    for (const review of [2, 3]) assert.equal(fixes.filter(e => e.details.review === review).length, 2);
+    assert.equal(calls.filter(c => c.stage === 'review' && /Review ONLY this part/.test(c.prompt)).length, 6);
     assert(team.events(job.id).some(e => e.type === 'REWORK_REQUEST')); }
 });
 
