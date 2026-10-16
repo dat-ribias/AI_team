@@ -18,8 +18,10 @@
     </div>
   </div>
   <div class="session-bar"><select id="session-project" data-i18n-aria="ui.task.project"></select></div>
+  <button type="button" id="project-prompt-open" data-i18n="ui.prompt.project"></button>
   <div id="job-list" class="job-list"></div>
   <div class="settings">
+    <button type="button" id="system-prompt-open" data-i18n="ui.prompt.system"></button>
     <label><span data-i18n="ui.settings.language"></span><select id="lang-select"><option value="vi">Tiếng Việt</option><option value="ja">日本語</option><option value="en">English</option></select></label>
     <label data-i18n-title="ui.settings.oracleHint"><input type="checkbox" id="oracle-toggle" disabled> <span data-i18n="ui.settings.oracle"></span></label>
     <label><span data-i18n="ui.settings.theme"></span><select id="theme-select"><option value="system" data-i18n="ui.settings.themeSystem"></option><option value="dark" data-i18n="ui.settings.themeDark"></option><option value="light" data-i18n="ui.settings.themeLight"></option></select></label>
@@ -100,4 +102,5 @@
 <div id="jobs-dialog-list" class="jobs-dialog-list"></div></dialog>
 <dialog id="claim-score-dialog"><form id="claim-score-form"><div class="dialog-heading"><h2 data-i18n="ui.peer.score"></h2><button id="close-claim-score" type="button" data-i18n-aria="ui.common.close">×</button></div><p class="muted" data-i18n="ui.peer.scoreNote"></p><label for="claim-before" data-i18n="ui.peer.before"></label><select id="claim-before"><option value="unknown" data-i18n="ui.peer.unjudged"></option><option value="true" data-i18n="ui.peer.correct"></option><option value="false" data-i18n="ui.peer.incorrect"></option></select><label for="claim-after" data-i18n="ui.peer.after"></label><select id="claim-after"><option value="unknown" data-i18n="ui.peer.unjudged"></option><option value="true" data-i18n="ui.peer.correct"></option><option value="false" data-i18n="ui.peer.incorrect"></option></select><label for="claim-evidence" data-i18n="ui.peer.evidence"></label><textarea id="claim-evidence" rows="3" maxlength="500" required></textarea><button class="primary" data-i18n="ui.peer.scoreSave"></button></form></dialog>
 <dialog id="obligation-dialog"><form id="obligation-form"><div class="dialog-heading"><h2 data-i18n="ui.peer.map"></h2><button id="close-obligation" type="button" data-i18n-aria="ui.common.close">×</button></div><p class="muted" data-i18n="ui.peer.mapNote"></p><label for="obligation-task" data-i18n="ui.peer.task"></label><select id="obligation-task"></select><label for="obligation-recipient" data-i18n="ui.peer.recipient"></label><select id="obligation-recipient"></select><label for="obligation-reason" data-i18n="ui.peer.reason"></label><textarea id="obligation-reason" maxlength="2000" rows="2"></textarea><label for="obligation-evidence" data-i18n="ui.peer.evidence"></label><textarea id="obligation-evidence" maxlength="500" rows="2"></textarea><button id="obligation-adopt" class="primary" data-i18n="ui.peer.map"></button><button id="obligation-resolve" data-i18n="ui.peer.humanResolve"></button></form></dialog>
+<dialog id="prompt-dialog" class="prompt-dialog" aria-labelledby="prompt-title"><div class="dialog-heading"><h2 id="prompt-title"></h2><button type="button" id="prompt-close" data-i18n-aria="ui.common.close">×</button></div><div id="prompt-body"></div></dialog>
 </body></html>
