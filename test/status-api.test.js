@@ -35,7 +35,7 @@ const z = {
 function fixture(t, jobs = []) {
   const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  db.exec('CREATE TABLE jobs (id TEXT PRIMARY KEY, body TEXT)');
+  db.exec('CREATE TABLE jobs (id TEXT PRIMARY KEY, body TEXT); CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT, body TEXT NOT NULL)');
   for (const job of jobs) db.prepare('INSERT INTO jobs VALUES (?, ?)').run(job.id, JSON.stringify(job));
   // Skip controller startup, quota polling and disk access; exercise real job reads.
   const team = Object.assign(Object.create(Team.prototype), {
@@ -64,7 +64,7 @@ test('statusSummary keeps one compact row per job despite large reports and task
   }
   assert.deepEqual(result.jobs[1], {
     id: 'j1', project: 'p1', sessionId: 's1', kind: 'code', title: jobTitle(job), status: 'queued', stage: 'review', round: 2,
-    reason: 'e'.repeat(200), lastProgressAt: job.updatedAt, revision: 'rev', base: 'base', baseBranch: 'dev', branch: 'ai-team/j1', next: 'none',
+    reason: 'e'.repeat(200), lastProgressAt: null, revision: 'rev', base: 'base', baseBranch: 'dev', branch: 'ai-team/j1', next: 'none',
   });
   assert.equal(result.jobs[0].lastProgressAt, null); assert.equal(result.jobs[0].reason, null);
   assert.equal(result.jobs[0].title, 'Sample job');
@@ -102,8 +102,69 @@ test('statusSummary maps next actions and uses the specified reason priority', t
     sample('waiting', { status: 'waiting' }), sample('running', { status: 'running' }),
   ];
   const rows = new Map(fixture(t, jobs).statusSummary().jobs.map(j => [j.id, j]));
-  for (const [id, next] of Object.entries({ questions: 'answer_questions', plan: 'approve_plan', quota: 'wait_quota', transient: 'wait_quota', blocked: 'diagnose', ready: 'review_merge', paused: 'resume', waiting: 'none', running: 'none' })) assert.equal(rows.get(id).next, next, id);
+  for (const [id, next] of Object.entries({ questions: 'answer_questions', plan: 'approve_plan', quota: 'wait_quota', transient: 'diagnose', blocked: 'diagnose', ready: 'review_merge', paused: 'resume', waiting: 'none', running: 'none' })) assert.equal(rows.get(id).next, next, id);
   for (const [id, reason] of Object.entries({ questions: 'Question?', plan: 'Approve plan', quota: 'quota tomorrow', transient: 'transient', blocked: 'broken', ready: null })) assert.equal(rows.get(id).reason, reason, id);
+});
+
+test('summary bounds legacy titles without changing stored jobs or full details', t => {
+  const job = sample('legacy', { title: 'L'.repeat(100000) }), team = fixture(t, [job]);
+  assert.equal(team.statusSummary().jobs[0].title, job.title.slice(0, 200));
+  assert.equal(team.jobDetail(job.id, 'summary').title.length, 200);
+  assert.equal(team.get(job.id).title, job.title);
+  assert.equal(team.jobDetail(job.id, 'job').title, job.title);
+});
+
+test('lastProgressAt uses completed event timestamps and ignores saves, heartbeats and skipped tests', t => {
+  const team = fixture(t, [sample('j1', { updatedAt: '2099-01-01T00:00:00Z' }), sample('empty'), sample('skipped')]);
+  team.emit = () => {};
+  const insert = team.db.prepare('INSERT INTO events (job, body) VALUES (?, ?)');
+  const add = (job, type, timestamp, details = null) => insert.run(job, JSON.stringify({ type, timestamp, details }));
+  const progress = () => team.jobDetail('j1', 'summary').lastProgressAt;
+  assert.equal(progress(), null);
+  for (const [index, type] of ['RESULT', 'REVIEW_RESULT', 'TEST_RESULT', 'READY_FOR_MERGE'].entries()) {
+    const timestamp = `2026-10-16T03:00:0${index}Z`;
+    add('j1', type, timestamp, type === 'TEST_RESULT' ? { code: 1 } : null);
+    assert.equal(progress(), timestamp, type);
+  }
+  // Insertion order must not override the latest timestamp.
+  add('j1', 'RESULT', '2026-10-15T03:00:00Z');
+  add('j1', 'TEST_RESULT', '2099-01-01T00:00:00Z', { skipped: true });
+  add('j1', 'HEARTBEAT', '2099-01-01T00:00:00Z');
+  add('j1', 'ACTIVITY', '2099-01-01T00:00:00Z');
+  const job = team.get('j1'); job.roster = { builder: 'a2' }; team.save(job);
+  assert.notEqual(job.updatedAt, '2099-01-01T00:00:00Z');
+  assert.equal(progress(), '2026-10-16T03:00:03Z');
+  add('skipped', 'TEST_RESULT', '2099-01-01T00:00:00Z', { skipped: true });
+  const rows = new Map(team.statusSummary().jobs.map(j => [j.id, j]));
+  assert.equal(rows.get('j1').lastProgressAt, progress());
+  assert.equal(rows.get('empty').lastProgressAt, null);
+  assert.equal(rows.get('skipped').lastProgressAt, null);
+});
+
+test('summary projects progress only for page jobs without the 2000-event detail limit', t => {
+  const team = fixture(t, [sample('outside'), sample('page')]);
+  const insert = team.db.prepare('INSERT INTO events (job, body) VALUES (?, ?)');
+  for (let i = 0; i < 2001; i++) insert.run('page', JSON.stringify({ type: 'ACTIVITY', timestamp: '2099-01-01T00:00:00Z', details: { log: 'ignore' } }));
+  insert.run('page', JSON.stringify({ type: 'RESULT', timestamp: '2026-10-16T03:00:00Z', details: { report: 'x'.repeat(100000) } }));
+  insert.run('outside', JSON.stringify({ type: 'RESULT', timestamp: '2099-01-01T00:00:00Z' }));
+  assert.equal(team.events('page').length, 2000);
+  team.events = () => { throw new Error('Summary must not load event details'); };
+  const db = team.db, queried = [];
+  team.db = { prepare(sql) {
+    const statement = db.prepare(sql);
+    if (!sql.includes('FROM events')) return statement;
+    return { get(id) {
+      queried.push(id);
+      const row = statement.get(id);
+      assert.deepEqual(Object.keys(row), ['timestamp']);
+      return row;
+    } };
+  } };
+  assert.equal(team.statusSummary({ limit: 1 }).jobs[0].lastProgressAt, '2026-10-16T03:00:00Z');
+  assert.deepEqual(queried, ['page']);
+  queried.length = 0;
+  assert.deepEqual(team.statusSummary({ cursor: 2 }).jobs, []);
+  assert.deepEqual(queried, []);
 });
 
 test('jobDetail returns only the requested part, truncates text and supports legacy jobs', t => {

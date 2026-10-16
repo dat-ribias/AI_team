@@ -773,12 +773,15 @@ export class Team extends EventEmitter {
     };
   }
   jobSummary(j) {
+    const progress = this.db.prepare(`SELECT MAX(json_extract(body, '$.timestamp')) AS timestamp FROM events WHERE job=?
+      AND json_extract(body, '$.type') IN ('RESULT', 'REVIEW_RESULT', 'TEST_RESULT', 'READY_FOR_MERGE')
+      AND (json_extract(body, '$.type') != 'TEST_RESULT' OR COALESCE(json_extract(body, '$.details.skipped'), 0) = 0)`).get(j.id);
     const reason = j.blockedReason ? [j.blockedReason.kind, j.blockedReason.resetsAt].filter(Boolean).join(' ') : j.waiting || j.questions?.[0] || j.error;
     const next = j.status === 'waiting' && j.planGate ? 'approve_plan' : j.status === 'waiting' && j.questions?.length ? 'answer_questions'
-      : j.status === 'blocked' ? (['quota', 'transient'].includes(j.blockedReason?.kind) ? 'wait_quota' : 'diagnose')
+      : j.status === 'blocked' ? (j.blockedReason?.kind === 'quota' ? 'wait_quota' : 'diagnose')
       : j.status === 'paused' ? 'resume' : j.status === 'ready' ? 'review_merge' : 'none';
-    return { id: j.id, project: j.project ?? null, sessionId: j.sessionId ?? null, kind: j.kind ?? null, title: jobTitle(j), status: j.status, stage: j.stage ?? null,
-      round: j.round ?? null, reason: reason ? String(reason).slice(0, 200) : null, lastProgressAt: j.updatedAt ?? null,
+    return { id: j.id, project: j.project ?? null, sessionId: j.sessionId ?? null, kind: j.kind ?? null, title: jobTitle(j).slice(0, 200), status: j.status, stage: j.stage ?? null,
+      round: j.round ?? null, reason: reason ? String(reason).slice(0, 200) : null, lastProgressAt: progress.timestamp ?? null,
       revision: j.revision ?? null, base: j.base ?? null, baseBranch: j.baseBranch ?? null, branch: j.branch ?? null, next };
   }
   jobDetail(id, part) {
