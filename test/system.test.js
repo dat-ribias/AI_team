@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Team, validateConfig, redact, routeGoal, compressOutput, computeSlots, defaultSensitive } from '../src/team.js';
+import { Team, jobTitle, taskTitle, validateConfig, redact, routeGoal, compressOutput, computeSlots, defaultSensitive } from '../src/team.js';
 import { testList } from '../src/accounts.js';
 import { run, childEnv } from '../src/process.js';
 import { runOracle } from '../src/oracle.js';
@@ -625,7 +625,7 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
 test('Git authors: task checkpoints identify members and controller merges identify their work', async t => {
   // Three task checkpoints, merges and final checks need headroom for Git I/O under load.
   const { team, f } = await parallelTeam(t, [
-    { agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [] },
+    { title: 'Create first output', agent: 'codex-2', difficulty: 2, instruction: 'T1 edit', files: ['t1.txt'], dependsOn: [] },
     { agent: 'codex-4', difficulty: 2, instruction: 'T2 edit', files: ['t2.txt'], dependsOn: [] },
     { agent: 'codex-2', difficulty: 2, instruction: 'T3 edit', files: ['t3.txt'], dependsOn: [0, 1] },
   ]);
@@ -635,22 +635,21 @@ test('Git authors: task checkpoints identify members and controller merges ident
   const log = (await run(['git'], ['-C', ready.worktree, 'log', '--format=%an|%ae|%s'])).stdout;
   for (const [i, task] of ready.tasks.entries()) {
     const id = task.ranBy, label = team.agent(id).label.replace(/[\r\n]/g, ' ');
-    assert(log.includes(`${label} (AI Team)|${id}@ai-team.local|AI Team ${job.id} T${i + 1} ${id}: checkpoint`), log);
-    if (i < 2) assert(log.includes(`AI Team controller|controller@ai-team.local|Merge T${i + 1} (${id}) into ai-team/${job.id}`), log);
+    assert(log.includes(`${label} (AI Team)|${id}@ai-team.local|${taskTitle(task)} (${label})`), log);
+    if (i < 2) assert(log.includes(`AI Team controller|controller@ai-team.local|Merge: ${taskTitle(task)} (${label}) [#${job.id}]`), log);
   }
   // A job-level checkpoint uses the last builder even after a checker has run.
   writeFileSync(join(ready.worktree, 'followup.txt'), 'followup\n');
   await team.checkpoint(ready);
   assert.equal((await run(['git'], ['-C', ready.worktree, 'log', '-1', '--format=%an|%ae|%s'])).stdout.trim(),
-    `Builder Two Display (AI Team)|codex-2@ai-team.local|AI Team ${job.id} codex-2: checkpoint`);
+    `Builder Two Display (AI Team)|codex-2@ai-team.local|${jobTitle(ready)} (Builder Two Display)`);
   ready.tested = ready.reviewed = ready.verified = ready.revision; team.save(ready);
   const target = { type: 'existing', branch: 'release' };
   await run(['git'], ['-C', f.path, 'branch', target.branch]); await branchCommit(f, target.branch);
   const prepared = await team.merge(job.id, { target }), pending = prepared.pendingMerge;
   assert(pending?.passed);
-  const builders = [...new Set(ready.tasks.map(task => task.ranBy))].join(',');
   assert.equal((await run(['git'], ['-C', f.path, 'log', '-1', '--format=%an|%ae|%s', pending.commit])).stdout.trim(),
-    `AI Team controller|controller@ai-team.local|Merge ai-team/${job.id} (${builders}) into release`);
+    `AI Team controller|controller@ai-team.local|Merge: ${jobTitle(ready)} [#${job.id}]`);
   assert.equal((await run(['git'], ['-C', f.path, 'rev-list', '--parents', '-n', '1', pending.commit])).stdout.trim().split(' ').length, 3);
 });
 
@@ -916,7 +915,7 @@ test('local branches, alternate job base and non-checkout base merge leave main 
   const f = await fixture(); await run(['git'], ['-C', f.path, 'branch', 'release']);
   const release = await branchCommit(f, 'release'), main = await branchTip(f);
   const { team, job } = await branchReady(t, f, 'release');
-  assert.deepEqual(await team.branches('test'), { current: 'main', branches: [`ai-team/${job.id}`, 'main', 'release'] });
+  assert.deepEqual(await team.branches('test'), { current: 'main', branches: [job.branch, 'main', 'release'] });
   assert.equal(job.base, release); assert.equal(job.baseBranch, 'release');
   assert.equal((await team.mergeCheck(job.id)).target.mode, 'update-ref');
   await team.merge(job.id);
@@ -1133,20 +1132,22 @@ test('pause cancels process; resume retains work; new guidance invalidates ready
   await settle(team, job.id, 'ready');
 });
 
-test('cancel during a mock agent run is terminal and idempotent; stale saves cannot resurrect it', async t => {
+test('cancel during a mock agent run is terminal and idempotent; stale saves cannot resurrect it or alter the source repo', async t => {
+  const sourceRefs = async () => Promise.all([['worktree', 'list', '--porcelain'], ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/ai-team']].map(async args => (await run(['git'], ['-C', process.cwd(), ...args])).stdout));
+  const before = await sourceRefs(), f = await fixture();
   let entered;
   const started = new Promise(resolve => { entered = resolve; });
   const config = { demo: true, planApproval: false, maxRamPercent: 100, maxCpuPercent: 100,
     agents: [{ id: 'solo', label: 'solo', provider: 'mock' }],
     pipeline: { manager: 'solo', builders: ['solo'], reviewer: 'solo', verifier: 'solo' },
-    projects: [{ id: 'test', path: process.cwd(), tests: [] }],
+    projects: [{ id: 'test', path: f.path, tests: [] }],
   };
-  const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-cancel-')), { runAgent: (agent, task, prompt, opts) => {
+  const team = new Team(config, f.data, { runAgent: (agent, task, prompt, opts) => {
     entered(opts.signal); return runAgent(agent, task, prompt, opts);
   } });
-  t.after(() => team.close());
+  t.after(async () => { await team.close(); rmSync(f.data, { recursive: true, force: true }); rmSync(f.path, { recursive: true, force: true }); });
   team.save({ id: 'cancel-test', project: 'test', goal: 'Update hello', status: 'queued', stage: 'plan',
-    worktree: process.cwd(), tasks: [], taskIndex: 0, reports: [], messages: [], round: 0 });
+    worktree: f.path, tasks: [], taskIndex: 0, reports: [], messages: [], round: 0 });
   const running = team.tick(), signal = await started;
   const stale = team.get('cancel-test');
   assert.equal(stale.status, 'running'); assert.equal(stale.current.agent, 'solo');
@@ -1163,10 +1164,10 @@ test('cancel during a mock agent run is terminal and idempotent; stale saves can
   }
   assert.equal(team.active, null);
   assert(!team.events(stale.id).some(e => e.type === 'BLOCKER' || /Run interrupted/.test(e.summary)));
-  // Xóa việc đã kết thúc: mất cả job lẫn log; xóa lần hai báo lỗi.
+  // Deleting a finished job removes its log; repeated deletion is idempotent.
   await team.control(stale.id, 'delete');
   assert.throws(() => team.get(stale.id)); assert.equal(team.events(stale.id).length, 0);
-  await assert.rejects(team.control(stale.id, 'delete'));
+  assert.deepEqual(await team.control(stale.id, 'delete'), { id: stale.id, deleted: true });
   // Xóa phiên: từ chối khi còn việc đang chạy; không thì xóa cả việc trong phiên.
   const ses = team.createSession({ project: 'test', name: 'tmp' });
   team.save({ ...stale, id: 'ses-job', sessionId: ses.id, status: 'running' });
@@ -1174,6 +1175,7 @@ test('cancel during a mock agent run is terminal and idempotent; stale saves can
   team.save({ ...team.get('ses-job'), status: 'done' });
   assert.equal((await team.deleteSession(ses.id)).jobs, 1);
   assert.throws(() => team.get('ses-job')); assert(!team.sessions().some(x => x.id === ses.id));
+  assert.deepEqual(await sourceRefs(), before);
 });
 
 test('pre-aborted process and mock provider preserve the cancellation reason', async () => {
@@ -1258,6 +1260,9 @@ test('base moved: merge refused, automatic sync re-runs the gates', async t => {
   await assert.rejects(team.merge(job.id), /Cập nhật theo base/);
   const again = await settle(team, job.id, 'ready');
   assert.equal(again.tested, again.revision);
+  const base = await branchTip(f);
+  const subjects = (await run(['git'], ['-C', again.worktree, 'log', '--format=%s'])).stdout;
+  assert(subjects.includes(`Merge main@${base.slice(0, 8)} v\u00e0o: ${jobTitle(again)} [#${job.id}]`), subjects);
   await team.merge(job.id);
   assert.equal(readFileSync(join(f.path, 'other.txt'), 'utf8'), 'x\n');
 });
@@ -1861,14 +1866,15 @@ test('busy strong builder: weak one takes the task only when it finishes sooner'
 });
 
 test('token budget per job: a job over maxTokensPerJob stops before the next AI call', async t => {
+  const f = await fixture();
   const config = { demo: true, maxRamPercent: 100, maxCpuPercent: 100, maxTokensPerJob: 1000,
     agents: [{ id: 'solo', label: 'solo', provider: 'mock' }],
     pipeline: { manager: 'solo', builders: ['solo'], reviewer: 'solo', verifier: 'solo' },
-    projects: [{ id: 'test', path: process.cwd(), tests: [] }] };
+    projects: [{ id: 'test', path: f.path, tests: [] }] };
   let calls = 0;
-  const team = new Team(config, mkdtempSync(join(tmpdir(), 'ai-team-budget-')), { runAgent: (...a) => { calls++; return runAgent(...a); } });
-  t.after(() => team.close());
-  team.save({ id: 'budget', project: 'test', goal: 'x', status: 'queued', stage: 'plan', worktree: process.cwd(), tasks: [], taskIndex: 0, reports: [], messages: [], round: 0, usage: { calls: 7, tokens: 5000 } });
+  const team = new Team(config, f.data, { runAgent: (...a) => { calls++; return runAgent(...a); } });
+  t.after(async () => { await team.close(); rmSync(f.data, { recursive: true, force: true }); rmSync(f.path, { recursive: true, force: true }); });
+  team.save({ id: 'budget', project: 'test', goal: 'x', status: 'queued', stage: 'plan', worktree: f.path, tasks: [], taskIndex: 0, reports: [], messages: [], round: 0, usage: { calls: 7, tokens: 5000 } });
   await team.tick();
   const job = team.get('budget');
   assert.equal(job.status, 'blocked'); assert.match(job.error, /5000.*1000/); assert.equal(calls, 0);
@@ -1931,6 +1937,8 @@ test('linked repos: a job edits another registered project in its own worktree; 
   team.start();
   const job = await team.create({ project: 'test', goal: 'Update hello and the shared lib' });
   assert.equal(job.linked[0].project, 'lib');
+  assert.equal(job.linked[0].branch, job.branch);
+  assert.equal(job.branch, `ai-team/${job.id}-update-hello-and-the-shared-lib`);
   const ready = await settle(team, job.id, 'ready');
   const impl = seen.find(s => s.stage === 'implement');
   assert.deepEqual(impl.addDirs, [ready.linked[0].worktree]);
