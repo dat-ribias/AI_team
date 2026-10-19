@@ -73,6 +73,33 @@ async function merged(root, branch, destination, ctx) {
   return result.code === 0;
 }
 
+export async function archiveCommit(root, name, commit, ctx) {
+  const base = `archive/${name}`;
+  if (typeof name !== 'string' || !/^[0-9a-f]{40,64}$/i.test(commit || '') || (await command(root, ['check-ref-format', `refs/tags/${base}`], ctx)).code !== 0) throw new Error('Invalid archive ref or commit');
+  const tip = (await query(root, ['rev-parse', '--verify', `${commit}^{commit}`], ctx)).trim();
+  for (let n = 1;; n++) {
+    const tag = n === 1 ? base : `${base}-${n}`, ref = `refs/tags/${tag}`;
+    const existing = await command(root, ['rev-parse', '--verify', ref], ctx);
+    if (existing.code === 0 && existing.stdout.trim() !== tip) continue;
+    if (existing.code !== 0) {
+      const created = await command(root, ['update-ref', ref, tip, ''], ctx);
+      if (created.code !== 0) {
+        const raced = await command(root, ['rev-parse', '--verify', ref], ctx);
+        if (raced.code !== 0) throw new Error(created.stderr || 'Archive creation failed');
+        if (raced.stdout.trim() !== tip) continue;
+      }
+    }
+    if ((await query(root, ['rev-parse', '--verify', ref], ctx)).trim() !== tip) throw new Error('Archive verification failed');
+    return tag;
+  }
+}
+
+export async function archiveRef(root, ref, ctx) {
+  if (typeof ref !== 'string' || !ref.startsWith('ai-team/') || (await command(root, ['check-ref-format', `refs/heads/${ref}`], ctx)).code !== 0) throw new Error('Invalid archive branch');
+  const commit = (await query(root, ['rev-parse', '--verify', `refs/heads/${ref}`], ctx)).trim();
+  return archiveCommit(root, ref.slice(8), commit, ctx);
+}
+
 // events.page(jobId, afterSeq, limit) returns raw {seq, body} or parsed events.
 // events.transaction(fn) atomically calls fn(tx); tx.deleteActivity(jobId, seqs)
 // and tx.insert(jobId, event) are synchronous DB callbacks. Delete only those seqs.
@@ -109,6 +136,9 @@ export async function planJob({ job, dataDir, root, run, git, events, scratchOnl
   const out = manifest(scratchOnly ? 'Stray review cleanup' : 'Finished job cleanup');
   if (!terminal(job) && !scratchOnly) return out;
   if (!validId(job.id)) throw new Error('Invalid job id');
+  if (root && job.status === 'cancelled' && !scratchOnly) for (const [i, task] of (job.tasks || []).entries()) {
+    if (task.checkpoint?.wip?.commit) out.items.push(item('wip', task.checkpoint.wip.commit, 0, 'Cancelled job WIP', { root, jobId: job.id, taskIndex: i }));
+  }
   if (root) await planGit(out, { job, dataDir, root, run, git, scratchOnly });
   for (const linked of job.linked || []) if (linked.path) await planGit(out, { job: { ...job, ...linked, id: job.id, mergedInto: linked.mergedInto }, dataDir, root: linked.path, run, git, scratchOnly });
   if (events && !scratchOnly) {
@@ -236,17 +266,34 @@ export async function apply(plan, ctx) {
   const save = () => { safePath(file, ctx.dataDir, true); writeFileSync(file, JSON.stringify(result, null, 2)); };
   save();
   for (const entry of plan.items) {
-    let status = 'skipped', detail;
+    let status = 'skipped', detail, archived;
     try {
-      if (!['worktree', 'branch', 'events', 'backup', 'evidence', 'session'].includes(entry.kind)) throw new Error('Unknown cleanup kind');
-      if (entry.kind === 'branch') {
+      if (!['worktree', 'branch', 'wip', 'events', 'backup', 'evidence', 'session'].includes(entry.kind)) throw new Error('Unknown cleanup kind');
+      if (['worktree', 'branch'].includes(entry.kind) && result.results.some(r => r.kind === 'wip' && r.jobId === entry.jobId && r.root === entry.root && r.status === 'error')) throw new Error('WIP archive failed – kept');
+      if (entry.kind === 'wip') {
+        const root = repo(entry, ctx), job = ctx.jobs?.find(j => j.id === entry.jobId);
+        if (!validId(entry.jobId) || !Number.isSafeInteger(entry.taskIndex) || entry.taskIndex < 0 || job?.tasks?.[entry.taskIndex]?.checkpoint?.wip?.commit !== entry.target || !/^[0-9a-f]{40,64}$/i.test(entry.target)) throw new Error('Invalid WIP checkpoint');
+        if (!plan.dryRun && job.status === 'cancelled' && await eligible(entry, ctx)) {
+          const destination = job.mergedInto?.commit || job.baseBranch;
+          const ancestry = destination && !destination.startsWith('-') ? await command(root, ['merge-base', '--is-ancestor', entry.target, destination], ctx) : { code: 1 };
+          if (ancestry.code > 1) throw new Error(ancestry.stderr || 'Cannot verify WIP ancestry');
+          const containing = (await query(root, ['for-each-ref', `--contains=${entry.target}`, '--format=%(refname:short)', 'refs/heads/'], ctx)).trim().split(/\r?\n/).filter(Boolean);
+          if (ancestry.code !== 0 && !containing.some(b => !branchName(b, job.id))) archived = await archiveCommit(root, `${job.id}-wip-t${entry.taskIndex + 1}`, entry.target, ctx);
+          status = 'ok';
+        }
+      } else if (entry.kind === 'branch') {
         if (!/^ai-team\//.test(entry.target) || !branchName(entry.target, entry.jobId)) throw new Error('Invalid cleanup branch');
         const root = repo(entry, ctx);
-        if (!plan.dryRun && !entry.keep && await eligible(entry, ctx)) {
-          const job = ctx.jobs?.find(j => j.id === entry.jobId);
+        const job = ctx.jobs?.find(j => j.id === entry.jobId);
+        if (!plan.dryRun && (!entry.keep || job?.status === 'cancelled') && await eligible(entry, ctx)) {
           const current = job?.linked?.find(l => l.path && same(l.path, root)) || job;
           const destination = current ? current.mergedInto?.commit || current.baseBranch : entry.destination;
-          if (await merged(root, entry.target, destination, ctx)) {
+          const tip = (await query(root, ['rev-parse', '--verify', `refs/heads/${entry.target}`], ctx)).trim();
+          const integrated = await merged(root, entry.target, destination, ctx);
+          if (integrated || job?.status === 'cancelled') {
+            if (!integrated) archived = await archiveRef(root, entry.target, ctx);
+            if (!await eligible(entry, ctx)) throw new Error('Job became active – kept');
+            if ((await query(root, ['rev-parse', '--verify', `refs/heads/${entry.target}`], ctx)).trim() !== tip) throw new Error('Target tip changed');
             const r = await command(root, ['branch', '-D', '--', entry.target], ctx);
             if (r.code !== 0) throw new Error(r.stderr || 'Branch removal failed');
             status = 'ok';
@@ -266,6 +313,7 @@ export async function apply(plan, ctx) {
             if (!(await trees(root, ctx)).some(p => same(p, target))) throw new Error('Worktree is not registered');
             safePath(target, ctx.dataDir); noLinks(target);
             if (!await eligible(entry, ctx)) { result.results.push({ ...entry, status: 'skipped' }); save(); continue; }
+            if ((await query(target, ['status', '--porcelain', '--untracked-files=all'], ctx)).trim()) { result.results.push({ ...entry, status: 'skipped', detail: 'dirty – kept' }); save(); continue; }
             const r = await command(root, ['worktree', 'remove', '--force', target], ctx);
             if (r.code !== 0) throw new Error(r.stderr || 'Worktree removal failed');
             const prune = await command(root, ['worktree', 'prune'], ctx);
@@ -281,7 +329,71 @@ export async function apply(plan, ctx) {
         }
       }
     } catch (e) { status = 'error'; detail = e.message; }
-    result.results.push({ ...entry, status, ...(detail ? { detail } : {}) }); save();
+    result.results.push({ ...entry, status, ...(detail ? { detail } : {}), ...(archived ? { archived } : {}) }); save();
+  }
+  return result;
+}
+
+export async function applyOrphans({ items, jobs = [], dataDir, root, projects = [], run, git, isActive = () => false, mainBranchOf }) {
+  if (!Array.isArray(items)) throw new Error('Invalid orphan selection');
+  const result = { ...manifest('Orphan cleanup'), dryRun: false, items, results: [] }, ctx = { run, git };
+  const file = join(dataDir, 'cleanup', `${result.id}.json`);
+  safePath(file, dataDir, true); mkdirSync(dirname(file), { recursive: true });
+  const save = () => { safePath(file, dataDir, true); writeFileSync(file, JSON.stringify(result, null, 2)); };
+  save();
+  for (const entry of items) {
+    let status = 'skipped', detail, archived;
+    try {
+      if (!['branch', 'worktree'].includes(entry.kind) || typeof entry.target !== 'string' || !entry.root) throw new Error('Invalid orphan item');
+      const repository = repo(entry, { projects });
+      let branch, target, record;
+      const registeredTree = async () => {
+        const records = (await query(repository, ['worktree', 'list', '--porcelain', '-z'], ctx)).split(/\0\0|\r?\n\r?\n/).map(block => block.split(/[\0\r\n]/).filter(Boolean));
+        return records.find(fields => fields.some(f => f.startsWith('worktree ') && same(f.slice(9), target)));
+      };
+      if (entry.kind === 'branch') branch = entry.target;
+      else {
+        target = resolve(entry.target);
+        record = await registeredTree();
+        if (!record || same(repository, target)) throw new Error('Worktree is not an orphan candidate');
+        branch = record.find(f => f.startsWith('branch refs/heads/'))?.slice(18);
+      }
+      if (entry.kind === 'branch' && (!branch.startsWith('ai-team/') || (await command(repository, ['check-ref-format', `refs/heads/${branch}`], ctx)).code !== 0)) throw new Error('Invalid orphan branch');
+      const checkOwner = async () => {
+        if (jobs.some(j => branch && branchName(branch, j.id) || target && treeName(basename(target), j.id))) throw new Error('Target belongs to an existing job');
+        const ids = new Set([branch?.slice(8).split('-')[0], target && basename(target).split(/[@-]/)[0]].filter(Boolean));
+        for (const id of ids) if (await isActive(id)) throw new Error('Target belongs to an active job');
+      };
+      await checkOwner();
+      const tip = (await query(repository, ['rev-parse', '--verify', branch ? `refs/heads/${branch}` : record.find(f => f.startsWith('HEAD '))?.slice(5)], ctx)).trim();
+      if (entry.tip !== undefined && entry.tip !== tip) throw new Error('Target tip changed');
+      if (entry.kind === 'branch') {
+        if (typeof mainBranchOf !== 'function') throw new Error('Missing main branch dependency');
+        const destination = await mainBranchOf(repository);
+        if (!destination || destination.startsWith('-')) throw new Error('Invalid main branch');
+        if (!await merged(repository, branch, destination, ctx)) archived = await archiveRef(repository, branch, ctx);
+        await checkOwner();
+        if ((await query(repository, ['rev-parse', '--verify', `refs/heads/${branch}`], ctx)).trim() !== tip) throw new Error('Target tip changed');
+        const r = await command(repository, ['branch', '-D', '--', branch], ctx);
+        if (r.code !== 0) throw new Error(r.stderr || 'Branch removal failed');
+      } else {
+        const missing = !stat(target), prunable = missing && record.some(f => f === 'prunable' || f.startsWith('prunable '));
+        if (!within(join(dataDir, 'worktrees'), target) && !(prunable && branch?.startsWith('ai-team/'))) throw new Error('Worktree outside allowed directory');
+        safePath(target, within(dataDir, target) ? dataDir : dirname(target), missing);
+        if (!missing) {
+          noLinks(target);
+          if ((await query(target, ['status', '--porcelain', '--untracked-files=all'], ctx)).trim()) { detail = 'dirty – kept'; result.results.push({ ...entry, status, detail }); save(); continue; }
+        } else if (!prunable) throw new Error('Worktree is not prunable');
+        await checkOwner();
+        const current = await registeredTree();
+        if (!current || current.find(f => f.startsWith('branch ')) !== record.find(f => f.startsWith('branch ')) || current.find(f => f.startsWith('HEAD ')) !== record.find(f => f.startsWith('HEAD ')) || missing !== !stat(target)) throw new Error('Worktree changed');
+        if (!missing) { safePath(target, dataDir); noLinks(target); }
+        const r = await command(repository, prunable ? ['worktree', 'prune', '--expire', 'now'] : ['worktree', 'remove', '--force', target], ctx);
+        if (r.code !== 0) throw new Error(r.stderr || 'Worktree removal failed');
+      }
+      status = 'ok';
+    } catch (e) { status = 'error'; detail = e.message; }
+    result.results.push({ ...entry, status, ...(detail ? { detail } : {}), ...(archived ? { archived } : {}) }); save();
   }
   return result;
 }

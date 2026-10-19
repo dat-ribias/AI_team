@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { planJob, planPeriodic, apply, storageStats } from '../src/cleanup.js';
+import { planJob, planPeriodic, apply, applyOrphans, archiveRef, archiveCommit, storageStats } from '../src/cleanup.js';
 import { collect } from '../src/evidence.js';
 import { run } from '../src/process.js';
 import { Team, validateConfig } from '../src/team.js';
@@ -386,14 +386,15 @@ test('sweep removes idle review scratch through a manifest and preserves active 
   assert.ok(team.get(job.id).cleanedAt); assert.equal(team.get(job.id).released, true);
 });
 
-test('controller cancel drains the run, keeps unmerged branch and writes cleanedAt for cancelled snapshots', async t => {
+test('controller cancel drains the run, archives unmerged branch and writes cleanedAt for cancelled snapshots', async t => {
   const ctx = await controller(t), job = await changedJob(ctx), { team } = ctx;
   const abort = new AbortController();
   abort.signal.addEventListener('abort', () => setTimeout(() => team.runs.delete(job.id), 30), { once: true });
   team.runs.set(job.id, { abort, agents: new Set() });
   const result = await team.control(job.id, 'cancel');
   assert.equal(result.status, 'cancelled'); assert.ok(result.cleanedAt); assert.equal(team.runs.has(job.id), false);
-  assert.equal(existsSync(job.worktree), false); assert.equal(await git(ctx, ['branch', '--list', job.branch]), job.branch);
+  assert.equal(existsSync(job.worktree), false); assert.equal(await git(ctx, ['branch', '--list', job.branch]), '');
+  assert.equal(await git(ctx, ['rev-parse', `refs/tags/archive/${job.branch.slice(8)}`]), job.revision);
   assert.equal(team.events(job.id).filter(e => e.type === 'ACTIVITY_SUMMARY').length, 1);
   await team.control(job.id, 'cancel'); assert.equal(manifests(ctx, job.id).length, 1);
 });
@@ -561,6 +562,212 @@ test('validateConfig sets cleanup defaults and rejects invalid values/types', ()
   for (const [key, values] of Object.entries({ retentionDays: [0, -1, '30', null, NaN, Infinity], maxBackups: [0, -1, 1.5, '3', null, Infinity], maxBackupMB: [-1, '1', null, NaN, Infinity], cleanupOnMerge: [0, 1, 'true', null] })) {
     for (const value of values) assert.throws(() => validateConfig({ ...config(), [key]: value }), new RegExp(key));
   }
+});
+
+async function unmerged(ctx, branch) {
+  await git(ctx, ['checkout', '-b', branch, 'main']);
+  writeFileSync(join(ctx.root, 'new.txt'), `${branch}\n`);
+  await git(ctx, ['add', '.']);
+  await git(ctx, ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'unmerged']);
+  const tip = await git(ctx, ['rev-parse', 'HEAD']);
+  await git(ctx, ['checkout', 'main']);
+  return tip;
+}
+
+test('archive helpers reuse verified tags and suffix collisions without replacing tags', async t => {
+  const ctx = await repository(t), branch = 'ai-team/abcdef12';
+  const initial = await git(ctx, ['rev-parse', 'HEAD']), tip = await unmerged(ctx, branch);
+  await git(ctx, ['update-ref', 'refs/tags/archive/abcdef12', initial]);
+  await git(ctx, ['update-ref', 'refs/tags/archive/abcdef12-2', initial]);
+  assert.equal(await archiveRef(ctx.root, branch, ctx), 'archive/abcdef12-3');
+  assert.equal(await archiveRef(ctx.root, branch, ctx), 'archive/abcdef12-3');
+  assert.equal(await git(ctx, ['rev-parse', 'refs/tags/archive/abcdef12-3']), tip);
+  assert.equal(await git(ctx, ['rev-parse', 'refs/tags/archive/abcdef12']), initial);
+  assert.equal(await archiveCommit(ctx.root, 'abcdef12-wip-t1', tip, ctx), 'archive/abcdef12-wip-t1');
+  await assert.rejects(archiveRef(ctx.root, 'main', ctx), /Invalid archive branch/);
+  await assert.rejects(archiveCommit(ctx.root, '../escape', tip, ctx), /Invalid archive/);
+});
+
+test('cancelled cleanup archives unmerged parent, divergent child and branchless WIP before deletion', async t => {
+  const ctx = await repository(t), job = ctx.jobs[0], branch = `ai-team/${job.id}`;
+  job.status = 'cancelled';
+  const tip = await unmerged(ctx, branch);
+  await git(ctx, ['branch', `${branch}-t1`, tip]);
+  await git(ctx, ['branch', '-D', branch]);
+  const parentTip = await unmerged(ctx, branch);
+  const wip = await unmerged(ctx, `${branch}-lost`);
+  await git(ctx, ['branch', '-D', `${branch}-lost`]);
+  job.tasks = [{ checkpoint: { wip: { commit: wip, branch: `${branch}-lost` } } }];
+  const plan = await planJob({ ...ctx, job }); plan.dryRun = false;
+  const original = ctx.run, deletions = [];
+  ctx.run = async (exe, args, options) => {
+    if (args.includes('-D')) {
+      const name = args.at(-1), expected = name.endsWith('-t1') ? tip : parentTip;
+      assert.equal(await git(ctx, ['rev-parse', `refs/tags/archive/${name.slice(8)}`]), expected);
+      assert.equal(await git(ctx, ['rev-parse', `refs/tags/archive/${job.id}-wip-t1`]), wip);
+      deletions.push(name);
+    }
+    return original(exe, args, options);
+  };
+  const result = await apply(plan, ctx);
+  assert.ok(result.results.every(r => r.status === 'ok'), JSON.stringify(result.results));
+  assert.equal(deletions.length, 2);
+  assert.equal(await git(ctx, ['branch', '--list', `${branch}*`]), '');
+  assert.ok(result.results.some(r => r.archived === `archive/${job.id}`));
+  assert.ok(result.results.some(r => r.archived === `archive/${job.id}-t1`));
+  assert.ok(result.results.some(r => r.archived === `archive/${job.id}-wip-t1`));
+});
+
+test('cancelled cleanup skips WIP archives protected by main or a surviving branch', async t => {
+  const ctx = await repository(t), job = ctx.jobs[0]; job.status = 'cancelled';
+  const tip = await unmerged(ctx, 'ai-team/other');
+  job.tasks = [{ checkpoint: { wip: { commit: tip } } }, { checkpoint: { wip: { commit: await git(ctx, ['rev-parse', 'main']) } } }];
+  const plan = await planJob({ ...ctx, job }); plan.dryRun = false;
+  const result = await apply(plan, ctx);
+  assert.ok(result.results.every(r => r.status === 'ok' && !r.archived));
+  assert.equal(await git(ctx, ['tag', '--list', 'archive/*']), '');
+});
+
+test('archive failure keeps cancelled branches and records the error', async t => {
+  const ctx = await repository(t), job = ctx.jobs[0], branch = `ai-team/${job.id}`; job.status = 'cancelled';
+  const tip = await unmerged(ctx, branch);
+  const plan = await planJob({ ...ctx, job }); plan.dryRun = false;
+  const original = ctx.run;
+  ctx.run = (exe, args, options) => args.includes('update-ref') ? { code: 1, stderr: 'Archive denied' } : original(exe, args, options);
+  const result = await apply(plan, ctx);
+  assert.equal(result.results[0].status, 'error'); assert.match(result.results[0].detail, /Archive denied/);
+  assert.equal(await git(ctx, ['rev-parse', branch]), tip);
+});
+
+test('cancelled merged branches need no archive and WIP on a deleted child remains recoverable', async t => {
+  const ctx = await repository(t), job = ctx.jobs[0], branch = `ai-team/${job.id}`; job.status = 'cancelled';
+  await git(ctx, ['branch', branch, 'main']);
+  const tip = await unmerged(ctx, `${branch}-t1`);
+  job.tasks = [{ checkpoint: { wip: { branch: `${branch}-t1`, commit: tip } } }];
+  const plan = await planJob({ ...ctx, job }); plan.dryRun = false;
+  const result = await apply(plan, ctx);
+  assert.ok(result.results.every(r => r.status === 'ok'), JSON.stringify(result.results));
+  assert.equal(result.results.find(r => r.target === branch).archived, undefined);
+  assert.equal(await git(ctx, ['tag', '--list', `archive/${job.id}`]), '');
+  assert.equal(await git(ctx, ['rev-parse', `refs/tags/archive/${job.id}-wip-t1`]), tip);
+  assert.equal(await git(ctx, ['rev-parse', `refs/tags/archive/${job.id}-t1`]), tip);
+});
+
+test('WIP archive failure keeps child worktrees and branches', async t => {
+  const ctx = await repository(t), job = ctx.jobs[0], branch = `ai-team/${job.id}-t1`; job.status = 'cancelled';
+  const tip = await unmerged(ctx, branch), target = join(ctx.dataDir, 'worktrees', `${job.id}-t1`);
+  await git(ctx, ['worktree', 'add', target, branch]);
+  job.tasks = [{ checkpoint: { wip: { commit: tip } } }];
+  const plan = await planJob({ ...ctx, job }); plan.dryRun = false;
+  const original = ctx.run;
+  ctx.run = (exe, args, options) => args.includes('update-ref') ? { code: 1, stderr: 'Archive denied' } : original(exe, args, options);
+  const result = await apply(plan, ctx);
+  assert.ok(result.results.every(r => r.status === 'error'));
+  assert.ok(existsSync(target));
+  assert.equal(await git(ctx, ['rev-parse', branch]), tip);
+});
+
+for (const dirty of ['tracked', 'untracked']) test(`dirty ${dirty} worktree stays registered and prevents cleanedAt`, async t => {
+  const ctx = await controller(t), job = await changedJob(ctx);
+  job.status = 'done'; ctx.team.save(job);
+  const path = join(job.worktree, dirty === 'tracked' ? 'hello.txt' : 'untracked.txt');
+  writeFileSync(path, 'Keep local changes\n');
+  const result = await ctx.team.cleanupJob(job.id);
+  assert.equal(result.results.find(r => r.kind === 'worktree').status, 'skipped');
+  assert.equal(result.results.find(r => r.kind === 'worktree').detail, 'dirty – kept');
+  assert.equal(readFileSync(path, 'utf8'), 'Keep local changes\n');
+  assert.ok((await git(ctx, ['worktree', 'list', '--porcelain'])).includes(job.id));
+  assert.equal(ctx.team.get(job.id).cleanedAt, undefined);
+});
+
+function orphanContext(ctx, items) {
+  return { ...ctx, jobs: [], projects: [{ id: 'p', path: ctx.root }], items, mainBranchOf: async () => 'main' };
+}
+
+test('orphan branches archive unmerged tips before deletion and remove merged tips without tags', async t => {
+  const ctx = await repository(t), branch = 'ai-team/12345678-task', mergedBranch = 'ai-team/87654321';
+  const tip = await unmerged(ctx, branch);
+  await git(ctx, ['branch', mergedBranch, 'main']);
+  const input = orphanContext(ctx, [{ kind: 'branch', root: ctx.root, target: branch, tip }, { kind: 'branch', root: ctx.root, target: mergedBranch }]);
+  const original = input.run;
+  input.run = async (exe, args, options) => {
+    if (args.includes('-D') && args.at(-1) === branch) assert.equal(await git(ctx, ['rev-parse', 'refs/tags/archive/12345678-task']), tip);
+    return original(exe, args, options);
+  };
+  const result = await applyOrphans(input);
+  assert.ok(result.results.every(r => r.status === 'ok'), JSON.stringify(result.results));
+  assert.equal(result.results[0].archived, 'archive/12345678-task');
+  assert.equal(result.results[1].archived, undefined);
+  assert.equal(await git(ctx, ['branch', '--list', branch, mergedBranch]), '');
+  assert.equal(await git(ctx, ['tag', '--list', 'archive/87654321*']), '');
+  assert.deepEqual(JSON.parse(readFileSync(join(ctx.dataDir, 'cleanup', `${result.id}.json`), 'utf8')), result);
+});
+
+test('orphan cleanup rejects existing jobs, active jobs, stale tips, foreign repos and non-team refs', async t => {
+  const ctx = await repository(t), branch = `ai-team/${ctx.jobs[0].id}-slug-t1`;
+  const initial = await git(ctx, ['rev-parse', 'HEAD']), tip = await unmerged(ctx, branch);
+  const entry = { kind: 'branch', root: ctx.root, target: branch, tip };
+  for (const overrides of [{ jobs: ctx.jobs }, { isActive: async () => true }, { items: [{ ...entry, tip: initial }] }, { projects: [] }, { items: [{ ...entry, target: 'main' }] }]) {
+    const result = await applyOrphans({ ...orphanContext(ctx, [entry]), ...overrides });
+    assert.equal(result.results[0].status, 'error');
+    assert.equal(await git(ctx, ['rev-parse', branch]), tip);
+  }
+  assert.equal(await git(ctx, ['tag', '--list', 'archive/*']), '');
+});
+
+test('orphan cleanup rechecks tips and ownership immediately before deletion', async t => {
+  const ctx = await repository(t), branch = 'ai-team/12345678';
+  const tip = await unmerged(ctx, branch), initial = await git(ctx, ['rev-parse', 'main']);
+  const input = orphanContext(ctx, [{ kind: 'branch', root: ctx.root, target: branch, tip }]);
+  input.mainBranchOf = async () => { await git(ctx, ['update-ref', `refs/heads/${branch}`, initial]); return 'main'; };
+  let result = await applyOrphans(input);
+  assert.equal(result.results[0].status, 'error'); assert.match(result.results[0].detail, /tip changed/);
+  assert.equal(await git(ctx, ['rev-parse', branch]), initial);
+  input.items[0].tip = initial;
+  input.mainBranchOf = async () => { input.jobs.push({ id: '12345678', status: 'cancelled' }); return 'main'; };
+  result = await applyOrphans(input);
+  assert.equal(result.results[0].status, 'error'); assert.match(result.results[0].detail, /existing job/);
+  assert.equal(await git(ctx, ['rev-parse', branch]), initial);
+});
+
+test('orphan cleanup rejects worktree HEAD changes after the status check', async t => {
+  const ctx = await repository(t), target = join(ctx.dataDir, 'worktrees', '12345678');
+  await git(ctx, ['worktree', 'add', '--detach', target, 'main']);
+  const input = orphanContext(ctx, [{ kind: 'worktree', root: ctx.root, target }]), original = input.run;
+  input.run = async (exe, args, options) => {
+    const result = await original(exe, args, options);
+    if (args.includes('status')) {
+      const change = await original(['git'], ['-C', target, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '--allow-empty', '-m', 'Changed during cleanup'], options);
+      assert.equal(change.code, 0, change.stderr);
+    }
+    return result;
+  };
+  const result = await applyOrphans(input);
+  assert.equal(result.results[0].status, 'error'); assert.match(result.results[0].detail, /Worktree changed/);
+  assert.ok(existsSync(target));
+});
+
+test('orphan worktrees remove clean trees and reject dirty, owned and outside paths', async t => {
+  const ctx = await repository(t), dir = join(ctx.dataDir, 'worktrees');
+  const targets = [join(dir, '12345678'), join(dir, '87654321'), join(dir, `${ctx.jobs[0].id}-review-1234`), join(ctx.temp, 'outside')];
+  for (const target of targets) await git(ctx, ['worktree', 'add', '--detach', target, 'main']);
+  writeFileSync(join(targets[1], 'hello.txt'), 'dirty\n');
+  const items = targets.map(target => ({ kind: 'worktree', root: ctx.root, target }));
+  const result = await applyOrphans({ ...orphanContext(ctx, items), jobs: ctx.jobs });
+  assert.deepEqual(result.results.map(r => r.status), ['ok', 'skipped', 'error', 'error']);
+  assert.equal(result.results[1].detail, 'dirty – kept');
+  assert.equal(existsSync(targets[0]), false);
+  for (const target of targets.slice(1)) assert.ok(existsSync(target));
+});
+
+test('orphan cleanup prunes missing ai-team worktrees even outside the data directory', async t => {
+  const ctx = await repository(t), target = join(ctx.temp, 'missing');
+  await git(ctx, ['worktree', 'add', '-b', 'ai-team/12345678', target, 'main']);
+  rmSync(target, { recursive: true });
+  const result = await applyOrphans(orphanContext(ctx, [{ kind: 'worktree', root: ctx.root, target }]));
+  assert.equal(result.results[0].status, 'ok', result.results[0].detail);
+  assert.equal((await git(ctx, ['worktree', 'list', '--porcelain'])).includes(target.replace(/\\/g, '/')), false);
+  assert.equal(await git(ctx, ['branch', '--list', 'ai-team/12345678']), 'ai-team/12345678');
 });
 
 test('GET/POST cleanup API requires CSRF and a matching latest dry-run manifest', { timeout: 30_000 }, async t => {
