@@ -1084,5 +1084,9 @@
   "srv.team.rework_origin_unknown": "指摘の発生要因は未確定",
   "ui.rework.unknown": "指摘の発生要因は未確定",
   "srv.team.roster_changed": "役割の変更により担当を交代: {0} → {1}",
-  "srv.team.no_role_agent": "{0} の役割を持つエージェントがいません"
+  "srv.team.no_role_agent": "{0} の役割を持つエージェントがいません",
+  "srv.team.delete_unmerged": "メインブランチに未統合のコミットがあります。削除する前にコードをアーカイブしてください。",
+  "srv.team.delete_dirty": "未保存の変更があるワークツリーは削除できません: {0}",
+  "srv.team.delete_changed": "削除中にジョブまたはブランチが変更されました。確認して再試行してください。",
+  "srv.team.session_delete_blocked": "一部のジョブを削除できませんでした。セッションと対象ジョブを保持しました。"
 }

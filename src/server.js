@@ -120,6 +120,9 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && projectAccess) { const input = await body(req); return send(res, 200, projectAccess[2] ? await team.proposeAccess(projectAccess[1], Array.isArray(input.candidates) ? input.candidates.slice(0, 20) : []) : accounts.setAccess(projectAccess[1], input)); }
     const projectPreview = /^\/api\/projects\/([a-z0-9-]+)\/preview\/propose$/.exec(url.pathname);
     if (req.method === 'POST' && projectPreview) return send(res, 200, await team.proposePreview(projectPreview[1]));
+    if (req.method === 'POST' && url.pathname === '/api/reconcile') return send(res, 200, await team.reconcile({ force: true }));
+    if (req.method === 'GET' && url.pathname === '/api/orphans') return send(res, 200, await team.orphans());
+    if (req.method === 'POST' && url.pathname === '/api/orphans/delete') return send(res, 200, await team.deleteOrphans((await body(req)).items));
     if (req.method === 'GET' && url.pathname === '/api/memory/search') return send(res, 200, await team.searchMemory(Object.fromEntries(url.searchParams)));
     if (req.method === 'GET' && url.pathname === '/api/memory') return send(res, 200, team.memory(team.project(url.searchParams.get('project') || '').id, url.searchParams.get('session') || null, url.searchParams.has('history')));
     if (req.method === 'GET' && url.pathname === '/api/memory/export') { const project = team.project(url.searchParams.get('project') || '').id; res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': `attachment; filename="ai-team-memory-${project}.json"` }); res.end(JSON.stringify(team.memoryStore.export(project), null, 2)); return; }
@@ -207,7 +210,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'POST' && action === 'merge') return send(res, 200, await team.merge(id, await body(req)));
     }
     send(res, 404, { error: 'Not found' });
-  } catch (e) { send(res, e.code === 409 ? 409 : 400, { error: e.message, ...(e.jobs ? { jobs: e.jobs } : {}) }); }
+  } catch (e) { send(res, e.code === 409 ? 409 : 400, { error: e.message, ...(e.jobs ? { jobs: e.jobs } : {}), ...(e.details ? { details: e.details } : {}) }); }
 });
 let update;
 function broadcast() {

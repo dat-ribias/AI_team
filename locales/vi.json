@@ -1084,5 +1084,9 @@
   "srv.team.rework_origin_unknown": "Chưa xác định nguồn finding",
   "ui.rework.unknown": "Chưa xác định nguồn finding",
   "srv.team.roster_changed": "Đổi người do roster thay đổi: {0} → {1}",
-  "srv.team.no_role_agent": "Không còn agent có vai trò {0}"
+  "srv.team.no_role_agent": "Không còn agent có vai trò {0}",
+  "srv.team.delete_unmerged": "Công việc còn commit chưa vào nhánh chính. Hãy lưu trữ code trước khi xóa.",
+  "srv.team.delete_dirty": "Không thể xóa worktree còn thay đổi chưa lưu: {0}",
+  "srv.team.delete_changed": "Công việc hoặc branch đã đổi trong lúc xóa. Kiểm tra rồi thử lại.",
+  "srv.team.session_delete_blocked": "Một số công việc không thể xóa. Đã giữ lại phiên và các công việc bị chặn."
 }

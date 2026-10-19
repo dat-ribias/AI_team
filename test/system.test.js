@@ -1051,9 +1051,10 @@ test('failed merge-commit tests and test mutations never update the target', asy
       await assert.rejects(team.merge(job.id, { target }), /worktree/);
       assert.equal(team.get(job.id).pendingMerge, null);
     } else {
-      const prepared = await team.merge(job.id, { target }); assert.equal(prepared.pendingMerge.passed, false);
+      await assert.rejects(team.merge(job.id, { target }), /tests failed/);
+      const prepared = team.get(job.id); assert.equal(prepared.pendingMerge.passed, false);
       assert.equal(prepared.checkResults.at(-1).code, 9);
-      await assert.rejects(team.merge(job.id, { target, approveMerge: prepared.pendingMerge.commit }), /tests failed/);
+      assert.equal(prepared.stage, 'rework'); assert.equal(prepared.status, 'queued');
     }
     assert.equal(await branchTip(f, target.branch), tip);
     assert.equal((await run(['git'], ['-C', f.path, 'worktree', 'list', '--porcelain'])).stdout, before);
@@ -1247,7 +1248,7 @@ test('member system prompt reaches the agent; risky merge needs typed confirmati
   assert.equal(team.get(job.id).status, 'merged');
 });
 
-test('base moved: merge refused, sync re-runs the gates', async t => {
+test('base moved: merge refused, automatic sync re-runs the gates', async t => {
   const f = await fixture(), team = new Team(f.config, f.data); t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello' });
   await settle(team, job.id, 'ready');
@@ -1255,7 +1256,6 @@ test('base moved: merge refused, sync re-runs the gates', async t => {
   await run(['git'], ['-C', f.path, 'add', '.']);
   await run(['git'], ['-C', f.path, '-c', 'user.name=T', '-c', 'user.email=t@l', 'commit', '-m', 'other']);
   await assert.rejects(team.merge(job.id), /Cập nhật theo base/);
-  await team.control(job.id, 'sync');
   const again = await settle(team, job.id, 'ready');
   assert.equal(again.tested, again.revision);
   await team.merge(job.id);

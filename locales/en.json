@@ -1084,5 +1084,9 @@
   "srv.team.rework_origin_unknown": "Finding origin undetermined",
   "ui.rework.unknown": "Finding origin undetermined",
   "srv.team.roster_changed": "Reassigned due to roster change: {0} → {1}",
-  "srv.team.no_role_agent": "No agent has role {0}"
+  "srv.team.no_role_agent": "No agent has role {0}",
+  "srv.team.delete_unmerged": "This job has commits outside the main branch. Archive its code before deleting it.",
+  "srv.team.delete_dirty": "Cannot delete dirty worktrees: {0}",
+  "srv.team.delete_changed": "The job or branch changed during deletion. Inspect it and try again.",
+  "srv.team.session_delete_blocked": "Some jobs could not be deleted. The session and blocked jobs were kept."
 }
