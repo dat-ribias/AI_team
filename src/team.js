@@ -38,6 +38,8 @@ export function autoTitle(goal) {
   return length && length <= 60 ? line.slice(0, length) : line.slice(0, 59) + '…';
 }
 export const jobTitle = job => job.title || autoTitle(job.goal);
+export const taskTitle = task => (cleanTitle(String(task?.title || '')) || cleanTitle(String(task?.instruction || '').split(/\r?\n/)[0])).slice(0, 60);
+export const titleSlug = title => String(title || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\u0111\u0110]/g, 'd').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, '');
 const usageStores = new WeakMap();
 const usageFor = (db, options) => {
   if (!usageStores.has(db)) usageStores.set(db, initializeUsage(db, options));
@@ -942,7 +944,8 @@ export class Team extends EventEmitter {
     else baseBranch = await git(root, ['symbolic-ref', '--short', 'HEAD']);
     if (accessOf(p).repos.length && baseBranch !== current) throw new Error('Choosing another base branch with linked repositories is not supported');
     const base = await git(root, ['rev-parse', `refs/heads/${baseBranch}`]);
-    const id = randomUUID().slice(0, 8), branch = `ai-team/${id}`;
+    const id = randomUUID().slice(0, 8), slug = titleSlug(jobTitle({ title, goal })), branch = `ai-team/${id}${slug ? `-${slug}` : ''}`;
+    await git(root, ['check-ref-format', '--branch', branch]);
     const worktree = join(this.dataDir, 'worktrees', id);
     mkdirSync(join(this.dataDir, 'worktrees'), { recursive: true });
     // Repo liên kết: kiểm tra sạch trước khi tạo gì, rồi mỗi repo một worktree + branch ai-team/<id> riêng.
@@ -1506,7 +1509,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const finding = '{"id":"F1","claim":"what is wrong","failsWhen":"input or condition that breaks it","evidence":"file:line or command output","check":"how to confirm","impact":"high|medium|low"' + (['review', 'verify'].includes(stage) ? ',"origin":"owner|builder|unknown","scopeAddId":"recorded scope addition id, only for owner","originReason":"evidence explaining the source; unknown if unproven"' : '') + '}';
     let shape = stage === 'challenge' ? `{"summary":"one sentence","status":"completed","objections":[${finding}]}`
       : stage === 'plan'
-      ? `{"summary":"at most 2 sentences: approach and delegation rationale; do not restate the goal","title":"short job title ≤60 chars in the goal's language","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task","context":"files:lines, symbols, callers/callees and pitfalls the builder needs","files":["paths this task edits"],"dependsOn":[],"estMinutes":10}],"reviewSkills":["optional skills for the reviewer/verifier"],"flow":{"reviewer":"optional member id","verifier":"optional member id","steps":["optional subset of review,verify,final"]},"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
+      ? `{"summary":"at most 2 sentences: approach and delegation rationale; do not restate the goal","title":"short job title ≤60 chars in the goal's language","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"title":"short task title ≤60 chars","agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task","context":"files:lines, symbols, callers/callees and pitfalls the builder needs","files":["paths this task edits"],"dependsOn":[],"estMinutes":10}],"reviewSkills":["optional skills for the reviewer/verifier"],"flow":{"reviewer":"optional member id","verifier":"optional member id","steps":["optional subset of review,verify,final"]},"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
       : stage === 'research' || stage === 'final' && job.kind === 'research'
         ? '{"summary":"short answer","status":"completed or blocked","findings":["finding with evidence"],"sources":["file:line, command, or URL"],"conclusion":"conclusion with reasoning","confidence":"low|medium|high","openQuestions":["what is still unknown"],"contextGaps":["what you had to look up beyond taskContext"]}'
         : `{"summary":"actual work and evidence","status":"completed or blocked","verdict":"approved or changes_requested","findings":[${finding}],"tests":"what actually ran; do not invent"${stage === 'implement' ? ',"contextGaps":["what you had to look up beyond taskContext"]' + (job.round ? ',"responses":[{"finding":"F1 from lastChecks","action":"fixed|rejected|unclear","evidence":"proof (rejected needs evidence)"}]' : '') : ''}${stage === 'verify' ? ',"rulings":[{"finding":"F1","upheld":true,"evidence":"check you ran and its result"}]' : ''}}`;
@@ -1704,7 +1707,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (merging || await git(wt, ['diff', '--cached', '--name-only'])) {
       const id = agent || job.reports?.findLast(r => r.stage === 'implement')?.agent || job.implementers?.at(-1) || job.reports?.at(-1)?.agent || (job.roster || roster(this.config)).builders[0] || 'controller';
       const label = this.config.agents.find(a => a.id === id)?.label || id;
-      await git(wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `AI Team ${job.id}${taskIndex != null ? ` T${taskIndex + 1}` : ''} ${id}: checkpoint`]);
+      await git(wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `${taskIndex != null ? taskTitle(job.tasks?.[taskIndex]) : jobTitle(job)} (${cleanTitle(label)})`]);
     }
   }
   async checkpoint(job, options = {}) {
@@ -1833,7 +1836,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (const [k, [task, i, who]] of batch.entries()) {
       if (results[k].status !== 'fulfilled' || conflict) continue;
       if (children[k]) {
-        const merged = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge T${i + 1} (${task.ranBy || who}) into ai-team/${job.id}`, children[k].branch], { allowFailure: true, timeoutMs: 120_000 });
+        const merged = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge: ${taskTitle(task)} (${cleanTitle(this.agent(task.ranBy || who).label || task.ranBy || who)}) [#${job.id}]`, children[k].branch], { allowFailure: true, timeoutMs: 120_000 });
         if (merged.code !== 0) {
           const files = await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']).catch(() => '');
           await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true });
@@ -2865,7 +2868,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
         if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
         current();
-        const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} into ai-team/${job.id}`, head], { allowFailure: true, timeoutMs: 120_000 });
+        const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} vào: ${jobTitle(job)} [#${job.id}]`, head], { allowFailure: true, timeoutMs: 120_000 });
         const conflicts = result.code === 0 ? '' : await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']);
         if (result.code !== 0 && !conflicts) { await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true }); throw new Error(msg("srv.team.merge_base_that_bai") + redact(result.stderr).slice(0, 2000)); }
         current();
@@ -3129,7 +3132,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         await git(root, ['worktree', 'add', '--detach', wt, destination.tip]);
         try {
           const builders = [...new Set(job.tasks.filter(t => t.kind !== 'review').map(t => t.ranBy || t.agent).filter(Boolean))];
-          const result = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ai-team/${job.id} (${builders.join(',')}) into ${destination.branch}`, job.revision], { allowFailure: true, timeoutMs: 120_000 });
+          const result = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge: ${jobTitle(job)} [#${job.id}]`, job.revision], { allowFailure: true, timeoutMs: 120_000 });
           if (result.code !== 0) {
             const conflicts = await git(wt, ['diff', '--name-only', '--diff-filter=U']);
             await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true });
