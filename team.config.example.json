@@ -1,6 +1,7 @@
 {
   "demo": false,
   "port": 3333,
+  "pricing": { "gpt-5": { "input": 1.25, "output": 10, "cached": 0.125 }, "claude-opus": { "input": 5, "output": 25, "cached": 0.5, "cacheWrite": 6.25 } },
   "dataDir": "D:\\<TEAM_DIR>\\.team\\state",
   "maxRamPercent": 85,
   "maxCpuPercent": 90,

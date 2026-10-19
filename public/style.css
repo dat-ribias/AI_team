@@ -296,3 +296,4 @@ body.nav-collapsed .nav-toggle{position:static;margin:0 auto 14px;display:block}
 .cleanup-group small{display:block}
 .metric .metric-agents-warning{display:block;color:var(--amber);overflow-wrap:anywhere}
 .merge-resync{border-top:1px solid var(--line);margin-top:14px;padding-top:14px;overflow-wrap:anywhere}.merge-resync button{min-height:44px;margin-top:10px;max-width:100%;white-space:normal}.merge-busy{margin-top:14px}#merge-dialog{max-height:95vh;overflow:auto}
+.ask-dialog{width:min(440px,90vw)}#ask-message{white-space:pre-wrap;margin:0;overflow-wrap:anywhere}#ask-input{margin-top:14px}.ask-actions{display:flex;flex-direction:row-reverse;gap:8px;margin-top:22px}.ask-actions button{width:auto;margin:0}.job-card.deleting{opacity:.45;pointer-events:none}

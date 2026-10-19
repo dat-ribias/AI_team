@@ -44,6 +44,15 @@ async function attempt(fn) {
   }
 }
 document.addEventListener('close', e => e.target.querySelector?.('.dialog-error')?.remove(), true);
+// Xác nhận / nhập liệu bằng popup <dialog> thay cho confirm()/prompt() của trình duyệt (bị chặn ở một số webview).
+// ask(msg) → true/false; ask(msg, { input: true, value }) → chuỗi hoặc null khi hủy.
+function ask(message, { input = false, value = '', ok = t('ui.common.ok'), danger = false } = {}) {
+  const d = $('ask-dialog'), field = $('ask-input'), btn = $('ask-ok');
+  $('ask-message').textContent = message; field.hidden = !input; field.value = value;
+  btn.textContent = ok; btn.className = danger ? 'danger-ghost' : 'primary';
+  d.returnValue = ''; d.showModal(); (input ? field : btn).focus();
+  return new Promise(done => { d.onclose = () => { const yes = d.returnValue === 'ok'; done(input ? (yes ? field.value : null) : yes); }; });
+}
 // Đính kèm: chọn file, dán ảnh (Ctrl+V) hoặc kéo thả; gửi dạng base64 cùng mục tiêu/chỉ dẫn.
 const pending = { goal: [], message: [] };
 const readFile = file => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok({ name: file.name || `paste-${Date.now()}.png`, data: String(r.result).split(',')[1], size: file.size }); r.onerror = fail; r.readAsDataURL(file); });
@@ -282,6 +291,7 @@ function tokenRange(timezone, now = new Date()) {
   if (tokenFilter.period === 'custom') { from = tokenFilter.from; to = tokenFilter.to ? tokenShift(tokenFilter.to, 1) : ''; }
   return { from, to };
 }
+const tokenCost = r => !r.calls || r.unpricedCalls === r.calls ? '—' : '$' + r.cost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
 const tokenJobCache = new Map();
 function tokenJobLink(job) {
   const key = `${job.id}:${job.usage?.calls}:${job.usage?.tokens}:${job.status}`, cached = tokenJobCache.get(key);
@@ -309,18 +319,18 @@ function tokenCSV(rows) {
 }
 function tokenExport() {
   if (!tokenReports) return;
-  const rows = [['from', 'to', 'timezone', 'groupBy', 'key', 'tokens', 'calls', 'durationMs', 'tokensPerMinute', 'wasteRatio', 'unknownTokenCalls', 'unknownDurationCalls']];
-  for (const report of Object.values(tokenReports)) for (const row of [{ key: 'total', ...report.totals }, ...report.groups]) rows.push([report.from, report.to, report.timezone, report.groupBy, row.key, row.tokens, row.calls, row.durationMs, row.tokensPerMinute, row.wasteRatio, row.unknownTokenCalls, row.unknownDurationCalls]);
+  const rows = [['from', 'to', 'timezone', 'groupBy', 'key', 'tokens', 'calls', 'durationMs', 'tokensPerMinute', 'wasteRatio', 'unknownTokenCalls', 'unknownDurationCalls', 'costUsd', 'unpricedCalls']];
+  for (const report of Object.values(tokenReports)) for (const row of [{ key: 'total', ...report.totals }, ...report.groups]) rows.push([report.from, report.to, report.timezone, report.groupBy, row.key, row.tokens, row.calls, row.durationMs, row.tokensPerMinute, row.wasteRatio, row.unknownTokenCalls, row.unknownDurationCalls, row.cost, row.unpricedCalls]);
   const url = URL.createObjectURL(new Blob(['\uFEFF', tokenCSV(rows)], { type: 'text/csv;charset=utf-8' }));
   const link = document.createElement('a'); link.href = url; link.download = 'usage.csv'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function tokenRanking(report) {
   const jobGroup = report.groupBy === 'job';
-  return `<section class="panel token-ranking"><h3>${esc(t('ui.token.' + report.groupBy))}</h3><div class="token-table-wrap"><table><thead><tr>${['name', 'tokens', 'minutes', 'calls', ...(jobGroup ? ['fixes'] : [])].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${[...report.groups].sort((a, b) => b.tokens - a.tokens).map(row => {
+  return `<section class="panel token-ranking"><h3>${esc(t('ui.token.' + report.groupBy))}</h3><div class="token-table-wrap"><table><thead><tr>${['name', 'tokens', 'cost', 'minutes', 'calls', ...(jobGroup ? ['fixes'] : [])].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${[...report.groups].sort((a, b) => b.tokens - a.tokens).map(row => {
     const job = jobGroup && state.jobs.find(j => j.id === row.key);
-    const label = job ? job.goal : report.groupBy === 'agent' ? names[row.key] || row.key : row.key;
-    return `<tr><th scope="row">${jobGroup ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(label || t('ui.common.unknown'))}</a>` : esc(label || t('ui.common.unknown'))}${job ? `<small>${esc(row.key)}</small>` : ''}</th><td>${tokenNumber(row.tokens)}</td><td>${tokenNumber(row.durationMs / 60000)}</td><td>${tokenNumber(row.calls)}</td>${jobGroup ? `<td>${tokenNumber(job ? job.round ?? null : null)}</td>` : ''}</tr>`;
-  }).join('') || `<tr><td colspan="${jobGroup ? 5 : 4}">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
+    const label = job ? jobTitle(job) : report.groupBy === 'agent' ? names[row.key] || row.key : row.key;
+    return `<tr><th scope="row">${jobGroup ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(label || t('ui.common.unknown'))}</a>` : esc(label || t('ui.common.unknown'))}${job ? `<small>${esc(row.key)}</small>` : ''}</th><td>${tokenNumber(row.tokens)}</td><td title="${row.unpricedCalls ? esc(t('ui.token.unpriced', { n: row.unpricedCalls })) : ''}">${tokenCost(row)}</td><td>${tokenNumber(row.durationMs / 60000)}</td><td>${tokenNumber(row.calls)}</td>${jobGroup ? `<td>${tokenNumber(job ? job.round ?? null : null)}</td>` : ''}</tr>`;
+  }).join('') || `<tr><td colspan="${jobGroup ? 6 : 5}">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
 }
 async function drawToken() {
   if (!state) return;
@@ -354,7 +364,7 @@ async function drawToken() {
     const agents = reports[2].groups.map(r => r.key).sort(), color = id => colors[agents.indexOf(id) % colors.length];
     const max = Math.max(1, ...days.map(d => d.tokens));
     const comparison = (value, points = false) => value == null ? t('ui.token.noBaseline') : `${value > 0 ? '+' : ''}${tokenNumber(value)}${points ? ' ' + t('ui.token.points') : '%'} ${t('ui.token.previous')}`;
-    const cards = [['tokens', tokenNumber(totals.tokens), change.tokensPercent], ['calls', tokenNumber(totals.calls), change.callsPercent], ['minutes', tokenNumber(totals.durationMs / 60000), change.durationPercent], ['waste', tokenNumber(totals.wasteRatio * 100) + '%', change.wasteRatioPoints]];
+    const cards = [['tokens', tokenNumber(totals.tokens), change.tokensPercent], ['cost', tokenCost(totals), change.costPercent], ['calls', tokenNumber(totals.calls), change.callsPercent], ['minutes', tokenNumber(totals.durationMs / 60000), change.durationPercent], ['waste', tokenNumber(totals.wasteRatio * 100) + '%', change.wasteRatioPoints]];
     const stage = reports[3].groups.find(r => r.key === 'review'), wasted = [...reports[1].groups].sort((a, b) => b.wastedTokens - a.wastedTokens)[0];
     const tips = [];
     if (totals.tokens && stage?.tokens / totals.tokens > .4) tips.push(t('ui.token.reviewTip'));
@@ -368,7 +378,7 @@ async function drawToken() {
       }).join('');
       return `<div class="token-column"><span>${tokenNumber(day.tokens)}</span><svg class="token-stack" viewBox="0 0 46 180" preserveAspectRatio="none" aria-hidden="true">${bars}</svg><small>${esc(day.key.slice(5))}</small></div>`;
     };
-    $('token-data').innerHTML = `<div class="token-totals">${cards.map(([k, value, delta]) => `<div class="metric"><span>${esc(t('ui.token.' + k))}</span><strong>${esc(value)}</strong><small>${esc(comparison(delta, k === 'waste'))}</small></div>`).join('')}</div><p class="token-range muted">${esc(t('ui.token.rate', { rate: tokenNumber(totals.tokensPerMinute) }))}${totals.unknownTokenCalls || totals.unknownDurationCalls ? ' · ' + esc(t('ui.token.partial', { tokens: totals.unknownTokenCalls, durations: totals.unknownDurationCalls })) : ''}</p><section class="panel token-chart-panel"><h3>${esc(t('ui.token.daily'))}</h3><div class="token-legend">${agents.map(id => `<span><svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="${color(id)}"/></svg>${esc(names[id] || id)}</span>`).join('')}</div><div class="token-chart" role="img" aria-label="${esc(t('ui.token.daily'))}">${days.map(column).join('') || `<p>${esc(t('ui.token.empty'))}</p>`}</div><details><summary>${esc(t('ui.token.chartData'))}</summary><div class="token-table-wrap"><table><thead><tr>${['day', 'agent', 'tokens'].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${days.flatMap(day => (members.get(day.key) || []).map(row => `<tr><td>${esc(day.key)}</td><td>${esc(names[row.key] || row.key || t('ui.common.unknown'))}</td><td>${tokenNumber(row.tokens)}</td></tr>`)).join('')}</tbody></table></div></details></section><div class="token-rankings">${reports.slice(1).map(tokenRanking).join('')}</div><section class="panel token-tips"><h3>${esc(t('ui.token.tips'))}</h3>${(tips.length ? tips : [t('ui.token.noTips')]).map(tip => `<p>${esc(tip)}</p>`).join('')}</section>`;
+    $('token-data').innerHTML = `<div class="token-totals">${cards.map(([k, value, delta]) => `<div class="metric"><span>${esc(t('ui.token.' + k))}</span><strong>${esc(value)}</strong><small>${esc(k === 'cost' && totals.unpricedCalls ? t('ui.token.unpriced', { n: totals.unpricedCalls }) : comparison(delta, k === 'waste'))}</small></div>`).join('')}</div><p class="token-range muted">${esc(t('ui.token.rate', { rate: tokenNumber(totals.tokensPerMinute) }))}${totals.unknownTokenCalls || totals.unknownDurationCalls ? ' · ' + esc(t('ui.token.partial', { tokens: totals.unknownTokenCalls, durations: totals.unknownDurationCalls })) : ''}</p><section class="panel token-chart-panel"><h3>${esc(t('ui.token.daily'))}</h3><div class="token-legend">${agents.map(id => `<span><svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="${color(id)}"/></svg>${esc(names[id] || id)}</span>`).join('')}</div><div class="token-chart" role="img" aria-label="${esc(t('ui.token.daily'))}">${days.map(column).join('') || `<p>${esc(t('ui.token.empty'))}</p>`}</div><details><summary>${esc(t('ui.token.chartData'))}</summary><div class="token-table-wrap"><table><thead><tr>${['day', 'agent', 'tokens'].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${days.flatMap(day => (members.get(day.key) || []).map(row => `<tr><td>${esc(day.key)}</td><td>${esc(names[row.key] || row.key || t('ui.common.unknown'))}</td><td>${tokenNumber(row.tokens)}</td></tr>`)).join('')}</tbody></table></div></details></section><div class="token-rankings">${reports.slice(1).map(tokenRanking).join('')}</div><section class="panel token-tips"><h3>${esc(t('ui.token.tips'))}</h3>${(tips.length ? tips : [t('ui.token.noTips')]).map(tip => `<p>${esc(tip)}</p>`).join('')}</section>`;
     $('token-data').setAttribute('aria-busy', 'false'); $('token-export').disabled = false;
   } catch (e) {
     if (request !== tokenRequest) return;
@@ -405,7 +415,8 @@ function drawCleanup(manifest, results) {
     ${[...groups].map(([kind, items]) => `<section class="cleanup-group"><h3>${esc(t('ui.cleanup.kind.' + kind))} · ${esc(t('ui.cleanup.group', { n: items.length, mb: (items.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0) / 2 ** 20).toFixed(1) }))}</h3><ul>${items.map(item => {
       const result = results?.find(r => r.kind === item.kind && r.target === item.target);
       return `<li><span>${esc(item.target)}</span><small>${esc(item.reason)}${cleanupKept(item) ? ' · ' + esc(t('ui.cleanup.kept')) : ''}${result ? ' · ' + esc(t('ui.cleanup.status.' + result.status)) + (result.error ? ': ' + esc(result.error) : '') : ''}</small></li>`;
-    }).join('')}</ul></section>`).join('') || `<p class="muted">${esc(t('ui.cleanup.empty'))}</p>`}`;
+    }).join('')}</ul></section>`).join('') || `<p class="muted">${esc(t('ui.cleanup.empty'))}</p>`}
+    ${!cleanupTotals(manifest.items).n && state?.storage?.top?.length ? `<section class="cleanup-group"><h3>${esc(t('ui.cleanup.usage'))}</h3><p class="muted">${esc(t('ui.cleanup.nothingNote'))}</p><ul>${state.storage.top.map(e => `<li><span>${esc(e.name)}</span><small>${(e.bytes / 2 ** 20).toFixed(1)} MB</small></li>`).join('')}</ul></section>` : ''}`;
   $('cleanup-dialog').querySelector('.dialog-error')?.remove();
   if (!$('cleanup-dialog').open) $('cleanup-dialog').showModal();
 }
@@ -415,7 +426,8 @@ async function previewCleanup() {
 async function runCleanup() {
   const manifest = await api('cleanup');
   drawCleanup(manifest);
-  if (!confirm(t('ui.cleanup.confirm', cleanupTotals(manifest.items)))) return;
+  if (!cleanupTotals(manifest.items).n) return; // không có gì để dọn: chỉ xem trước, không hỏi xác nhận
+  if (!await ask(t('ui.cleanup.confirm', cleanupTotals(manifest.items)))) return;
   try {
     const result = await api('cleanup', { id: manifest.id });
     drawCleanup(manifest, result.results);
@@ -595,8 +607,12 @@ function drawJobsDialog() {
   }).join('');
 
   listEl.querySelectorAll('details').forEach(el => el.onclick = e => e.stopPropagation());
-  listEl.querySelectorAll('[data-job-delete]').forEach(el => el.onclick = e => { e.stopPropagation(); if (!confirm(t('ui.inspector.confirmDelete'))) return;
-    attempt(async () => { await api(`jobs/${el.dataset.jobDelete}/control`, { action: 'delete' }); if (selected === el.dataset.jobDelete) { selected = undefined; events = []; } await refresh(); }); });
+  listEl.querySelectorAll('[data-job-delete]').forEach(el => el.onclick = e => { e.stopPropagation(); attempt(async () => {
+    if (!await ask(t('ui.inspector.confirmDelete'), { ok: t('ui.inspector.delete'), danger: true })) return;
+    const id = el.dataset.jobDelete, card = el.closest('.job-card'); card?.classList.add('deleting'); // xóa worktree/branch có thể mất vài giây: khóa thẻ để khỏi bấm lại
+    try { await api(`jobs/${id}/control`, { action: 'delete' }); } catch (err) { card?.classList.remove('deleting'); throw err; }
+    $('jobs-dialog').querySelector('.dialog-error')?.remove();
+    if (selected === id) { selected = undefined; events = []; } await refresh(); }); });
   listEl.querySelectorAll('[data-job-open], [data-job-select]').forEach(el => {
     el.onclick = e => {
       e.stopPropagation();
@@ -646,8 +662,7 @@ function drawSessions() {
   $('session-tabs').querySelectorAll('[data-session]').forEach(b => { b.onclick = () => { curSession = b.dataset.session; store.set('session', curSession); drawSessions(); selectSessionJob(); }; b.ondblclick = () => $('session-rename').click(); });
   $('session-tabs').querySelectorAll('[data-session-del]').forEach(x => x.onclick = e => { e.stopPropagation();
     const id = x.dataset.sessionDel, n = state.jobs.filter(j => j.sessionId === id).length;
-    if (!confirm(t('ui.session.confirmDelete', { n }))) return;
-    attempt(async () => { await api(`sessions/${id}/delete`, {}); if (curSession === id) { curSession = ''; selected = undefined; events = []; } await refresh(); }); });
+    attempt(async () => { if (!await ask(t('ui.session.confirmDelete', { n }), { ok: t('ui.inspector.delete'), danger: true })) return; await api(`sessions/${id}/delete`, {}); if (curSession === id) { curSession = ''; selected = undefined; events = []; } await refresh(); }); });
 }
 function sessionSummary(session) {
   if (!session) return '';
@@ -928,8 +943,8 @@ function drawInspector() {
     $('obligation-adopt').disabled = !job.tasks.length; $('obligation-dialog').showModal();
   });
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => {
-    if (b.dataset.action === 'cancel' && !confirm(t('ui.inspector.confirmCancel'))) return;
-    if (b.dataset.action === 'delete' && !confirm(t('ui.inspector.confirmDelete'))) return;
+    if (b.dataset.action === 'cancel' && !await ask(t('ui.inspector.confirmCancel'), { danger: true })) return;
+    if (b.dataset.action === 'delete' && !await ask(t('ui.inspector.confirmDelete'), { ok: t('ui.inspector.delete'), danger: true })) return;
     b.disabled = true; try { await api(`jobs/${selected}/control`, { action: b.dataset.action }); if (b.dataset.action === 'delete') { selected = undefined; events = []; } await refresh(); } finally { b.disabled = false; }
   }));
   $('inspector').querySelectorAll('[data-rework-extra], [data-rework-handoff]').forEach(b => b.onclick = () => attempt(async () => {
@@ -1427,6 +1442,7 @@ async function refresh() {
       const job = state.jobs.find(j => j.id === linkedJob);
       if (job) { curProject = job.project; curSession = job.sessionId || ''; selected = job.id; linkedJob = null; }
     }
+    if (selected && !state.jobs.some(j => j.id === selected)) selected = undefined; // việc đã bị xóa (ở tab khác hoặc vừa xóa)
     if (!selected) selected = state.jobs.find(j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession))?.id;
     if (state.language && state.language !== lang) await loadLanguage(state.language);
     if (eventsOf !== selected) { events = []; eventsOf = selected; }
@@ -1541,9 +1557,9 @@ function drawAccess(reset = false) {
       ${projects.some(p => p.id !== acc.project && !acc.repos.some(r => r.project === p.id)) ? `<select id="acc-repo"><option value="">${esc(t('ui.access.addRepo'))}</option>${projects.filter(p => p.id !== acc.project && !acc.repos.some(r => r.project === p.id)).map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.path)}</option>`).join('')}</select>` : ''}
       ${others.length ? `<select id="acc-other"><option value="">${esc(t('ui.access.addProject'))}</option>${others.map(p => `<option value="${esc(p.path)}">${esc(p.id)} · ${esc(p.path)}</option>`).join('')}</select>` : ''}</div>`;
   const touch = () => { acc.dirty = true; drawAccess(); };
-  const leave = () => !acc.dirty || confirm(t('ui.access.discard'));
-  $('acc-project').onchange = () => { if (!leave()) { $('acc-project').value = acc.project; return; } acc = { project: $('acc-project').value }; drawAccess(true); };
-  $('acc-scope').onchange = () => { if (!leave()) { $('acc-scope').value = acc.scope; return; } acc = { project: acc.project, scope: $('acc-scope').value }; drawAccess(true); };
+  const leave = async () => !acc.dirty || await ask(t('ui.access.discard'), { danger: true });
+  $('acc-project').onchange = async () => { if (!await leave()) { $('acc-project').value = acc.project; return; } acc = { project: $('acc-project').value }; drawAccess(true); };
+  $('acc-scope').onchange = async () => { if (!await leave()) { $('acc-scope').value = acc.scope; return; } acc = { project: acc.project, scope: $('acc-scope').value }; drawAccess(true); };
   document.querySelectorAll('[data-acc]').forEach(x => x.onchange = () => {
     const key = x.dataset.acc, list = key === 'net' ? acc.network : key === 'sh' ? acc.shell : (key[0] === 'r' ? acc.repos : acc.folders)[+key.slice(1)].members, m = x.dataset.m;
     const next = m === '*' ? (x.checked ? ['*'] : []) : x.checked ? [...new Set([...list.filter(v => v !== '*'), m])] : list.filter(v => v !== m);
@@ -1679,9 +1695,9 @@ function projectList() {
     await refresh(); projectList(); if (r.warnings?.length) throw new Error(r.warnings.join('\n'));
   }));
   document.querySelectorAll('[data-remove-project]').forEach(b => b.onclick = () => attempt(async () => {
-    const id = b.dataset.removeProject; if (!confirm(t('ui.project.confirmRemove', { id }))) return;
+    const id = b.dataset.removeProject; if (!await ask(t('ui.project.confirmRemove', { id }), { ok: t('ui.inspector.delete'), danger: true })) return;
     try { await api(`projects/${id}/remove`, {}); }
-    catch (e) { if (e.status !== 409 || !confirm(e.message + '\n\n' + t('ui.project.cancelJobsAndRemove'))) throw e; await api(`projects/${id}/remove`, { cancelJobs: true }); }
+    catch (e) { if (e.status !== 409 || !await ask(e.message + '\n\n' + t('ui.project.cancelJobsAndRemove'), { danger: true })) throw e; await api(`projects/${id}/remove`, { cancelJobs: true }); }
     await refresh(); projectList();
   }));
 }
@@ -1724,8 +1740,8 @@ function selectSessionJob() {
 }
 $('session-project').onchange = () => { if ($('session-project').value === '__add') { $('session-project').value = curProject; $('open-project').click(); return; } curProject = $('session-project').value; curSession = ''; store.set('project', curProject); drawSessions(); selectSessionJob(); };
 $('session-tab').onclick = () => window.open(location.pathname + '#' + new URLSearchParams({ p: curProject }), '_blank');
-$('session-new').onclick = () => attempt(async () => { const name = prompt(t('ui.session.newPrompt')); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); selected = undefined; events = []; await refresh(); });
-$('session-rename').onclick = () => attempt(async () => { if (!curSession) return; const name = prompt(t('ui.session.renamePrompt'), state.sessions.find(x => x.id === curSession)?.name || ''); if (name) { await api(`sessions/${curSession}/rename`, { name }); await refresh(); } });
+$('session-new').onclick = () => attempt(async () => { const name = await ask(t('ui.session.newPrompt'), { input: true }); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); selected = undefined; events = []; await refresh(); });
+$('session-rename').onclick = () => attempt(async () => { if (!curSession) return; const name = await ask(t('ui.session.renamePrompt'), { input: true, value: state.sessions.find(x => x.id === curSession)?.name || '' }); if (name) { await api(`sessions/${curSession}/rename`, { name }); await refresh(); } });
 $('close-slot').onclick = () => $('slot-dialog').close();
 $('slot-member').onchange = slotMember;
 $('slot-form').onsubmit = e => { e.preventDefault(); attempt(saveSlot); };
@@ -1880,7 +1896,7 @@ async function openProjectPrompt(project = curProject) {
   });
   $('prompt-draft-check').onclick = () => attempt(checkDraft);
   $('project-prompt-form').onsubmit = e => { e.preventDefault(); attempt(async () => {
-    if (!confirm(t('ui.prompt.confirm'))) return;
+    if (!await ask(t('ui.prompt.confirm'))) return;
     const button = e.target.querySelector('button'); button.disabled = true;
     try { await api(path, { text: $('prompt-text').value, approved: true, job: currentDraft || undefined }); store.set(key, ''); if (request === promptRequest && $('prompt-dialog').open) await openProjectPrompt(project); }
     finally { button.disabled = false; }

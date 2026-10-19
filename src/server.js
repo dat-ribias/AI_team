@@ -35,7 +35,7 @@ const tokenFile = join(dataDir, 'controller.token');
 const token = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8') : randomBytes(32).toString('hex');
 if (!existsSync(tokenFile)) writeFileSync(tokenFile, token, { mode: 0o600 });
 const team = new Team(config, dataDir);
-const usage = initializeUsage(team.db, { timezone: config.timezone, retentionDays: config.usageRetentionDays });
+const usage = initializeUsage(team.db, { timezone: config.timezone, retentionDays: config.usageRetentionDays, pricing: config.pricing, agentModels: Object.fromEntries((config.agents || []).map(a => [a.id, a.model])) });
 const accounts = new Accounts(team, file, root);
 team.claudeUsage = (id, opts) => accounts.usage(id, opts);
 const port = config.port || 3333, origin = `http://127.0.0.1:${port}`;

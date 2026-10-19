@@ -2625,6 +2625,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     this.cleanupStartup = this.sweepGit().catch(e => this.emit('fault', e)); this.kick();
   }
   async control(id, action, payload = {}) {
+    if (action === 'delete' && !this.db.prepare('SELECT 1 FROM jobs WHERE id=?').get(id)) return { id, deleted: true }; // đã xóa rồi (bấm 2 lần / tab khác): coi như thành công
     const job = this.get(id);
     if (action === 'preview-stop') { await this.stopPreview(id, 'user'); return this.get(id); }
     if (action === 'accept') {
@@ -2824,8 +2825,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   storage() {
     if (!this.storageCache || Date.now() - this.storageCache.at >= 10 * 60_000) this.storageCache = { at: Date.now(), ...storageStats(this.dataDir) };
-    const { dataDirBytes, freeBytes } = this.storageCache;
-    return { dataDirBytes, freeBytes, warn: { dataDir: dataDirBytes > 2 ** 30, disk: freeBytes !== null && freeBytes < 10e9 }, lastCleanup: this.lastCleanup || null };
+    const { dataDirBytes, freeBytes, top } = this.storageCache;
+    return { dataDirBytes, freeBytes, top, warn: { dataDir: dataDirBytes > 2 ** 30, disk: freeBytes !== null && freeBytes < 10e9 }, lastCleanup: this.lastCleanup || null };
   }
   cleanupContext(ownId) {
     return { dataDir: this.dataDir, projects: this.config.projects, agents: this.config.agents, config: this.config, jobs: this.jobs(), run, git,

@@ -287,8 +287,10 @@ export async function apply(plan, ctx) {
 }
 
 export function storageStats(dataDir) {
-  const dataDirBytes = bytes(dataDir);
+  // Dung lượng theo mục cấp 1 để người dùng thấy phần nào đang chiếm chỗ (DB, backups, evidence...).
+  const top = entries(dataDir).map(name => ({ name, bytes: bytes(join(dataDir, name)) })).sort((a, b) => b.bytes - a.bytes);
+  const dataDirBytes = top.reduce((sum, e) => sum + e.bytes, 0);
   let freeBytes = null;
   try { const s = statfsSync(dataDir); freeBytes = Number(s.bavail) * Number(s.bsize); } catch {}
-  return { dataDirBytes, freeBytes };
+  return { dataDirBytes, freeBytes, top: top.slice(0, 8) };
 }

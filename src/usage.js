@@ -60,11 +60,23 @@ export function normalizeUsage(usage, provider) {
   return Object.fromEntries(['inputTokens', 'outputTokens', 'cachedTokens', 'cacheCreationTokens', 'totalTokens', 'tokens'].map(key => [key, sumKnown(rows.map(r => r[key]))]));
 }
 
-function metrics() {
-  return { tokens: 0, calls: 0, durationMs: 0, tokensPerMinute: 0, wastedTokens: 0, wastedCalls: 0, wasteRatio: 0, unknownTokenCalls: 0, unknownDurationCalls: 0 };
+// Giá USD / 1 triệu token theo model (config.pricing): { input, output, cached?, cacheWrite? }.
+// Khớp đúng tên model, rồi tiền tố dài nhất. Không có giá hoặc thiếu số token → null (không đoán).
+export function callCost(row, pricing = {}) {
+  const key = row.model && (pricing[row.model] ? row.model : Object.keys(pricing).filter(k => row.model.startsWith(k)).sort((a, b) => b.length - a.length)[0]);
+  const p = key && pricing[key];
+  if (!p || !Number.isFinite(p.input) || !Number.isFinite(p.output) || row.inputTokens == null || row.outputTokens == null) return null;
+  const cached = row.cachedTokens ?? 0, write = row.cacheCreationTokens ?? 0;
+  const input = row.provider === 'claude' ? row.inputTokens : Math.max(0, row.inputTokens - cached); // Codex/Gemini: cached nằm trong input
+  return (input * p.input + row.outputTokens * p.output + cached * (p.cached ?? p.input) + write * (p.cacheWrite ?? p.input)) / 1e6;
 }
-function add(total, row) {
+function metrics() {
+  return { cost: 0, unpricedCalls: 0, tokens: 0, calls: 0, durationMs: 0, tokensPerMinute: 0, wastedTokens: 0, wastedCalls: 0, wasteRatio: 0, unknownTokenCalls: 0, unknownDurationCalls: 0 };
+}
+function add(total, row, pricing, agentModels = {}) {
   total.calls++;
+  // Dòng cũ (backfill) có thể thiếu model: ước tính theo model hiện tại của thành viên.
+  const cost = callCost(row.model || !agentModels[row.agent] ? row : { ...row, model: agentModels[row.agent] }, pricing); if (cost === null) total.unpricedCalls++; else total.cost += cost;
   total.tokens += row.tokens ?? 0;
   total.durationMs += row.durationMs ?? 0;
   if (row.tokens === null) total.unknownTokenCalls++;
@@ -88,7 +100,8 @@ function finish(total) {
  * older than retentionDays (365 by default). The backfill marker survives it.
  */
 export class UsageStore {
-  constructor(db, { timezone = DEFAULT_USAGE_TIMEZONE, retentionDays = DEFAULT_USAGE_RETENTION_DAYS, now = () => new Date(), backfill = true } = {}) {
+  constructor(db, { timezone = DEFAULT_USAGE_TIMEZONE, retentionDays = DEFAULT_USAGE_RETENTION_DAYS, now = () => new Date(), backfill = true, pricing = {}, agentModels = {} } = {}) {
+    this.pricing = pricing || {}; this.agentModels = agentModels;
     calendar(timezone);
     if (!Number.isFinite(retentionDays) || retentionDays < 0) throw new Error('Invalid usage retention days');
     this.db = db; this.timezone = timezone; this.retentionDays = retentionDays; this.now = now;
@@ -235,17 +248,17 @@ export class UsageStore {
     const query = this.db.prepare(`SELECT * FROM usage_log WHERE ${filters.join(' AND ')} ORDER BY at, id`);
     const totals = metrics(), groups = new Map(), previousTotals = metrics();
     for (const row of query.iterate(from, to, ...values)) {
-      add(totals, row);
+      add(totals, row, this.pricing, this.agentModels);
       const key = groupBy === 'day' ? zone.day(row.at) : row[groupBy];
       if (!groups.has(key)) groups.set(key, { key, ...metrics() });
-      add(groups.get(key), row);
+      add(groups.get(key), row, this.pricing, this.agentModels);
     }
-    for (const row of query.iterate(previousFrom, from, ...values)) add(previousTotals, row);
+    for (const row of query.iterate(previousFrom, from, ...values)) add(previousTotals, row, this.pricing, this.agentModels);
     finish(totals); finish(previousTotals);
     const percent = key => previousTotals[key] ? (totals[key] - previousTotals[key]) / previousTotals[key] * 100 : totals[key] ? null : 0;
     return { from, to, timezone, groupBy, totals, groups: [...groups.values()].map(finish),
       previous: { from: previousFrom, to: from, totals: previousTotals },
-      change: { tokensPercent: percent('tokens'), callsPercent: percent('calls'), durationPercent: percent('durationMs'), wasteRatioPoints: (totals.wasteRatio - previousTotals.wasteRatio) * 100 } };
+      change: { costPercent: percent('cost'), tokensPercent: percent('tokens'), callsPercent: percent('calls'), durationPercent: percent('durationMs'), wasteRatioPoints: (totals.wasteRatio - previousTotals.wasteRatio) * 100 } };
   }
 }
 
