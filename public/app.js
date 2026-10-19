@@ -31,7 +31,7 @@ async function api(path, data) {
   const r = await fetch('/api/' + path, { method: data ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json', 'X-Team-Request': '1' }, ...(data ? { body: JSON.stringify(data) } : {}) });
   const result = await r.json().catch(() => ({}));
   if (r.status === 404 && path.startsWith('members/') || r.status === 404 && path === 'settings') throw new Error(t('ui.error.oldServer'));
-  if (!r.ok) throw Object.assign(new Error(result.error || r.statusText), { status: r.status }); return result;
+  if (!r.ok) throw Object.assign(new Error(result.error || r.statusText), { status: r.status, details: result.details }); return result;
 }
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 async function attempt(fn) {
@@ -71,7 +71,79 @@ function wireAttach(kind, input, target) {
   target.addEventListener('drop', e => { if (e.dataTransfer.files.length) { e.preventDefault(); attempt(() => addFiles(kind, [...e.dataTransfer.files])); } });
 }
 const statusLabel = s => t(`ui.status.${s}`);
-function badge(job) { return `<span class="status ${esc(job.status)}">${esc(statusLabel(job.status))}</span>`; }
+function jobStatusLabel(job) { return job.git ? t(`ui.gitState.${job.git.state}`) : statusLabel(job.status); }
+function badge(job) { return `<span class="status ${esc(job.git?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
+
+let decisionNewIds = new Set(), reconcilePending;
+function decisionId(item) { return item.kind === 'orphans' ? 'orphans' : item.jobId; }
+function decisionReason(item) {
+  if (item.kind === 'orphans') return t('ui.decisions.orphans', { n: item.count });
+  if (['base_moved', 'conflict', 'tests_failed', 'cancelled_unmerged'].includes(item.kind || item.state)) return t(`ui.decisions.${item.kind || item.state}`, { files: (item.files || []).join(', ') });
+  return item.reason || t(`ui.gitState.${item.state}`);
+}
+function drawDecisions() {
+  const box = $('decisions'); if (!box) return;
+  const items = state.decisions || [];
+  let saved; try { saved = JSON.parse(store.get('decision-seen') || '[]'); } catch { saved = []; }
+  const seen = new Set(Array.isArray(saved) ? saved : []), fresh = items.filter(item => !seen.has(decisionId(item)));
+  const active = new Set(items.map(decisionId));
+  decisionNewIds = new Set([...decisionNewIds].filter(id => active.has(id)));
+  fresh.forEach(item => { seen.add(decisionId(item)); decisionNewIds.add(decisionId(item)); });
+  store.set('decision-seen', JSON.stringify([...seen]));
+  box.hidden = !items.length;
+  $('decision-count').textContent = String(decisionNewIds.size);
+  $('decision-count').hidden = !decisionNewIds.size;
+  $('decision-list').innerHTML = items.map(item => `<button type="button" class="decision-row" data-decision="${esc(decisionId(item))}"><span class="decision-job">${esc(item.kind === 'orphans' ? t('ui.orphans.title') : item.title)}${item.jobId ? ` <small>#${esc(item.jobId)}</small>` : ''}</span><span class="decision-reason">${esc(decisionReason(item))}${item.reason && item.reason !== item.kind && item.reason !== decisionReason(item) ? ` — ${esc(item.reason)}` : ''}</span></button>`).join('');
+  $('decision-list').querySelectorAll('[data-decision]').forEach(button => button.onclick = () => attempt(async () => {
+    const id = button.dataset.decision; decisionNewIds.delete(id); drawDecisions(); syncTab();
+    if (id === 'orphans') return openOrphans();
+    const job = state.jobs.find(j => j.id === id); if (!job) return;
+    curProject = job.project; curSession = job.sessionId || ''; selected = id; events = []; filter = null;
+    $('overview').click(); await refresh();
+  }));
+  if (fresh.length) notice(t('ui.decisions.new', { n: fresh.length }));
+}
+async function reconcileAndRefresh() {
+  if (reconcilePending) return reconcilePending;
+  reconcilePending = (async () => { try { await api('reconcile', {}); } finally { await refresh(); } })();
+  try { await reconcilePending; } finally { reconcilePending = null; }
+}
+async function deleteJob(id) {
+  try { await api(`jobs/${id}/control`, { action: 'delete' }); return true; }
+  catch (error) {
+    const details = error.details;
+    if (error.status !== 409 || !details || details.worktrees?.length) throw error;
+    const entries = ['branches', 'wip', 'repos'].flatMap(kind => (details[kind] || []).map(item => `${kind}: ${item.root || ''} ${item.name || item.branch || item.commit || item.revision?.commit || ''}`));
+    if (!entries.length) throw error;
+    if (!await ask(`${error.message}\n\n${entries.join('\n')}\n\n${t('ui.orphans.archiveWarning')}`, { ok: t('ui.delete.archive'), danger: true })) return false;
+    await api(`jobs/${id}/control`, { action: 'delete', archive: true }); return true;
+  }
+}
+let orphanItems = [], orphanDeleting = false;
+function drawOrphans() {
+  $('orphan-list').innerHTML = orphanItems.length ? `<table class="orphan-table"><thead><tr><th scope="col">${esc(t('ui.orphans.select'))}</th>${['kind', 'repo', 'target', 'merged', 'lastCommit', 'flags'].map(key => `<th scope="col">${esc(t('ui.orphans.' + key))}</th>`).join('')}</tr></thead><tbody>${orphanItems.map((item, i) => `<tr><td><input type="checkbox" data-orphan="${i}" aria-label="${esc(t('ui.orphans.select') + ': ' + item.target)}" ${item.dirty ? 'disabled' : ''}></td><td>${esc(t('ui.orphans.' + item.kind))}</td><td>${esc(item.root)}</td><td>${esc(item.target)}${item.branch && item.branch !== item.target ? `<br><small>${esc(item.branch)}</small>` : ''}</td><td>${esc(t(item.inMain ? 'ui.orphans.inMain' : 'ui.orphans.notInMain'))}</td><td>${esc(clock(item.lastCommitAt))}</td><td>${esc([item.dirty && t('ui.orphans.dirty'), item.prunable && t('ui.orphans.prunable')].filter(Boolean).join(', '))}</td></tr>`).join('')}</tbody></table>` : `<p class="muted">${esc(t('ui.orphans.empty'))}</p>`;
+  $('orphan-delete').disabled = true;
+  $('orphan-list').querySelectorAll('[data-orphan]').forEach(input => input.onchange = () => { $('orphan-delete').disabled = orphanDeleting || !$('orphan-list').querySelector('[data-orphan]:checked'); });
+}
+async function openOrphans() {
+  $('orphan-dialog').showModal(); $('orphan-result').textContent = ''; $('orphan-list').textContent = t('ui.orphans.loading'); $('orphan-delete').disabled = true;
+  orphanItems = await api('orphans'); drawOrphans();
+}
+async function deleteOrphans() {
+  if (orphanDeleting) return;
+  const items = [...$('orphan-list').querySelectorAll('[data-orphan]:checked')].map(input => orphanItems[+input.dataset.orphan]);
+  if (!items.length || items.some(item => item.dirty)) return;
+  orphanDeleting = true; $('orphan-delete').disabled = true;
+  try {
+    if (!await ask(t('ui.orphans.confirmDelete', { n: items.length }) + (items.some(item => !item.inMain) ? '\n\n' + t('ui.orphans.archiveWarning') : ''), { ok: t('ui.inspector.delete'), danger: true })) return;
+    const result = await api('orphans/delete', { items: items.map(({ kind, root, target, tip }) => ({ kind, root, target, tip })) });
+    $('orphan-result').textContent = (result.results || []).map(item => `${item.target}: ${item.status}${item.detail ? ' — ' + item.detail : ''}${item.archived ? ' — ' + t('ui.orphans.archived', { tag: Array.isArray(item.archived) ? item.archived.join(', ') : item.archived }) : ''}`).join('\n');
+    orphanItems = await api('orphans'); drawOrphans(); await reconcileAndRefresh();
+  } finally { orphanDeleting = false; $('orphan-delete').disabled = !$('orphan-list').querySelector('[data-orphan]:checked'); }
+}
+$('orphans-open').onclick = () => attempt(openOrphans);
+$('orphan-close').onclick = () => $('orphan-dialog').close();
+$('orphan-delete').onclick = () => attempt(deleteOrphans);
 function duration(minutes) {
   const m = Math.max(0, Math.round(minutes)), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60), r = m % 60;
   return [d && t('ui.time.days', { n: d }), h && t('ui.time.hours', { n: h }), r && t('ui.time.minutes', { n: r })].filter(Boolean).join(' ') || t('ui.time.minutes', { n: 0 });
@@ -474,7 +546,7 @@ function drawState() {
   }
   document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('selected', b.dataset.tab === tab));
   drawSessions(); syncTab();
-  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${jobTitle(j)} · ${statusLabel(j.status)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${jobEta(j) ? ' · ' + jobEta(j) : ''}` : t('ui.flow.summaryIdle'); }
+  { const j = state.jobs.find(x => x.id === selected); $('flow-summary').textContent = j ? `${jobTitle(j)} · ${jobStatusLabel(j)}${runningOf(j).map(r => ' · ' + (names[r.agent] || r.agent) + ' → ' + r.stage).join('')}${jobEta(j) ? ' · ' + jobEta(j) : ''}` : t('ui.flow.summaryIdle'); }
   drawJobsList();
   drawJobsDialog();
   drawFlow();
@@ -610,7 +682,7 @@ function drawJobsDialog() {
   listEl.querySelectorAll('[data-job-delete]').forEach(el => el.onclick = e => { e.stopPropagation(); attempt(async () => {
     if (!await ask(t('ui.inspector.confirmDelete'), { ok: t('ui.inspector.delete'), danger: true })) return;
     const id = el.dataset.jobDelete, card = el.closest('.job-card'); card?.classList.add('deleting'); // xóa worktree/branch có thể mất vài giây: khóa thẻ để khỏi bấm lại
-    try { await api(`jobs/${id}/control`, { action: 'delete' }); } catch (err) { card?.classList.remove('deleting'); throw err; }
+    try { if (!await deleteJob(id)) { card?.classList.remove('deleting'); return; } } catch (err) { card?.classList.remove('deleting'); throw err; }
     $('jobs-dialog').querySelector('.dialog-error')?.remove();
     if (selected === id) { selected = undefined; events = []; } await refresh(); }); });
   listEl.querySelectorAll('[data-job-open], [data-job-select]').forEach(el => {
@@ -646,7 +718,7 @@ function syncTab() {
   const q = new URLSearchParams({ p: curProject, s: curSession, ...(selected ? { j: selected } : {}) });
   if (location.hash.slice(1) !== q.toString()) history.replaceState(null, '', '#' + q);
   const s = state.sessions.find(x => x.id === curSession);
-  document.title = `${s ? s.name + ' · ' : ''}${curProject || 'AI Team'} · Control Room`;
+  document.title = (decisionNewIds.size ? "(" + decisionNewIds.size + ") " : "") + `${s ? s.name + ' · ' : ''}${curProject || 'AI Team'} · Control Room`;
 }
 function drawSessions() {
   if (!state.projects.some(p => p.id === curProject)) curProject = state.projects[0]?.id || '';
@@ -667,14 +739,14 @@ function drawSessions() {
 function sessionSummary(session) {
   if (!session) return '';
   const job = state.jobs.find(j => j.project === session.project && j.sessionId === session.id);
-  return [session.notes, job && statusLabel(job.status) + ' · #' + job.id + ' · ' + jobTitle(job)].filter(Boolean).join(' · ');
+  return [session.notes, job && jobStatusLabel(job) + ' · #' + job.id + ' · ' + jobTitle(job)].filter(Boolean).join(' · ');
 }
 // working = có AI thật sự đang chạy; còn lại theo việc mới nhất của phiên.
 function sessionState(id) {
   const jobs = state.jobs.filter(j => j.project === curProject && j.sessionId === id);
   if (jobs.some(j => runningOf(j).length)) return { cls: 'working', dot: 'running', label: statusLabel('running') };
   const live = jobs.find(j => ['running', 'queued'].includes(j.status)), last = live || jobs[0];
-  return last ? { cls: last.status === 'blocked' ? 'blocked' : '', dot: last.status, label: statusLabel(last.status) } : { cls: '', dot: '', label: '' };
+  return last ? { cls: last.status === 'blocked' ? 'blocked' : '', dot: last.status, label: jobStatusLabel(last) } : { cls: '', dot: '', label: '' };
 }
 // Bảng "node đang làm gì": dựng từ events đã có, không gọi thêm AI.
 function slotLive(id) {
@@ -842,7 +914,7 @@ function drawFlow() {
     + gtasks.map((x, i) => { const who = x.ranBy || x.agent, wait = depsOf(x, i).filter(d => gtasks[d] && !gtasks[d].done).map(d => 'T' + (d + 1)); return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review ' + depsOf(x, i).map(d => 'T' + (d + 1)).join(',') : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
       readonly ? cut(x.instruction, 40) : (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
     + box('tests', 'Tests', research ? t('ui.flow.skipped') : t('ui.flow.testsBy')) + box('reviewer', named('Review', rvId), skipped('review') ? t('ui.flow.skipped') : forced('review') || sub(rvId), rvId || null, 'reviewer')
-    + box('verifier', named('Verify', vfId), skipped('verify') ? t('ui.flow.skipped') : forced('verify') || sub(vfId), vfId || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? statusLabel(job.status) : 'merge');
+    + box('verifier', named('Verify', vfId), skipped('verify') ? t('ui.flow.skipped') : forced('verify') || sub(vfId), vfId || null, 'verifier') + box('merge', research ? t('ui.flow.conclusion') : t('ui.flow.approve'), job ? jobStatusLabel(job) : 'merge');
   // Mỗi cột là một đợt: task cùng cột chạy song song, cột sau chờ cột trước theo mũi tên.
   const waves = graph ? perCol.map((n, c) => `<text class="edge-label wave" x="${365 + c * colW + 86}" y="${top + 4}" text-anchor="middle">${esc(t(n > 1 ? 'ui.flow.waveParallel' : 'ui.flow.wave', { n: c + 1 }))}</text>`).join('') : '';
   const planTasks = plan && !graph ? `<ul class="task-list plan-tasks">${job.tasks.map((x, i) => `<li>${taskDetailHTML(job, x, i)}</li>`).join('')}</ul>` : '';
@@ -932,7 +1004,7 @@ function drawInspector() {
   if (unmapped.length) $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.obligations'))}</h3>${unmapped.map(o => `<p>${esc(o.id)} · ${esc(o.topic)}<br>${esc((o.pending || []).map(m => m.text).join('; ') || o.reason)} <button data-obligation="${esc(o.id)}" ${['running','queued','merging'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.peer.map'))}</button></p>`).join('')}`);
   if (job.comparison) {
     const peers = state.jobs.filter(j => j.comparison?.group === job.comparison.group);
-    $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.compare'))} · ${esc(job.comparison.group)}</h3><p class="muted">${esc(t('ui.peer.compareNote'))}</p><table><thead><tr><th>${esc(t('ui.peer.mode'))}</th><th>${esc(t('ui.peer.calls'))}</th><th>${esc(t('ui.peer.tokens'))}</th><th>${esc(t('ui.peer.wrongToRight'))}</th><th>${esc(t('ui.peer.rightToWrong'))}</th><th>${esc(t('ui.peer.unjudged'))}</th></tr></thead><tbody>${peers.map(j => { const labels = (j.discussions || []).flatMap(d => d.claims || []).map(c => c.judgment?.transition || 'unjudged'), n = k => labels.filter(x => x === k).length; return `<tr><td><button data-compare-job="${esc(j.id)}">${esc(t('ui.peer.' + j.dialogueMode))}</button><br>${esc(statusLabel(j.status))}</td><td>${j.usage?.calls || 0}/${j.callBudget}</td><td>${j.usage?.tokens || 0}/${j.tokenBudget}</td><td>${n('wrongToRight')}</td><td>${n('rightToWrong')}</td><td>${labels.length ? n('unjudged') : '—'}</td></tr>`; }).join('')}</tbody></table>`);
+    $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.compare'))} · ${esc(job.comparison.group)}</h3><p class="muted">${esc(t('ui.peer.compareNote'))}</p><table><thead><tr><th>${esc(t('ui.peer.mode'))}</th><th>${esc(t('ui.peer.calls'))}</th><th>${esc(t('ui.peer.tokens'))}</th><th>${esc(t('ui.peer.wrongToRight'))}</th><th>${esc(t('ui.peer.rightToWrong'))}</th><th>${esc(t('ui.peer.unjudged'))}</th></tr></thead><tbody>${peers.map(j => { const labels = (j.discussions || []).flatMap(d => d.claims || []).map(c => c.judgment?.transition || 'unjudged'), n = k => labels.filter(x => x === k).length; return `<tr><td><button data-compare-job="${esc(j.id)}">${esc(t('ui.peer.' + j.dialogueMode))}</button><br>${esc(jobStatusLabel(j))}</td><td>${j.usage?.calls || 0}/${j.callBudget}</td><td>${j.usage?.tokens || 0}/${j.tokenBudget}</td><td>${n('wrongToRight')}</td><td>${n('rightToWrong')}</td><td>${labels.length ? n('unjudged') : '—'}</td></tr>`; }).join('')}</tbody></table>`);
     document.querySelectorAll('[data-compare-job]').forEach(b => b.onclick = () => { selected = b.dataset.compareJob; events = []; refresh(); });
   }
   document.querySelectorAll('[data-score-thread]').forEach(b => b.onclick = () => { scoreTarget = { job: job.id, thread: b.dataset.scoreThread, claim: b.dataset.claim }; $('claim-score-form').reset(); $('claim-score-dialog').showModal(); });
@@ -945,7 +1017,7 @@ function drawInspector() {
   document.querySelectorAll('[data-action]').forEach(b => b.onclick = () => attempt(async () => {
     if (b.dataset.action === 'cancel' && !await ask(t('ui.inspector.confirmCancel'), { danger: true })) return;
     if (b.dataset.action === 'delete' && !await ask(t('ui.inspector.confirmDelete'), { ok: t('ui.inspector.delete'), danger: true })) return;
-    b.disabled = true; try { await api(`jobs/${selected}/control`, { action: b.dataset.action }); if (b.dataset.action === 'delete') { selected = undefined; events = []; } await refresh(); } finally { b.disabled = false; }
+    b.disabled = true; try { if (b.dataset.action === 'delete') { if (!await deleteJob(selected)) return; selected = undefined; events = []; } else await api(`jobs/${selected}/control`, { action: b.dataset.action }); await refresh(); } finally { b.disabled = false; }
   }));
   $('inspector').querySelectorAll('[data-rework-extra], [data-rework-handoff]').forEach(b => b.onclick = () => attempt(async () => {
     const extra = b.hasAttribute('data-rework-extra');
@@ -1450,7 +1522,7 @@ async function refresh() {
       const sel = selected; let more;
       do { more = await api(`jobs/${sel}/events?after=${events.at(-1)?.seq || 0}`); if (selected !== sel) { again = true; return; } events.push(...more); } while (more.length === 2000);
     }
-    drawState(); drawTimeline();
+    drawState(); drawDecisions(); syncTab(); drawTimeline();
   } finally { rendering = false; if (again) { again = false; refresh(); } }
 }
 const openTask = () => { $('task-dialog').showModal(); attempt(loadBaseBranches); };
@@ -1914,7 +1986,7 @@ $('prompt-close').onclick = () => $('prompt-dialog').close();
 $('prompt-dialog').addEventListener('close', () => { promptRequest++; });
 
 await loadLanguage(store.get('lang') || 'vi');
-await attempt(refresh);
+await attempt(reconcileAndRefresh);
 const query = new URLSearchParams(location.search);
 if (query.has('members')) { view(true); recheckMembers(); }
 if (query.has('add') && state && !state.demo) { providerHint(); $('member-dialog').showModal(); }
@@ -1927,8 +1999,9 @@ function openStream() {
   stream = new EventSource('/api/stream'); stream.onmessage = () => attempt(refresh); stream.onerror = () => { $('connection').textContent = t('ui.nav.reconnecting'); };
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stream?.close(); stream = null; } else { openStream(); attempt(refresh); }
+  if (document.hidden) { stream?.close(); stream = null; } else { openStream(); attempt(reconcileAndRefresh); }
 });
+window.addEventListener('focus', () => { if (!document.hidden) attempt(reconcileAndRefresh); });
 openStream();
 setInterval(() => { if (!document.hidden) attempt(refresh); }, 10000);
 setInterval(updateActivities, 30000);

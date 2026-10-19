@@ -10,6 +10,7 @@
   <button class="nav" id="quota-nav">◷ &nbsp; <span data-i18n="ui.nav.members"></span></button>
   <button class="nav" id="token-nav"><span aria-hidden="true">▥</span> &nbsp; <span data-i18n="ui.token.title"></span></button>
   <button class="nav" id="security-nav">⛨ &nbsp; <span data-i18n="ui.nav.security"></span></button>
+  <button class="nav" id="orphans-open" data-i18n="ui.orphans.title"></button>
   <div class="sidebar-heading">
     <span data-i18n="ui.nav.jobs"></span>
     <div class="sidebar-heading-tools">
@@ -35,6 +36,7 @@
   <div class="notice" id="storage-warn" hidden role="alert"></div>
   <header><div><span class="eyebrow">WORKSPACE / OVERVIEW</span><h1><span data-i18n="ui.header.title"></span> <span class="tag" id="mode">LOCAL</span></h1><p data-i18n="ui.header.subtitle"></p></div><button class="primary" id="create-top" data-i18n="ui.header.newJob"></button></header>
   <div class="notice" id="notice" hidden role="status"></div>
+  <section id="decisions" class="panel decisions" aria-labelledby="decision-title" hidden><div class="decision-heading"><h2 id="decision-title"><span data-i18n="ui.decisions.title"></span> <span id="decision-count" class="decision-count" hidden></span></h2></div><div id="decision-list"></div></section>
   <section class="metrics" id="metrics"></section>
   <div id="work-view">
     <section class="panel network"><div class="panel-heading"><div><span class="eyebrow">THE TEAM</span><h2 data-i18n="ui.team.title"></h2></div><div class="chat-tools"><span class="muted" id="running-label"></span><button id="flow-toggle" class="icon-btn" data-i18n-aria="ui.flow.toggle">▾</button></div></div><p class="flow-summary muted" id="flow-summary" hidden></p>
@@ -64,6 +66,7 @@
 <label for="task-title" data-i18n="ui.task.titleLabel"></label><input id="task-title" maxlength="60" data-i18n-placeholder="ui.task.titlePlaceholder">
 <label for="goal" data-i18n="ui.task.goal"></label><textarea id="goal" rows="6" maxlength="20000" data-i18n-placeholder="ui.task.goalPlaceholder" required></textarea><div class="attach-row"><label class="attach-btn"><input type="file" id="goal-files" multiple hidden><span data-i18n="ui.attach.add"></span></label><span class="muted" data-i18n="ui.attach.hint"></span></div><div class="attach-list" id="goal-attach"></div><p class="muted" data-i18n="ui.task.note"></p><button class="primary" type="submit" id="submit-task" data-i18n="ui.task.submit"></button></form></dialog>
 <dialog id="memory-dialog"><div class="dialog-heading"><h2 data-i18n="ui.mem.title"></h2><button type="button" id="close-memory" data-i18n-aria="ui.common.close">×</button></div><div id="memory-body"></div></dialog>
+<dialog id="orphan-dialog" aria-labelledby="orphan-title"><div class="dialog-heading"><h2 id="orphan-title" data-i18n="ui.orphans.title"></h2><button type="button" id="orphan-close" data-i18n-aria="ui.common.close">×</button></div><p class="muted" data-i18n="ui.orphans.help"></p><div id="orphan-list" class="orphan-scroll" tabindex="0" role="region" data-i18n-aria="ui.orphans.title"></div><button type="button" id="orphan-delete" class="danger-ghost" disabled data-i18n="ui.orphans.deleteSelected"></button><pre id="orphan-result" role="status"></pre></dialog>
 <dialog id="cleanup-dialog"><div class="dialog-heading"><h2 data-i18n="ui.cleanup.title"></h2><button type="button" id="close-cleanup" data-i18n-aria="ui.common.close">×</button></div><div id="cleanup-body"></div></dialog>
 <dialog id="project-dialog"><form id="project-form"><div class="dialog-heading"><h2 data-i18n="ui.project.title"></h2><button type="button" id="close-project" data-i18n-aria="ui.common.close">×</button></div>
 <label for="project-path" data-i18n="ui.project.path"></label><div class="row-input"><input id="project-path" required maxlength="500" placeholder="D:\company\main_system_app_v1"><button type="button" id="pick-folder" data-i18n="ui.project.pick"></button></div>
