@@ -16,7 +16,8 @@ import { runAgent, readQuota } from './providers.js';
 import { runOracle } from './oracle.js';
 import { scanSkills, skillRoots } from './skills.js';
 import { collect, kind, safeRel } from './evidence.js';
-import { planJob, planPeriodic, apply as applyCleanup, storageStats } from './cleanup.js';
+import { planJob, planPeriodic, apply as applyCleanup, storageStats, archiveRef, archiveCommit, applyOrphans } from './cleanup.js';
+import { mainBranchOf, inventoryJob, classify, listOrphans } from './reconcile.js';
 import { validatePreview, startServer, startDemoServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
 import { initializeUsage } from './usage.js';
 
@@ -37,6 +38,8 @@ export function autoTitle(goal) {
   return length && length <= 60 ? line.slice(0, length) : line.slice(0, 59) + '…';
 }
 export const jobTitle = job => job.title || autoTitle(job.goal);
+export const taskTitle = task => (cleanTitle(String(task?.title || '')) || cleanTitle(String(task?.instruction || '').split(/\r?\n/)[0])).slice(0, 60);
+export const titleSlug = title => String(title || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[\u0111\u0110]/g, 'd').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, '');
 const usageStores = new WeakMap();
 const usageFor = (db, options) => {
   if (!usageStores.has(db)) usageStores.set(db, initializeUsage(db, options));
@@ -328,7 +331,7 @@ export class Team extends EventEmitter {
     this.runs = new Map(); this.previews = new Map(); this.extra = 0; this.closed = false; this.refreshing = false; this.waitingReason = null;
     this.readCpus = adapters.cpus || cpus; this.resourceNow = adapters.resourceNow || (() => performance.now());
     this.cpu = null; this.cpuSamples = []; this.cpuPercent = 0; this.sampleCpu();
-    this.orphans = [];
+    this.orphanProcesses = []; this.gitStates = new Map(); this.gitOrphans = [];
     const cleanup = [];
     for (const job of this.jobs()) if (job.preview?.pid || job.preview?.basePid) {
       for (const pid of [job.preview.pid, job.preview.basePid]) if (pid && alive(pid)) cleanup.push(stopTree(pid).catch(e => this.emit('fault', e)));
@@ -336,7 +339,7 @@ export class Team extends EventEmitter {
     }
     this.previewRecovery = Promise.all(cleanup);
     for (const job of this.jobs()) if (['running', 'queued', 'merging'].includes(job.status)) {
-      for (const r of job.running || []) if (r.pid && alive(r.pid)) this.orphans.push({ key: (r.slot || 1) === 1 ? r.agent : `${r.agent}#${r.slot}`, pid: r.pid, until: Date.parse(r.startedAt) + 60 * 60_000 });
+      for (const r of job.running || []) if (r.pid && alive(r.pid)) this.orphanProcesses.push({ key: (r.slot || 1) === 1 ? r.agent : `${r.agent}#${r.slot}`, pid: r.pid, until: Date.parse(r.startedAt) + 60 * 60_000 });
       job.status = 'paused'; job.running = []; job.current = null; this.save(job);
       this.event(job.id, 'controller', 'user', 'RECOVERY', msg("srv.team.da_khoi_dong_lai_kiem_tra"));
     }
@@ -422,7 +425,7 @@ export class Team extends EventEmitter {
   }
   get active() { return this.runs.values().next().value || null; }
   // ponytail: PID có thể bị tái sử dụng; hết hạn 60 phút để không khóa slot mãi. Không tự kill tiến trình không chắc của mình.
-  slotKeys() { return [...[...this.runs.values()].flatMap(r => [...r.agents]), ...this.orphans.filter(o => Date.now() < o.until && alive(o.pid)).map(o => o.key)]; }
+  slotKeys() { return [...[...this.runs.values()].flatMap(r => [...r.agents]), ...this.orphanProcesses.filter(o => Date.now() < o.until && alive(o.pid)).map(o => o.key)]; }
   // Đếm theo danh tính tài khoản (email từ lần đọc quota), không theo thư mục hồ sơ: hai hồ sơ cùng một tài khoản dùng chung giới hạn.
   accountOf(id) { return String(this.quota(id)?.account?.email || id).toLowerCase(); }
   useOf(id) { const acc = this.accountOf(id); return this.slotKeys().filter(k => this.accountOf(k.split('#')[0]) === acc).length; }
@@ -734,7 +737,12 @@ export class Team extends EventEmitter {
     const jobs = this.jobs().filter(j => j.sessionId === id);
     if (jobs.some(j => ['running', 'queued', 'merging'].includes(j.status) || this.runs.has(j.id))) throw new Error(msg("srv.team.delete_not_finished"));
     try { this.backup('before-delete'); } catch (e) { this.emit('fault', e); }
-    for (const j of jobs) await this.control(j.id, 'delete', { noBackup: true });
+    const blocked = [];
+    for (const j of jobs) {
+      try { await this.control(j.id, 'delete', { noBackup: true }); }
+      catch (error) { blocked.push({ jobId: j.id, error: error.message, details: error.details }); }
+    }
+    if (blocked.length) throw Object.assign(new Error(msg('srv.team.session_delete_blocked')), { code: 409, details: { jobs: blocked } });
     this.db.prepare("DELETE FROM memory WHERE session=? AND kind='log'").run(id);
     this.db.prepare('DELETE FROM sessions WHERE id=?').run(id); this.emit('change'); return { id, deleted: true, jobs: jobs.length };
   }
@@ -755,7 +763,7 @@ export class Team extends EventEmitter {
         return Object.assign(job, saved);
       }
       if (saved.titleBy === 'user' && !rename) { job.title = saved.title; job.titleBy = 'user'; }
-      if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; job.acceptance = null; }
+      if (saved.revision !== job.revision) { job.pendingMerge = null; job.mergeTargetCheck = null; job.acceptance = null; delete job.mergeFailure; }
       if (Array.isArray(saved.messages) && saved.messages.length > (job.messages?.length || 0)) { job.messages = saved.messages; if (this.runs.has(job.id)) job.steered = true; }
       if ((saved.scopeAdds?.length || 0) > (job.scopeAdds?.length || 0)) job.scopeAdds = saved.scopeAdds;
       // Bạn đổi người (control 'assign') trong lúc việc đang chạy: bản đang chạy lưu đè thì vẫn giữ lựa chọn đó.
@@ -793,9 +801,59 @@ export class Team extends EventEmitter {
   sampleResources() {
     return { cpuPercent: Math.round(this.cpuPercent), ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
+  decisions() {
+    const decisions = this.jobs().flatMap(job => {
+      const state = this.gitStates.get(job.id);
+      return state && ['awaiting_owner', 'merge_stuck', 'cancelled_unmerged'].includes(state.state)
+        ? [{ jobId: job.id, title: jobTitle(job), state: state.state, reason: state.reason, kind: state.kind, files: state.files }] : [];
+    });
+    const count = this.gitOrphans.filter(item => !item.inMain).length;
+    if (count) decisions.push({ kind: 'orphans', count });
+    return decisions;
+  }
+  inventory(job, memo) {
+    const project = this.project(job.project);
+    return inventoryJob({ job, project, root: project.path, dataDir: this.dataDir, git, run, memo });
+  }
+  reconcile({ force = false } = {}) {
+    if (this.reconcilePending) return this.reconcilePending;
+    if (this.closed || !force && this.reconciledAt && Date.now() - this.reconciledAt < 60_000) return Promise.resolve({ decisions: this.decisions() });
+    this.reconciledAt = Date.now();
+    this.reconcilePending = (async () => {
+      const before = JSON.stringify(this.decisions()), ids = new Set(), memo = new Map();
+      // Job đã kết thúc và đã ổn định (đã vào master / hủy sạch) với cùng revision thì không quét git lại.
+      const stable = job => { const s = this.gitStates.get(job.id); return s && s.rev === job.revision && s.status === job.status && ['merged', 'cancelled'].includes(job.status) && ['in_master', 'cancelled_clean'].includes(s.state); };
+      const check = async job => {
+        ids.add(job.id);
+        if (stable(job)) return;
+        const inventory = await this.inventory(job, memo);
+        const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(job.id);
+        if (!row) return;
+        const fresh = JSON.parse(row.body);
+        if (fresh.revision !== job.revision || JSON.stringify(fresh.linked) !== JSON.stringify(job.linked)) return;
+        this.gitStates.set(job.id, { ...classify(fresh, inventory), checkedAt: now(), rev: fresh.revision, status: fresh.status });
+      };
+      // ponytail: 4 job song song cố định; tăng/giảm nếu git trên Windows bị nghẽn.
+      const list = this.jobs().filter(job => job.kind !== 'research');
+      for (let i = 0; i < list.length; i += 4) await Promise.all(list.slice(i, i + 4).map(check));
+      for (const id of this.gitStates.keys()) if (!ids.has(id)) this.gitStates.delete(id);
+      this.gitOrphans = await this.orphans(memo);
+      const decisions = this.decisions();
+      if (before !== JSON.stringify(decisions)) this.emit('change');
+      return { decisions };
+    })().finally(() => { this.reconcilePending = null; });
+    return this.reconcilePending;
+  }
+  orphans(memo) { return listOrphans({ projects: this.config.projects, jobs: this.jobs(), dataDir: this.dataDir, git, run, memo }); }
+  deleteOrphans(items) {
+    return this.queueCleanup(async () => {
+      const result = await applyOrphans({ ...this.cleanupContext(), items, mainBranchOf: root => mainBranchOf(root, this.config.projects.find(p => p.path === root), git) });
+      await this.reconcile({ force: true }); return result;
+    });
+  }
   state() {
     const busy = this.busyAgents(), cap = this.capacity(), used = this.runningSlots();
-    return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), jobs: this.jobs().map(j => ({ ...j, title: jobTitle(j), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
+    return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), decisions: this.decisions(), jobs: this.jobs().map(j => ({ ...j, title: jobTitle(j), git: this.gitStates.get(j.id), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
@@ -892,7 +950,8 @@ export class Team extends EventEmitter {
     else baseBranch = await git(root, ['symbolic-ref', '--short', 'HEAD']);
     if (accessOf(p).repos.length && baseBranch !== current) throw new Error('Choosing another base branch with linked repositories is not supported');
     const base = await git(root, ['rev-parse', `refs/heads/${baseBranch}`]);
-    const id = randomUUID().slice(0, 8), branch = `ai-team/${id}`;
+    const id = randomUUID().slice(0, 8), slug = titleSlug(jobTitle({ title, goal })), branch = `ai-team/${id}${slug ? `-${slug}` : ''}`;
+    await git(root, ['check-ref-format', '--branch', branch]);
     const worktree = join(this.dataDir, 'worktrees', id);
     mkdirSync(join(this.dataDir, 'worktrees'), { recursive: true });
     // Repo liên kết: kiểm tra sạch trước khi tạo gì, rồi mỗi repo một worktree + branch ai-team/<id> riêng.
@@ -1456,7 +1515,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const finding = '{"id":"F1","claim":"what is wrong","failsWhen":"input or condition that breaks it","evidence":"file:line or command output","check":"how to confirm","impact":"high|medium|low"' + (['review', 'verify'].includes(stage) ? ',"origin":"owner|builder|unknown","scopeAddId":"recorded scope addition id, only for owner","originReason":"evidence explaining the source; unknown if unproven"' : '') + '}';
     let shape = stage === 'challenge' ? `{"summary":"one sentence","status":"completed","objections":[${finding}]}`
       : stage === 'plan'
-      ? `{"summary":"at most 2 sentences: approach and delegation rationale; do not restate the goal","title":"short job title ≤60 chars in the goal's language","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task","context":"files:lines, symbols, callers/callees and pitfalls the builder needs","files":["paths this task edits"],"dependsOn":[],"estMinutes":10}],"reviewSkills":["optional skills for the reviewer/verifier"],"flow":{"reviewer":"optional member id","verifier":"optional member id","steps":["optional subset of review,verify,final"]},"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
+      ? `{"summary":"at most 2 sentences: approach and delegation rationale; do not restate the goal","title":"short job title ≤60 chars in the goal's language","kind":"code|research","rigor":"light|standard|strict","risk":"low|medium|high","riskReasons":["why"],"tasks":[{"title":"short task title ≤60 chars","agent":"one of: ${members.builders.join(', ')}","difficulty":3,"effort":"optional, one of the member's allowedEfforts","why":"why this member and effort","skills":["optional skill names from skillLibrary"],"instruction":"specific bounded task","context":"files:lines, symbols, callers/callees and pitfalls the builder needs","files":["paths this task edits"],"dependsOn":[],"estMinutes":10}],"reviewSkills":["optional skills for the reviewer/verifier"],"flow":{"reviewer":"optional member id","verifier":"optional member id","steps":["optional subset of review,verify,final"]},"status":"planned | needs_input | blocked","questions":["only with needs_input"]}`
       : stage === 'research' || stage === 'final' && job.kind === 'research'
         ? '{"summary":"short answer","status":"completed or blocked","findings":["finding with evidence"],"sources":["file:line, command, or URL"],"conclusion":"conclusion with reasoning","confidence":"low|medium|high","openQuestions":["what is still unknown"],"contextGaps":["what you had to look up beyond taskContext"]}'
         : `{"summary":"actual work and evidence","status":"completed or blocked","verdict":"approved or changes_requested","findings":[${finding}],"tests":"what actually ran; do not invent"${stage === 'implement' ? ',"contextGaps":["what you had to look up beyond taskContext"]' + (job.round ? ',"responses":[{"finding":"F1 from lastChecks","action":"fixed|rejected|unclear","evidence":"proof (rejected needs evidence)"}]' : '') : ''}${stage === 'verify' ? ',"rulings":[{"finding":"F1","upheld":true,"evidence":"check you ran and its result"}]' : ''}}`;
@@ -1654,7 +1713,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (merging || await git(wt, ['diff', '--cached', '--name-only'])) {
       const id = agent || job.reports?.findLast(r => r.stage === 'implement')?.agent || job.implementers?.at(-1) || job.reports?.at(-1)?.agent || (job.roster || roster(this.config)).builders[0] || 'controller';
       const label = this.config.agents.find(a => a.id === id)?.label || id;
-      await git(wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `AI Team ${job.id}${taskIndex != null ? ` T${taskIndex + 1}` : ''} ${id}: checkpoint`]);
+      await git(wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `${taskIndex != null ? taskTitle(job.tasks?.[taskIndex]) : jobTitle(job)} (${cleanTitle(label)})`]);
     }
   }
   async checkpoint(job, options = {}) {
@@ -1783,7 +1842,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (const [k, [task, i, who]] of batch.entries()) {
       if (results[k].status !== 'fulfilled' || conflict) continue;
       if (children[k]) {
-        const merged = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge T${i + 1} (${task.ranBy || who}) into ai-team/${job.id}`, children[k].branch], { allowFailure: true, timeoutMs: 120_000 });
+        const merged = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge: ${taskTitle(task)} (${cleanTitle(this.agent(task.ranBy || who).label || task.ranBy || who)}) [#${job.id}]`, children[k].branch], { allowFailure: true, timeoutMs: 120_000 });
         if (merged.code !== 0) {
           const files = await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']).catch(() => '');
           await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true });
@@ -2537,6 +2596,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const reason = !job ? 'deleted' : terminal.has(job.status) ? job.status : job.revision !== preview.revision ? 'revision' : Date.parse(job.preview?.expiresAt || preview.expiresAt) <= Date.now() ? 'ttl' : preview.after && (preview.after.child.exitCode !== null || preview.after.child.signalCode) ? 'exited' : null;
       if (reason) await this.stopPreview(id, reason);
     }
+    if (this.closed) return;
+    await this.reconcile().catch(e => this.emit('fault', e));
     if (this.closed || this.accountLoginBusy) return;
     for (const job of this.jobs()) {
       if (['waiting', 'blocked'].includes(job.status) && job.blockedReason?.kind === 'role' && !this.runs.has(job.id)) {
@@ -2653,15 +2714,32 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (action === 'delete') {
       // Xóa được mọi việc không có tiến trình đang chạy (đang chạy thì Tạm dừng/Hủy trước). Xóa cả worktree, branch và log.
       if (['running', 'queued', 'merging'].includes(job.status) || this.runs.has(id)) throw new Error(msg("srv.team.delete_not_finished"));
+      const inventory = await this.inventory(job);
+      const dirty = inventory.repos.flatMap(repo => repo.dirty);
+      if (dirty.length) throw Object.assign(new Error(msg('srv.team.delete_dirty', { 0: dirty.map(tree => tree.worktree).join(', ') })), { code: 409, details: { worktrees: dirty } });
+      const branches = inventory.repos.flatMap(repo => repo.branches.filter(branch => !branch.inMain).map(branch => ({ root: repo.root, ...branch })));
+      const wip = inventory.repos.flatMap(repo => repo.wip.filter(item => !item.inMain).map(item => ({ root: repo.root, ...item })));
+      const repos = inventory.repos.filter((repo, i) => i > 0 && (repo.branches.some(branch => !branch.inMain) || repo.wip.some(item => !item.inMain) || repo.revision.exists && !repo.revision.inMain));
+      const revisions = inventory.repos.filter((repo, i) => repo.revision.exists && !repo.revision.inMain && repo.revision.commit !== [job, ...(job.linked || [])][i].base);
+      if ((branches.length || wip.length || repos.length || revisions.length) && payload.archive !== true) throw Object.assign(new Error(msg('srv.team.delete_unmerged')), { code: 409, details: { branches, wip, repos } });
+      if (payload.archive === true) {
+        for (const branch of branches) await archiveRef(branch.root, branch.name, { git, run });
+        for (const item of wip) await archiveCommit(item.root, `${id}-wip-${item.task}`, item.commit, { git, run });
+        for (const repo of revisions) await archiveCommit(repo.root, id, repo.revision.commit, { git, run });
+      }
+      const fresh = this.get(id);
+      if (fresh.updatedAt !== job.updatedAt || this.runs.has(id)) throw Object.assign(new Error(msg('srv.team.delete_changed')), { code: 409 });
       if (!payload.noBackup) try { this.backup('before-delete'); } catch (e) { this.emit('fault', e); } // xóa nhầm vẫn còn bản sao lưu
       await this.stopPreview(id, 'deleted');
-      await this.releaseGit(job);
+      const released = await this.releaseGit(job);
+      if (released.worktrees.length) throw Object.assign(new Error(msg('srv.team.delete_dirty', { 0: released.worktrees.map(tree => tree.worktree).join(', ') })), { code: 409, details: released });
       this.db.prepare('DELETE FROM events WHERE job = ?').run(id); this.db.prepare('DELETE FROM jobs WHERE id = ?').run(id);
+      this.gitStates.delete(id);
       this.emit('change'); return { id, deleted: true };
     }
     if (terminal.has(job.status)) throw new Error(msg("srv.team.task_da_ket_thuc"));
     if (job.status === 'merging') throw new Error(msg("srv.team.merge_dang_chay"));
-    if (action === 'sync' || action === 'review') return this.controlRevision(job, action);
+    if (action === 'sync' || action === 'review') return this.controlRevision(job, action, payload);
     if (['adopt-discussion', 'revisit-discussion', 'resolve-discussion'].includes(action)) {
       if (!['paused', 'blocked', 'waiting', 'ready'].includes(job.status) || this.runs.has(id)) throw new Error('Pause the job before mapping discussion obligations');
       const o = job.obligations?.find(o => o.id === payload.thread && o.status === 'unmapped');
@@ -2779,7 +2857,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     } else throw new Error(msg("srv.team.action_khong_ho_tro"));
     return this.get(id);
   }
-  async controlRevision(job, action) {
+  async controlRevision(job, action, { automatic = false } = {}) {
     const id = job.id;
     if (this.runs.has(id)) throw new Error(msg(action === 'sync' ? 'srv.team.dung_task_truoc_khi_cap_nhat' : 'srv.team.dung_task_truoc_khi_review_lai'));
     const runtime = { job: id, agents: new Set(), abort: new AbortController() };
@@ -2796,16 +2874,24 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (head === job.base) throw new Error(msg("srv.team.base_branch_chua_thay_doi"));
         if (await git(job.worktree, ['status', '--porcelain'])) throw new Error(msg("srv.team.worktree_con_thay_doi_chua_checkpoint"));
         current();
-        const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} into ai-team/${job.id}`, head], { allowFailure: true, timeoutMs: 120_000 });
+        const result = await run(['git'], ['-C', job.worktree, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ${job.baseBranch}@${head.slice(0, 8)} vào: ${jobTitle(job)} [#${job.id}]`, head], { allowFailure: true, timeoutMs: 120_000 });
         const conflicts = result.code === 0 ? '' : await git(job.worktree, ['diff', '--name-only', '--diff-filter=U']);
         if (result.code !== 0 && !conflicts) { await run(['git'], ['-C', job.worktree, 'merge', '--abort'], { allowFailure: true }); throw new Error(msg("srv.team.merge_base_that_bai") + redact(result.stderr).slice(0, 2000)); }
         current();
+        if (conflicts && automatic) {
+          await git(job.worktree, ['merge', '--abort']);
+          const fresh = this.get(id);
+          fresh.mergeFailure = { kind: 'conflict', files: conflicts.split('\n'), at: now() };
+          this.save(fresh); return this.get(id);
+        }
         job.base = head; job.pendingMerge = null; job.mergeTargetCheck = null; job.tested = job.reviewed = job.verified = null; job.status = 'queued';
         if (conflicts) {
+          job.mergeFailure = { kind: 'conflict', files: conflicts.split('\n'), at: now() };
           job.tasks = [{ agent: null, difficulty: 4, instruction: `Base branch ${job.baseBranch} changed and merging it caused conflicts in:\n${conflicts}\nResolve every conflict keeping the intent of BOTH sides (the goal: ${job.goal.slice(0, 2000)}). Remove all conflict markers. Do not commit and do not run git merge/rebase/reset.` }];
           job.taskIndex = 0; job.stage = 'implement';
           this.event(id, 'controller', (job.roster || roster(this.config)).manager, 'CONFLICT', msg("srv.team.xung_dot_voi", { 0: job.baseBranch, 1: conflicts.split('\n').join(', ') }));
         } else {
+          delete job.mergeFailure;
           job.revision = await git(job.worktree, ['rev-parse', 'HEAD']); job.stage = 'test';
           current();
           this.event(id, 'user', 'team', 'SYNC', msg("srv.team.da_cap_nhat_theo_chay_lai", { 0: job.baseBranch, 1: head.slice(0, 8) }));
@@ -2909,15 +2995,24 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   }
   // Gỡ mọi worktree controller tạo cho việc (chính, -tN, -review-*, -consult-*) và branch ai-team/<id>*. Không đụng worktree/branch người dùng tạo.
   async releaseGit(job) {
-    const root = this.config.projects.find(p => p.id === job.project)?.path, mine = join(this.dataDir, 'worktrees');
-    if (root && job.worktree?.startsWith(mine)) {
-      const prefix = resolve(job.worktree).toLowerCase();
-      const trees = (await git(root, ['worktree', 'list', '--porcelain']).catch(() => '')).split(/\r?\n/).filter(l => l.startsWith('worktree ')).map(l => l.slice(9));
-      for (const wt of trees) if (resolve(wt).toLowerCase().startsWith(prefix)) await run(['git'], ['-C', root, 'worktree', 'remove', '--force', wt], { allowFailure: true });
-      await run(['git'], ['-C', root, 'worktree', 'prune'], { allowFailure: true });
-      if (job.branch?.startsWith('ai-team/')) for (const b of (await git(root, ['for-each-ref', '--format=%(refname:short)', `refs/heads/${job.branch}`, `refs/heads/${job.branch}-*`]).catch(() => '')).split(/\r?\n/).filter(Boolean)) await run(['git'], ['-C', root, 'branch', '-D', b], { allowFailure: true });
+    const inventory = await this.inventory(job), mine = resolve(this.dataDir, 'worktrees'), worktrees = [];
+    for (const repo of inventory.repos) {
+      for (const item of repo.wip.filter(item => !item.inMain)) await archiveCommit(repo.root, `${job.id}-wip-${item.task}`, item.commit, { git, run });
+      // Preserve every unmerged ref before removing any worktree that holds it.
+      for (const branch of repo.branches.filter(branch => !branch.inMain)) await archiveRef(repo.root, branch.name, { git, run });
+      const trees = (await git(repo.root, ['worktree', 'list', '--porcelain'])).split(/\r?\n/).filter(line => line.startsWith('worktree ')).map(line => line.slice(9));
+      const kept = new Set();
+      for (const wt of trees) if (resolve(dirname(wt)).toLowerCase() === mine.toLowerCase() && (basename(wt) === job.id || basename(wt).startsWith(`${job.id}-`) || basename(wt).startsWith(`${job.id}@`))) {
+        if (await git(wt, ['status', '--porcelain', '--untracked-files=all'])) { worktrees.push({ worktree: wt }); kept.add(await git(wt, ['symbolic-ref', '--short', 'HEAD']).catch(() => '')); continue; }
+        await git(repo.root, ['worktree', 'remove', wt]);
+      }
+      for (const branch of repo.branches) if (!kept.has(branch.name)) {
+        const tip = await git(repo.root, ['rev-parse', `refs/heads/${branch.name}`]);
+        if (tip !== branch.tip) throw Object.assign(new Error(msg('srv.team.delete_changed')), { code: 409 });
+        await git(repo.root, ['branch', '-D', '--', branch.name]);
+      }
     }
-    for (const l of job.linked || []) if (l.worktree?.startsWith(mine)) { await run(['git'], ['-C', l.path, 'worktree', 'remove', '--force', l.worktree], { allowFailure: true }); if (job.status !== 'merged') await run(['git'], ['-C', l.path, 'branch', '-D', l.branch], { allowFailure: true }); }
+    return { worktrees };
   }
   // Giữ đường release cũ cho merged khi tắt cleanupOnMerge; phần còn lại đi qua manifest.
   async sweepGit() {
@@ -3014,14 +3109,14 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const preview = this.project(job.project).preview;
       if (preview && preview.requireAcceptance !== false && job.acceptance?.revision !== job.revision) throw new Error(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) }));
       const check = await this.mergeCheck(job, target), destination = check.target;
-      if (destination.type === 'base' && !check.checks.baseUnchanged) throw new Error(msg("srv.team.da_co_commit_moi_bam_cap", { 0: job.baseBranch }));
+      if (destination.type === 'base' && !check.checks.baseUnchanged) throw Object.assign(new Error(msg("srv.team.da_co_commit_moi_bam_cap", { 0: job.baseBranch })), { mergeFailure: { kind: 'base_moved', at: now() } });
       if (check.needsConfirm && confirm !== check.code) throw new Error(msg("srv.team.rui_ro_cao_nhap_ma_commit", { 0: check.code }));
       if (destination.error) throw new Error(destination.error);
       const root = this.project(job.project).path;
       if (destination.type === 'base' && await git(root, ['status', '--porcelain'])) throw new Error(msg("srv.team.repo_chinh_co_thay_doi_chua"));
       const seen = job.mergeTargetCheck;
       if (seen && seen.revision === job.revision && seen.type === destination.type && seen.branch === destination.branch && seen.tip !== destination.tip) {
-        job.pendingMerge = null; job.mergeTargetCheck = null; throw new Error('Target branch tip changed; run merge-check again');
+        job.pendingMerge = null; job.mergeTargetCheck = null; throw Object.assign(new Error('Target branch tip changed; run merge-check again'), { mergeFailure: { kind: 'base_moved', at: now() } });
       }
       // Kiểm hết mọi repo liên kết TRƯỚC khi merge cái nào, để không merge dở dang.
       for (const l of job.linked || []) {
@@ -3033,7 +3128,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       const pending = job.pendingMerge;
       if (pending && pending.target.type === destination.type && pending.target.branch === destination.branch) {
         if (pending.revision !== job.revision || pending.tip !== destination.tip) { job.pendingMerge = null; throw new Error('Pending merge is stale; prepare the merge again'); }
-        if (!pending.passed) throw new Error('Merge commit tests failed; prepare the merge again');
+        if (!pending.passed) throw Object.assign(new Error('Merge commit tests failed; prepare the merge again'), { mergeFailure: { kind: 'tests_failed', at: now() } });
         if (approveMerge !== pending.commit) throw new Error('Approve the exact pending merge commit');
         commit = pending.commit; mode = 'merge';
       } else if (approveMerge !== undefined) throw new Error('No matching pending merge to approve');
@@ -3043,11 +3138,11 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         await git(root, ['worktree', 'add', '--detach', wt, destination.tip]);
         try {
           const builders = [...new Set(job.tasks.filter(t => t.kind !== 'review').map(t => t.ranBy || t.agent).filter(Boolean))];
-          const result = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge ai-team/${job.id} (${builders.join(',')}) into ${destination.branch}`, job.revision], { allowFailure: true, timeoutMs: 120_000 });
+          const result = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-ff', '-m', `Merge: ${jobTitle(job)} [#${job.id}]`, job.revision], { allowFailure: true, timeoutMs: 120_000 });
           if (result.code !== 0) {
             const conflicts = await git(wt, ['diff', '--name-only', '--diff-filter=U']);
             await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true });
-            throw new Error(conflicts ? `Merge conflicts: ${conflicts.split('\n').join(', ')}` : `Merge failed: ${redact(result.stderr).slice(0, 2000)}`);
+            throw Object.assign(new Error(conflicts ? `Merge conflicts: ${conflicts.split('\n').join(', ')}` : `Merge failed: ${redact(result.stderr).slice(0, 2000)}`), conflicts ? { mergeFailure: { kind: 'conflict', files: conflicts.split('\n'), at: now() } } : {});
           }
           commit = await git(wt, ['rev-parse', 'HEAD']);
           await this.ensureExclude(wt);
@@ -3055,12 +3150,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           if (await git(wt, ['rev-parse', 'HEAD']) !== commit || await git(wt, ['status', '--porcelain'])) throw new Error(msg("srv.team.tests_lam_thay_doi_worktree_khong"));
           job.pendingMerge = { target: { type: destination.type, branch: destination.branch }, tip: destination.tip, commit, revision: job.revision, passed, at: now() };
         } finally { await git(root, ['worktree', 'remove', '--force', wt]); }
+        if (job.pendingMerge.passed === false) throw Object.assign(new Error('Merge commit tests failed; returning to builder'), { mergeFailure: { kind: 'tests_failed', at: now() } });
         job.status = 'ready'; this.save(job); this.event(id, 'controller', 'user', 'MERGE_PENDING', 'Merge commit requires owner approval', job.pendingMerge); return job;
       }
       // Recheck checkout ownership immediately before touching the target ref.
       const fresh = await this.mergeTarget(job, { type: destination.type, branch: destination.branch });
       if (fresh.error) throw new Error(fresh.error);
-      if (fresh.tip !== destination.tip) { job.pendingMerge = null; throw new Error('Target branch tip changed; prepare the merge again'); }
+      if (fresh.tip !== destination.tip) { job.pendingMerge = null; throw Object.assign(new Error('Target branch tip changed; prepare the merge again'), { mergeFailure: { kind: 'base_moved', at: now() } }); }
       if (fresh.checkedOut) {
         if (await git(root, ['status', '--porcelain'])) throw new Error(msg("srv.team.repo_chinh_co_thay_doi_chua"));
         if ((await this.branches(job.project)).current !== destination.branch || await git(root, ['rev-parse', 'HEAD']) !== destination.tip) throw new Error('Target checkout changed; run merge-check again');
@@ -3068,12 +3164,25 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       } else await git(root, ['update-ref', `refs/heads/${destination.branch}`, commit, destination.type === 'new' ? '0000000000000000000000000000000000000000' : destination.type === 'base' ? job.base : destination.tip]);
       // ponytail: ff-only sau khi đã kiểm trước nên gần như không thể lỗi; lỗi giữa chừng thì báo rõ repo nào đã merge.
       for (const l of job.linked || []) { const r = await run(['git'], ['-C', l.path, 'merge', '--ff-only', l.revision], { allowFailure: true }); if (r.code !== 0) throw new Error(msg("srv.team.linked_merge_failed", { 0: l.project, 1: job.baseBranch })); }
-      job.status = 'merged'; job.pendingMerge = null; job.mergedInto = { branch: destination.branch, commit, mode }; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: commit.slice(0, 8), 1: destination.branch }), job.mergedInto);
+      job.status = 'merged'; job.pendingMerge = null; delete job.mergeFailure; job.mergedInto = { branch: destination.branch, commit, mode }; this.memoryStore.promote(job); this.save(job); this.event(id, 'user', 'team', 'MERGED', msg("srv.team.da_merge_vao", { 0: commit.slice(0, 8), 1: destination.branch }), job.mergedInto);
       await this.stopPreview(id, 'merged'); job.preview = this.get(id).preview;
       if (this.config.cleanupOnMerge !== false) await this.cleanupJob(id).catch(e => this.emit('fault', e));
       else await this.releaseGit(job).catch(e => this.emit('fault', e));
       Object.assign(job, this.get(id));
-    } catch (error) { job.status = 'ready'; this.save(job); throw error; }
+    } catch (error) {
+      const fresh = this.get(id);
+      if (fresh.status === 'merging' && fresh.revision === job.revision) {
+        Object.assign(fresh, { status: 'ready', pendingMerge: job.pendingMerge, mergeTargetCheck: job.mergeTargetCheck, checkResults: job.checkResults, reports: job.reports, evidence: job.evidence });
+        if (error.mergeFailure) fresh.mergeFailure = error.mergeFailure;
+        if (fresh.mergeFailure?.kind === 'tests_failed') { fresh.stage = 'rework'; fresh.status = 'queued'; fresh.tested = fresh.reviewed = fresh.verified = null; }
+        this.save(fresh);
+        if (error.mergeFailure?.kind === 'base_moved' && !fresh.linked?.length) {
+          this.runs.delete(id);
+          await this.control(id, 'sync', { automatic: true }).catch(syncError => this.emit('fault', syncError));
+        }
+      }
+      throw error;
+    }
     finally { this.runs.delete(id); this.kick(); }
     return job;
   }
@@ -3282,7 +3391,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (const [id] of previews) await this.stopPreview(id, 'close');
     await Promise.all(previews.map(([, p]) => p.done));
     while (this.runs.size || this.refreshing) await new Promise(r => setTimeout(r, 25));
-    await this.cleanupStartup; await this.cleanupPending;
+    await this.cleanupStartup; await this.cleanupPending; await this.reconcilePending;
     this.db.close(); this.dbClosed = true;
   }
 }

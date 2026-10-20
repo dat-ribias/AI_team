@@ -6,6 +6,20 @@
 
 Control Room là dashboard local điều phối đội AI nhiều tài khoản Claude/Codex/Gemini làm song song trên nhiều project Git. Lead chia việc, các Builder làm trong worktree riêng, Controller chạy kiểm tra và thu bằng chứng; owner duyệt kế hoạch, nghiệm thu và quyết định merge local. Hệ thống không tự push remote. Node.js 24, SQLite tích hợp và giao diện HTML/JS/CSS không cần build.
 
+## Trạng thái Git, quyết định và dọn dẹp job
+
+Dashboard dùng 7 trạng thái thống nhất: **Đang làm**, **Chờ chủ duyệt**, **Đã vào master**, **Kẹt merge**, **Hủy – còn code chưa vào master**, **Hủy – sạch**, **Xong**. Trạng thái được đối soát định kỳ và khi mở dashboard với Git thật bằng quan hệ tổ tiên trên nhánh chính, nên nhận diện cả merge tay ngoài dashboard. Repo liên kết được đối soát riêng; không suy ra tất cả repo đã merge từ kết quả của một repo.
+
+Cấu hình `project.mainBranch` chọn nhánh chính, `project.integrationBranch` chọn nhánh tích hợp. Trong luồng dev + release-candidate (RC), AI tích hợp vào dev; job đã vào dev nhưng chưa lên master hiển thị **Chờ chủ duyệt (RC)**. Chủ duyệt RC trước khi đưa lên master; tích hợp vào dev chưa có nghĩa là đã vào master. Xem [thiết kế dev + RC](design/integration-flow.md).
+
+Hộp **Cần anh quyết định** chỉ liệt kê job cần chủ hành động, mỗi job một dòng kèm lý do; badge/toast báo khi có mục mới. Lỗi merge được phân loại thành `base_moved` (base đã đổi: tự sync và chạy test lại), `conflict` (liệt kê file xung đột, cần người xử lý), và `tests_failed` (trả về builder sửa). Các xác nhận dùng popup trong trang.
+
+Sau khi merge hoàn tất, hệ thống dọn branch và mọi worktree của job, kể cả `-review-*`; worktree bẩn không bị xóa. Khi hủy/xóa, trước khi xóa branch phải tạo tag `archive/<branch>` với phần tên bỏ tiền tố `ai-team/`, gồm cả branch con `-tN` và `-wip-tN` (ví dụ `ai-team/abc-t1` được lưu thành `archive/abc-t1`). Xóa job còn code chưa vào master cần xác nhận archive rõ ràng để có thể khôi phục.
+
+Trang **Mồ côi** liệt kê branch `ai-team/*` và worktree không thuộc job nào, kèm cờ đã vào master/chưa và ngày commit cuối. Chủ chọn xóa một lượt; branch chưa vào master được archive trước, worktree bẩn được giữ lại. API: `GET /api/orphans` để xem danh sách, `POST /api/orphans/delete` để xóa các mục đã chọn.
+
+Tên Git theo task: branch `ai-team/<id>-<slug>`, commit `<tiêu đề task> (<member>)` với tác giả là member AI, merge commit `Merge: <tiêu đề> [#<id>]`. Merge nội bộ giữa các sub-task cũng dùng tiêu đề sub-task thay cho mã T1/T2. Bộ test tạo branch/worktree trong repo tạm và tự dọn sau khi chạy, không còn đụng repo thật.
+
 ## Luồng công việc
 
 ```mermaid

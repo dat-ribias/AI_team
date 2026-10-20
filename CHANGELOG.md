@@ -1,5 +1,10 @@
 # Lịch sử thay đổi
 
+- 2026-10-19 · Thống nhất trạng thái job và đối soát Git · Bổ sung 7 trạng thái: Đang làm / Chờ chủ duyệt / Đã vào master / Kẹt merge / Hủy – còn code chưa vào master / Hủy – sạch / Xong. Đối soát định kỳ và khi mở dashboard bằng quan hệ tổ tiên trên nhánh chính, nhận diện merge tay và đối soát riêng repo liên kết; job đã vào dev nhưng chưa lên master là “Chờ chủ duyệt (RC)”, chủ duyệt RC trước khi lên master. Cấu hình nhánh qua `project.mainBranch` / `project.integrationBranch`.
+- 2026-10-19 · Hộp Cần anh quyết định · Mỗi job cần chủ hành động có một dòng và lý do, badge/toast báo mục mới; xác nhận bằng popup trong trang. Phân loại lỗi merge: `base_moved` tự sync và test lại, `conflict` liệt kê file cần người xử lý, `tests_failed` trả về builder.
+- 2026-10-19 · Dọn dẹp và trang Mồ côi · Merge xong dọn branch và mọi worktree, kể cả `-review-*`; giữ worktree bẩn. Hủy/xóa tạo tag `archive/<branch>` trước khi xóa branch (bỏ tiền tố `ai-team/`, gồm cả `-tN` và `-wip-tN`); xóa job còn code chưa vào master cần xác nhận archive. Trang Mồ côi liệt kê branch/worktree không thuộc job, cờ đã vào master/chưa và ngày commit cuối, cho chủ chọn xóa một lượt và archive branch chưa vào master; API `GET /api/orphans`, `POST /api/orphans/delete`.
+- 2026-10-19 · Đặt tên Git theo task và cô lập test · Branch `ai-team/<id>-<slug>`, commit `<tiêu đề task> (<member>)` với tác giả là member AI, merge `Merge: <tiêu đề> [#<id>]`; merge sub-task dùng tiêu đề sub-task thay T1/T2. Test dùng repo tạm và tự dọn branch/worktree, không còn đụng repo thật.
+
 - 2026-10-15 · Thêm settings và lịch sử hỏi/đáp thu gọn cho Lead tham khảo ChatGPT web bằng quota web ở bước plan, cùng tài liệu cấu hình Oracle.
 
 Nguồn: lịch sử `master` tại `072ccb2` và bảng jobs đọc chỉ đọc ngày 2026-10-14. Mỗi job đã có commit trong master ghi một lần; ngày lấy từ commit mới nhất của job trong lịch sử này (riêng merge trực tiếp vào master dùng ngày merge). Tiêu đề/tóm tắt job được rút gọn từ goal và báo cáo cuối trong DB khi job cũ chưa có title. Commit không gắn job giữ tiêu đề Git, không suy đoán nội dung. Không bao gồm job của repo khác.
