@@ -8,7 +8,7 @@
     "start": "node src/server.js",
     "setup": "node src/setup.js",
     "demo": "node src/setup.js --demo",
-    "test": "node --test test/system.test.js",
+    "test": "node --test --test-concurrency=4 test/system-*.test.js test/memory.test.js test/cleanup.test.js",
     "mcp": "node src/mcp.js"
   },
   "dependencies": { "@modelcontextprotocol/sdk": "1.31.0", "zod": "4.6.5" }

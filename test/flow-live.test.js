@@ -20,7 +20,7 @@ function harness(job, version = null) {
     $: get, document: { querySelectorAll: () => [] },
     t: key => key, runningOf: job => job?.running || [], nodeOfRun: run => run.stage,
     agentHealth: () => null, tierLabel: tier => tier || '', rolesText: () => '',
-    statusLabel: status => status, cut: value => value || '', taskDetailHTML: () => '',
+    statusLabel: status => status, jobStatusLabel: job => job.status, cut: value => value || '', taskDetailHTML: () => '',
     svgText: ({ text, x, y, cls }) => `<text x="${x}" y="${y}" class="${cls}">${text}</text>`,
   });
   vm.runInContext(source.match(/^const esc = .*;$/m)[0], context);
