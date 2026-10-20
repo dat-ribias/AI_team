@@ -20,7 +20,7 @@ function instant(value) {
   return date.toISOString();
 }
 
-function calendar(timezone) {
+export function calendar(timezone) {
   const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
   const parts = value => Object.fromEntries(formatter.formatToParts(new Date(value)).filter(p => p.type !== 'literal').map(p => [p.type, p.value]));
   const day = value => { const p = parts(value); return `${p.year}-${p.month}-${p.day}`; };
