@@ -911,6 +911,7 @@
   "ui.ev.PLAN_APPROVED": "Duyệt kế hoạch",
   "ui.results.title": "Kết quả",
   "ui.results.request": "Bạn đã yêu cầu gì",
+  "ui.results.docs": "Tài liệu nghiên cứu",
   "ui.results.changed": "Team đã đổi gì",
   "ui.results.proof": "Bằng chứng",
   "ui.results.decision": "Bạn cần quyết định gì",
@@ -1128,5 +1129,7 @@
   "ui.orphans.confirmDelete": "Xóa {n} mục đã chọn?",
   "ui.orphans.archiveWarning": "Mục chưa vào master sẽ được tạo tag archive/<tên branch hoặc id> trước khi xóa để có thể khôi phục.",
   "ui.orphans.archived": "Đã archive: {tag}",
-  "ui.delete.archive": "Archive rồi xóa"
+  "ui.delete.archive": "Archive rồi xóa",
+  "ui.mergeQueue.title": "Thứ tự merge (trên xuống)",
+  "ui.mergeQueue.waits": "chờ {ids}"
 }

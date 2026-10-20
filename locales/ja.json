@@ -911,6 +911,7 @@
   "ui.ev.PLAN_APPROVED": "計画の承認",
   "ui.results.title": "結果",
   "ui.results.request": "依頼した内容",
+  "ui.results.docs": "調査資料",
   "ui.results.changed": "チームの変更内容",
   "ui.results.proof": "確認資料",
   "ui.results.decision": "次の判断",
@@ -1128,5 +1129,7 @@
   "ui.orphans.confirmDelete": "選択した {n} 件を削除しますか？",
   "ui.orphans.archiveWarning": "master 未統合の項目には、復元できるよう削除前に archive/<ブランチ名または id> タグを作成します。",
   "ui.orphans.archived": "アーカイブ済み: {tag}",
-  "ui.delete.archive": "アーカイブして削除"
+  "ui.delete.archive": "アーカイブして削除",
+  "ui.mergeQueue.title": "マージ順（上から）",
+  "ui.mergeQueue.waits": "{ids} 待ち"
 }

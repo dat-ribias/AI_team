@@ -911,6 +911,7 @@
   "ui.ev.PLAN_APPROVED": "Plan approved",
   "ui.results.title": "Results",
   "ui.results.request": "What you requested",
+  "ui.results.docs": "Research documents",
   "ui.results.changed": "What the team changed",
   "ui.results.proof": "Evidence",
   "ui.results.decision": "Your next decision",
@@ -1128,5 +1129,7 @@
   "ui.orphans.confirmDelete": "Delete {n} selected items?",
   "ui.orphans.archiveWarning": "Items outside master will receive an archive/<branch name or id> tag before deletion so they can be restored.",
   "ui.orphans.archived": "Archived: {tag}",
-  "ui.delete.archive": "Archive and delete"
+  "ui.delete.archive": "Archive and delete",
+  "ui.mergeQueue.title": "Merge order (top first)",
+  "ui.mergeQueue.waits": "waits for {ids}"
 }

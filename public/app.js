@@ -571,6 +571,17 @@ function drawState() {
 
 let jobsFilter = 'all', jobsSearchQuery = '', jobsProject = '';
 
+// Thứ tự merge của dự án: job code chưa vào nhánh gốc, job được nhắc mã (#id) trong goal/lý do/tin nhắn của job khác phải merge trước, còn lại theo giờ tạo.
+// ponytail: phụ thuộc đoán từ việc nhắc mã job; thay bằng phụ thuộc khai báo khi e778ed40 xong.
+function mergeQueue() {
+  const open = state.jobs.filter(j => j.project === curProject && j.kind !== 'research' && !['merged', 'cancelled'].includes(j.status) && j.git?.state !== 'in_master').sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const deps = new Map(open.map(j => { const text = [j.goal, j.reason, JSON.stringify(j.messages || [])].join(' '); return [j.id, open.filter(o => o !== j && text.includes(o.id.slice(0, 8))).map(o => o.id)]; }));
+  const out = [], done = new Set();
+  const visit = (j, path) => { if (done.has(j.id) || path.has(j.id)) return; path.add(j.id); for (const d of deps.get(j.id)) visit(open.find(o => o.id === d), path); done.add(j.id); out.push(j); };
+  open.forEach(j => visit(j, new Set()));
+  return out.map(j => ({ job: j, waits: deps.get(j.id) }));
+}
+
 function drawJobsList() {
   // Menu liệt kê MỌI việc của dự án đang mở (phiên chỉ là nhóm con, hiện trong dòng meta), việc của phiên hiện tại lên trước.
   const sessionJobs = state.jobs.filter(j => !curProject || j.project === curProject).sort((a, b) => (b.sessionId === curSession) - (a.sessionId === curSession));
@@ -578,7 +589,9 @@ function drawJobsList() {
   const showList = sessionJobs.slice(0, maxSidebar);
   const hasMore = sessionJobs.length > maxSidebar;
 
-  $('job-list').innerHTML = (showList.length ? showList.map(j => `
+  const queue = mergeQueue();
+  const queueHTML = queue.length ? `<div class="merge-queue"><p class="muted away-title">${esc(t('ui.mergeQueue.title'))}</p>` + queue.map(({ job: j, waits }, i) => `<button class="job-button merge-queue-item ${j.status === 'ready' && !waits.length ? 'merge-next' : ''}" data-job="${esc(j.id)}" title="${esc(jobTitle(j))}"><span class="merge-queue-n">${i + 1}</span><div class="job-button-content"><strong>${esc(jobTitle(j))}</strong><small>${badge(j)}<span class="job-list-meta"> · #${esc(j.id.slice(0, 8))}${waits.length ? ' · ' + esc(t('ui.mergeQueue.waits', { ids: waits.map(x => '#' + x.slice(0, 8)).join(', ') })) : ''}</span></small></div></button>`).join('') + '</div>' : '';
+  $('job-list').innerHTML = queueHTML + (showList.length ? showList.map(j => `
     <button class="job-button ${j.id === selected ? 'selected' : ''} ${runningOf(j).length ? 'working' : ''} ${j.status === 'blocked' ? 'blocked' : ''}" data-job="${esc(j.id)}" title="${esc(jobTitle(j))}">
       <span class="job-dot-status ${j.status}"></span>
       <div class="job-button-content">
@@ -1101,8 +1114,12 @@ async function drawResults() {
   const configured = job.kind !== 'research' && !!project?.preview;
   const stats = checking ? t('ui.members.checking') : changes ? t('ui.results.stats', { n: changes.files?.length || 0, added: changes.added ?? '—', removed: changes.removed ?? '—' }) : '—';
   const level = (key, ok) => `<li class="${ok ? 'evidence-pass' : 'muted'}"><b>${esc(t('ui.results.' + key))}</b><span>${esc(t(ok ? 'ui.results.pass' : 'ui.results.pending'))}</span></li>`;
+  // Job nghiên cứu: kết quả thật nằm trong các tài liệu evidence → đưa lên đầu, mỗi tên file lấy bản mới nhất.
+  const docs = new Map();
+  if (job.kind === 'research') for (const x of other) if (/\.(md|txt|csv|html)$/i.test(x.file.path)) { const name = x.file.path.split('/').pop(), old = docs.get(name); if (!old || Date.parse(x.item.at) >= Date.parse(old.item.at)) docs.set(name, x); }
+  const docsHTML = docs.size ? `<section class="result-section"><h3>${esc(t('ui.results.docs'))}</h3><ul class="evidence-files">${[...docs.values()].map(x => `<li>${evidenceLink(id, x.path, x.file.path.split('/').pop())} <span class="muted">${esc(Math.round((x.file.bytes || 0) / 1024))} KB · ${esc(names[x.item.agent] || x.item.agent || '')}</span></li>`).join('')}</ul></section>` : '';
   const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(jobTitle(job))}</p>${tokenJobLink(job)}<details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
-    <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>
+    <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>${docsHTML}
     <section class="result-section"><h3>${esc(t('ui.results.proof'))}</h3>${preview?.status === 'failed' || preview?.screenshots === false ? `<div class="error-box">${source('controller')} ${stale(preview.revision)}<p>${esc(preview.error || t(preview.screenshots === false ? 'ui.results.noChrome' : 'ui.results.previewFailed'))}</p>${other.filter(x => x.item.stage === 'preview' && x.item.revision === preview.revision && x.file.path.endsWith('preview.log')).map(x => evidenceLink(id, x.path, t('ui.evidence.openLog'))).join(' ')}</div>` : ''}
     <div class="result-images">${images.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!images.length ? `<p class="muted">${esc(t('ui.results.noImages'))}</p>` : ''}
     ${checks.map(c => `<div>${stale(c.revision)}<code>${esc(c.revision || '—')}</code>${controllerTestHTML(id, c)}</div>`).join('')}${reports.map(r => `<div>${stale(r.revision)}${aiCheckHTML({ ...r, findings: (r.findings || []).filter(f => !['resolved', 'closed'].includes(f.status) && f.resolved !== true) })}</div>`).join('')}
