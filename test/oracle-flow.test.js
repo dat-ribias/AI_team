@@ -257,7 +257,7 @@ test('oracle: browser adapter recognizes expired sessions and login-again messag
 });
 
 function routerFixture() {
-  const config = { port: 3334, oracle: { enabled: false, mode: 'off', maxPerJob: 3, accounts: [{ id: 'web-1', args: [] }, { id: 'web-2', args: [] }] } };
+  const config = { port: 3334, ping: false, oracle: { enabled: false, mode: 'off', maxPerJob: 3, accounts: [{ id: 'web-1', args: [] }, { id: 'web-2', args: [] }] } };
   const token = 'test-only-token', tests = [], stats = [], created = [];
   let handler, active = 0, maxActive = 0;
   const team = { config, memoryReaders: new Map(), on() {}, state: () => ({ agents: [] }),
