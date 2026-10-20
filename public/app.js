@@ -451,6 +451,8 @@ async function drawToken() {
       return `<div class="token-column"><span>${tokenNumber(day.tokens)}</span><svg class="token-stack" viewBox="0 0 46 180" preserveAspectRatio="none" aria-hidden="true">${bars}</svg><small>${esc(day.key.slice(5))}</small></div>`;
     };
     $('token-data').innerHTML = `<div class="token-totals">${cards.map(([k, value, delta]) => `<div class="metric"><span>${esc(t('ui.token.' + k))}</span><strong>${esc(value)}</strong><small>${esc(k === 'cost' && totals.unpricedCalls ? t('ui.token.unpriced', { n: totals.unpricedCalls }) : comparison(delta, k === 'waste'))}</small></div>`).join('')}</div><p class="token-range muted">${esc(t('ui.token.rate', { rate: tokenNumber(totals.tokensPerMinute) }))}${totals.unknownTokenCalls || totals.unknownDurationCalls ? ' · ' + esc(t('ui.token.partial', { tokens: totals.unknownTokenCalls, durations: totals.unknownDurationCalls })) : ''}</p><section class="panel token-chart-panel"><h3>${esc(t('ui.token.daily'))}</h3><div class="token-legend">${agents.map(id => `<span><svg width="12" height="12" aria-hidden="true"><rect width="12" height="12" rx="2" fill="${color(id)}"/></svg>${esc(names[id] || id)}</span>`).join('')}</div><div class="token-chart" role="img" aria-label="${esc(t('ui.token.daily'))}">${days.map(column).join('') || `<p>${esc(t('ui.token.empty'))}</p>`}</div><details><summary>${esc(t('ui.token.chartData'))}</summary><div class="token-table-wrap"><table><thead><tr>${['day', 'agent', 'tokens'].map(k => `<th scope="col">${esc(t('ui.token.' + k))}</th>`).join('')}</tr></thead><tbody>${days.flatMap(day => (members.get(day.key) || []).map(row => `<tr><td>${esc(day.key)}</td><td>${esc(names[row.key] || row.key || t('ui.common.unknown'))}</td><td>${tokenNumber(row.tokens)}</td></tr>`)).join('')}</tbody></table></div></details></section><div class="token-rankings">${reports.slice(1).map(tokenRanking).join('')}</div><section class="panel token-tips"><h3>${esc(t('ui.token.tips'))}</h3>${(tips.length ? tips : [t('ui.token.noTips')]).map(tip => `<p>${esc(tip)}</p>`).join('')}</section>`;
+    $('token-data').insertAdjacentHTML('beforeend', '<div id="oracle-stats" aria-live="polite"></div>');
+    drawOracleStats(query, request);
     $('token-data').setAttribute('aria-busy', 'false'); $('token-export').disabled = false;
   } catch (e) {
     if (request !== tokenRequest) return;
@@ -521,9 +523,8 @@ function wireCleanup(prefix) {
 $('close-cleanup').onclick = () => $('cleanup-dialog').close();
 
 function drawState() {
-  $('oracle-toggle').checked = !!state.oracle?.enabled;
-  $('oracle-toggle').disabled = !state.oracle?.accounts;
-  $('oracle-toggle').parentElement.title = t('ui.settings.oracleHint') + (!state.oracle?.accounts ? ' ' + t('ui.settings.oracleUnavailable') : '');
+  $('oracle-mode').value = state.oracle?.mode || 'off';
+  $('oracle-mode').title = t('ui.settings.oracleHint') + (!state.oracle?.accounts ? ' ' + t('ui.settings.oracleUnavailable') : '');
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
   drawStorage();
@@ -813,6 +814,70 @@ async function saveSlot() {
   $('slot-dialog').close(); await refresh();
 }
 // Sơ đồ dựng lại từ roster + plan của task đang chọn: thêm member hay Manager đổi người là tự vẽ lại.
+function oracleFlowState(job) {
+  const turns = job?.oracle?.turns || [], last = turns.at(-1);
+  const idle = !turns.length && ['ready', 'done', 'merged', 'cancelled', 'failed'].includes(job?.status);
+  const failed = turns.filter(x => x.error || x.code).length, ok = turns.filter(x => x.a !== undefined && !x.error && !x.code).length;
+  return {
+    visible: !!job && (!!job.oracle || (job.oracleMode || state.oracle?.mode || 'off') !== 'off'),
+    working: !!last && last.a === undefined && !last.error && !last.code && job.status === 'running' && job.stage === 'plan',
+    idle, failed,
+    subtitle: idle ? t('ui.oracle.notAsked') + (job.oracle?.skipReason ? ' · ' + job.oracle.skipReason : '') : t('ui.oracle.turnCount', { n: turns.length, ok, failed }),
+  };
+}
+function oracleSeconds(ms) { return ms == null ? '—' : t('ui.oracle.seconds', { n: tokenNumber(ms / 1000) }); }
+function oracleError(result) {
+  const code = ['not_logged_in', 'timeout', 'captcha', 'rate_limited', 'disabled', 'error'].includes(result.code) ? result.code : 'error';
+  return t('ui.oracle.error.' + code) + (result.error ? ' · ' + result.error : '');
+}
+function openOracle(job) {
+  const turns = job?.oracle?.turns || [];
+  $('oracle-turns').innerHTML = (job?.oracle?.skipReason ? `<p class="muted">${esc(job.oracle.skipReason)}</p>` : '') + (turns.map((turn, i) => `<article class="oracle-turn"><h3>${i + 1}. ${esc(t(turn.auto ? 'ui.oracle.controller' : 'ui.oracle.lead'))}</h3><p class="muted">${esc(clock(turn.at))} · ${esc(turn.account)} · ${esc(t('ui.oracle.duration'))}: ${esc(oracleSeconds(turn.ms))}${turn.waitMs != null ? ' · ' + esc(t('ui.oracle.wait')) + ': ' + esc(oracleSeconds(turn.waitMs)) : ''}</p><h4>${esc(t('ui.oracle.question'))}</h4><pre>${esc(turn.q)}</pre><h4>${esc(t('ui.oracle.answer'))}</h4><pre>${esc(turn.a ?? (turn.error || turn.code ? '' : t('ui.oracle.waiting')))}</pre>${turn.error || turn.code ? `<p class="evidence-fail">✗ ${esc(oracleError(turn))}${turn.code ? ' [' + esc(turn.code) + ']' : ''}</p>` : ''}</article>`).join('') || `<p>${esc(t('ui.oracle.notAsked'))}</p>`);
+  $('oracle-dialog').showModal();
+}
+let oracleTestBusy = false;
+function openOracleTest() {
+  if (!oracleTestBusy) {
+    $('oracle-test-results').innerHTML = (state.oracle?.accountIds || []).map(id => `<article class="oracle-test-row"><h3>${esc(id)}</h3><button type="button" data-oracle-test="${esc(id)}">${esc(t('ui.oracle.test'))}</button><div data-oracle-result="${esc(id)}" role="status"></div></article>`).join('') || `<p>${esc(t('ui.settings.oracleUnavailable'))}</p>`;
+    $('oracle-test-results').querySelectorAll('[data-oracle-test]').forEach(button => button.onclick = () => testOracleAccounts([button.dataset.oracleTest]));
+    $('oracle-test-all').disabled = !state.oracle?.accountIds?.length;
+  }
+  $('oracle-test-dialog').showModal();
+}
+async function testOracleAccounts(accounts) {
+  if (oracleTestBusy) return;
+  oracleTestBusy = true;
+  const buttons = [$('oracle-test-all'), ...$('oracle-test-results').querySelectorAll('button')];
+  const results = [...$('oracle-test-results').querySelectorAll('[data-oracle-result]')];
+  buttons.forEach(button => button.disabled = true);
+  try {
+    for (const account of accounts) {
+      const target = results.find(el => el.dataset.oracleResult === account);
+      if (!target) continue;
+      target.textContent = t('ui.oracle.testing');
+      try {
+        const response = await api('oracle/test', { account });
+        const result = response.results.find(row => row.account === account);
+        if (!result) throw new Error(t('ui.oracle.error.error'));
+        target.className = result.ok ? 'evidence-pass' : 'evidence-fail';
+        target.textContent = result.ok ? `✓ ${result.answer || ''} · ${oracleSeconds(result.ms)}` : `✗ ${oracleError(result)} · ${oracleSeconds(result.ms)}`;
+      } catch (error) { target.className = 'evidence-fail'; target.textContent = '✗ ' + oracleError({ error: error.message }); }
+    }
+  } finally { oracleTestBusy = false; buttons.forEach(button => button.disabled = false); }
+}
+function oracleStatsHTML(report) {
+  const keys = ['asks', 'ok', 'failed', 'avgMs', 'auto'], value = (row, key) => key === 'avgMs' ? oracleSeconds(row[key]) : tokenNumber(row[key]);
+  const table = (kind, rows) => `<section><h4>${esc(t('ui.oracle.' + kind))}</h4><div class="token-table-wrap"><table><thead><tr><th scope="col">${esc(t('ui.token.name'))}</th>${keys.map(key => `<th scope="col">${esc(t('ui.oracle.' + key))}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${kind === 'byJob' ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(row.title || row.key)}</a>` : esc(row.key)}</th>${keys.map(key => `<td>${esc(value(row, key))}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="6">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
+  return `<section class="panel oracle-stats"><h3>${esc(t('ui.oracle.title'))}</h3><div class="token-totals">${keys.map(key => `<div class="metric"><span>${esc(t('ui.oracle.' + key))}</span><strong>${esc(value(report.totals, key))}</strong></div>`).join('')}</div>${['byDay', 'byJob', 'byProject'].map(kind => table(kind, report[kind] || [])).join('')}</section>`;
+}
+async function drawOracleStats(query, request) {
+  try {
+    const report = await api('oracle/stats?' + new URLSearchParams({ from: query.from, to: query.to, project: query.project, job: query.job }));
+    if (request === tokenRequest) $('oracle-stats').innerHTML = oracleStatsHTML(report);
+  } catch (error) {
+    if (request === tokenRequest) $('oracle-stats').innerHTML = `<p class="muted oracle-stats-error">${esc(t('ui.oracle.statsError'))}: ${esc(error.message)}</p>`;
+  }
+}
 function drawFlow() {
   const current = state.jobs.find(j => j.id === selected), plans = current?.plans || [], latest = plans.at(-1);
   if (planView.job !== selected) planView = { job: selected, version: null };
@@ -838,10 +903,12 @@ function drawFlow() {
   const cols = graph ? Math.max(...level) + 1 : 1, colW = 190, shift = (cols - 1) * colW;
   const perCol = Array.from({ length: cols }, (_, c) => level.filter(l => l === c).length);
   const builders = graph ? [] : r.builders.filter(id => byId[id]), rowH = 68, top = graph ? 46 : 34;
-  const H = Math.max(140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, W = 1260 + shift, nodes = {};
+  const oracle = oracleFlowState(job);
+  const H = Math.max(oracle.visible ? 240 : 140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, W = 1260 + shift, nodes = {};
   const place = (key, x, y, w = 172) => nodes[key] = { x, y, w };
   place('user', 10, cy, 90);
   place('manager', 140, cy, 172);
+  if (oracle.visible) place('oracle', 140, cy + 84, 172);
   builders.forEach((id, i) => place('b:' + id, 365, cy + (i - (builders.length - 1) / 2) * rowH, 172));
   { const seen = Array(cols).fill(0); gtasks.forEach((x, i) => { const c = level[i], k = seen[c]++; place('t:' + i, 365 + c * colW, cy + (k - (perCol[c] - 1) / 2) * rowH, 172); }); }
   place('tests', 585 + shift, cy, 96);
@@ -909,7 +976,10 @@ function drawFlow() {
   const rvId = (!readonly && job?.substitutes?.reviewer?.to) || job?.checkers?.reviewer || job?.override?.reviewer || job?.flow?.reviewer || r.reviewer, vfId = (!readonly && job?.substitutes?.verifier?.to) || job?.checkers?.verifier || job?.override?.verifier || job?.flow?.verifier || r.verifier;
   const forced = step => { const o = job?.flow?.overrides?.find(x => x.step === step); return o ? t('ui.flow.forced', { why: o.reasons.join('; ') }) : ''; };
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
-  const nodesSvg = box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', mgId), challenge ? t('ui.results.challenge', { name: names[runs.find(x => x.stage === 'challenge')?.agent] || names[job?.current?.agent] || '—' }) : skipped('plan') ? t('ui.flow.fastPath') : sub(mgId), mgId || null, 'manager')
+  if (oracle.working) live.add('oracle');
+  if (oracle.visible) edges += `<path class="edge oracle used ${oracle.working ? 'active' : ''}" d="M218 ${cy + 24} L218 ${cy + 60} M234 ${cy + 60} L234 ${cy + 24}"/>`;
+  const oracleSvg = oracle.visible ? box('oracle', t('ui.oracle.title'), oracle.subtitle).replace('class="node ', `class="node oracle-node ${oracle.idle ? 'oracle-idle' : ''} ${oracle.failed ? 'oracle-error' : ''} `).replace('transform=', 'data-oracle role="button" tabindex="0" transform=') : '';
+  const nodesSvg = oracleSvg + box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', mgId), challenge ? t('ui.results.challenge', { name: names[runs.find(x => x.stage === 'challenge')?.agent] || names[job?.current?.agent] || '—' }) : skipped('plan') ? t('ui.flow.fastPath') : sub(mgId), mgId || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
     + gtasks.map((x, i) => { const who = x.ranBy || x.agent, wait = depsOf(x, i).filter(d => gtasks[d] && !gtasks[d].done).map(d => 'T' + (d + 1)); return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review ' + depsOf(x, i).map(d => 'T' + (d + 1)).join(',') : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
       readonly ? cut(x.instruction, 40) : (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
@@ -918,7 +988,7 @@ function drawFlow() {
   // Mỗi cột là một đợt: task cùng cột chạy song song, cột sau chờ cột trước theo mũi tên.
   const waves = graph ? perCol.map((n, c) => `<text class="edge-label wave" x="${365 + c * colW + 86}" y="${top + 4}" text-anchor="middle">${esc(t(n > 1 ? 'ui.flow.waveParallel' : 'ui.flow.wave', { n: c + 1 }))}</text>`).join('') : '';
   const planTasks = plan && !graph ? `<ul class="task-list plan-tasks">${job.tasks.map((x, i) => `<li>${taskDetailHTML(job, x, i)}</li>`).join('')}</ul>` : '';
-  $('flow').innerHTML = history + planTasks + (builders.length || r.manager || graph ? `<svg class="flow" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
+  $('flow').innerHTML = history + planTasks + (builders.length || r.manager || graph ? `<svg class="flow ${oracle.visible ? 'oracle-flow' : ''}" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
   document.querySelectorAll('[data-plan-version]').forEach(b => b.onclick = () => { const version = Number(b.dataset.planVersion); planView.version = version === latest.version ? null : version; drawState(); });
   // CSP cấm style="" trong markup; đặt qua CSSOM để vòng sáng không giật lại từ đầu mỗi lần vẽ lại.
   const phase = `-${(Date.now() % 2000) / 1000}s`; $('flow').querySelectorAll('rect.ring').forEach(x => { x.style.animationDelay = phase; });
@@ -929,6 +999,10 @@ function drawFlow() {
     return `<button data-bench="${esc(a.id)}" class="${a.state} bench-chip ${h ? 'health-' + h.cls : ''}" title="${esc(h ? h.title : a.label)}">${h ? `<span class="health-dot-inline ${h.cls}"></span>` : ''}<span>${esc(a.label)} · ${esc(tierLabel(a.tier))}</span>${h ? `<small class="bench-health ${h.cls}">${h.label}${h.rem != null ? ' ' + h.rem + '%' : ''}</small>` : ''}</button>`;
   }).join('')}` : ''}`;
   document.querySelectorAll('g[data-slot]').forEach(g => g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } });
+  $('flow').querySelectorAll('[data-oracle]').forEach(g => {
+    g.onclick = () => openOracle(job);
+    g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } };
+  });
 }
 function taskDetailHTML(job, task, i, open = false) {
   const status = task.done ? 'done' : runningOf(job).some(r => r.task === i) ? 'running' : 'waiting';
@@ -1273,7 +1347,7 @@ async function recheckMembers(ids) {
 }
 // Khung trao đổi kiểu chat nhóm: mọi thành viên trong luồng, tin của Bạn bên phải, hoạt động kỹ thuật thu gọn ở giữa.
 const SYSTEM_TYPES = ['ACTIVITY', 'DIAGNOSTIC', 'TEST_OUTPUT', 'TEST_START', 'USAGE', 'RATE_LIMIT'];
-const DECISION_TYPES = ['QUESTION', 'ORACLE_QUESTION', 'ORACLE_ANSWER', 'CONCLUSION', 'DECISION', 'PEER_QUESTION', 'PEER_REPLY', 'PEER_DECISION', 'PEER_UNRESOLVED', 'PEER_HANDOVER', 'PEER_REOPENED', 'PEER_SCORE', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'REASSIGN', 'REQUEUE', 'CONFLICT', 'WARNING'];
+const DECISION_TYPES = ['QUESTION', 'ORACLE_QUESTION', 'ORACLE_ANSWER', 'ORACLE_ERROR', 'CONCLUSION', 'DECISION', 'PEER_QUESTION', 'PEER_REPLY', 'PEER_DECISION', 'PEER_UNRESOLVED', 'PEER_HANDOVER', 'PEER_REOPENED', 'PEER_SCORE', 'BLOCKER', 'REWORK_REQUEST', 'REVIEW_RESULT', 'READY_FOR_MERGE', 'MERGED', 'REROUTE', 'REASSIGN', 'REQUEUE', 'CONFLICT', 'WARNING'];
 const hueClass = id => 'hue-' + [...String(id)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 8, 3);
 const evLabel = type => dict['ui.ev.' + type] || fallback['ui.ev.' + type] || type;
 function avatar(id) {
@@ -1541,7 +1615,7 @@ document.querySelectorAll('[data-job-filter]').forEach(b => {
   };
 });
 $('compare-modes').onchange = () => { $('token-budget').required = $('call-budget').required = $('compare-modes').checked; };
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, title: $('task-title').value.trim() || undefined, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; $('task-title').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, title: $('task-title').value.trim() || undefined, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, oracleMode: $('job-oracle-mode').value || undefined, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; $('task-title').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
 let scoreTarget, obligationTarget;
 $('close-claim-score').onclick = () => $('claim-score-dialog').close();
 $('close-obligation').onclick = () => $('obligation-dialog').close();
@@ -1846,16 +1920,21 @@ $('start-login').onclick = () => attempt(async () => { $('start-login').disabled
 $('check-login').onclick = () => attempt(async () => { await api(`members/${loginId}/refresh`, {}); await refresh(); });
 $('cancel-login').onclick = () => attempt(async () => { await api(`members/${loginId}/cancel-login`, {}); await refresh(); });
 $('theme-select').onchange = () => { store.set('theme', $('theme-select').value); applyTheme($('theme-select').value); };
-$('oracle-toggle').onchange = async () => {
-  const toggle = $('oracle-toggle'), previous = !!state?.oracle?.enabled;
-  toggle.disabled = true;
+$('oracle-mode').onchange = async () => {
+  const select = $('oracle-mode'), previous = state?.oracle?.mode || 'off';
+  select.disabled = true;
   try {
-    const result = await api('settings', { oracle: toggle.checked });
+    const result = await api('settings', { oracle: select.value });
     state.oracle = result.oracle;
-    toggle.checked = !!state.oracle?.enabled;
-  } catch (e) { notice(e.message); toggle.checked = previous; }
-  finally { toggle.disabled = !state?.oracle?.accounts; }
+    select.value = state.oracle.mode;
+    drawFlow();
+  } catch (e) { notice(e.message); select.value = previous; }
+  finally { select.disabled = false; }
 };
+$('oracle-test').onclick = openOracleTest;
+$('oracle-test-all').onclick = () => testOracleAccounts(state.oracle?.accountIds || []);
+$('oracle-close').onclick = () => $('oracle-dialog').close();
+$('oracle-test-close').onclick = () => $('oracle-test-dialog').close();
 // Ngôn ngữ lưu ở server (team.config.json) để thông báo do server tạo cũng đổi theo.
 $('lang-select').onchange = () => attempt(async () => {
   const next = $('lang-select').value; store.set('lang', next);
