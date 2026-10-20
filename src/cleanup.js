@@ -371,7 +371,11 @@ export async function applyOrphans({ items, jobs = [], dataDir, root, projects =
         if (typeof mainBranchOf !== 'function') throw new Error('Missing main branch dependency');
         const destination = await mainBranchOf(repository);
         if (!destination || destination.startsWith('-')) throw new Error('Invalid main branch');
-        if (!await merged(repository, branch, destination, ctx)) archived = await archiveRef(repository, branch, ctx);
+        if (!await merged(repository, branch, destination, ctx)) {
+          archived = await archiveRef(repository, branch, ctx);
+          const id = branch.match(/^ai-team\/([0-9a-f]{8})-/i)?.[1];
+          if (id) await archiveCommit(repository, id, tip, ctx);
+        }
         await checkOwner();
         if ((await query(repository, ['rev-parse', '--verify', `refs/heads/${branch}`], ctx)).trim() !== tip) throw new Error('Target tip changed');
         const r = await command(repository, ['branch', '-D', '--', branch], ctx);

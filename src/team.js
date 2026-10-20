@@ -2585,13 +2585,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   // Chạy song song nhiều công việc trong giới hạn slot RAM; mỗi công việc giữ 1 slot, task song song bên trong giữ thêm.
   async tick() {
     await this.previewRecovery;
-    if (this.closed) return;
-    await this.reconcile().catch(e => this.emit('fault', e));
     for (const [id, preview] of this.previews) {
       let job; try { job = this.get(id); } catch {}
       const reason = !job ? 'deleted' : terminal.has(job.status) ? job.status : job.revision !== preview.revision ? 'revision' : Date.parse(job.preview?.expiresAt || preview.expiresAt) <= Date.now() ? 'ttl' : preview.after && (preview.after.child.exitCode !== null || preview.after.child.signalCode) ? 'exited' : null;
       if (reason) await this.stopPreview(id, reason);
     }
+    if (this.closed) return;
+    await this.reconcile().catch(e => this.emit('fault', e));
     if (this.closed || this.accountLoginBusy) return;
     for (const job of this.jobs()) {
       if (['waiting', 'blocked'].includes(job.status) && job.blockedReason?.kind === 'role' && !this.runs.has(job.id)) {
