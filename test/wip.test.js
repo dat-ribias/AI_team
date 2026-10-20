@@ -73,6 +73,28 @@ test('parallel failure keeps WIP on its child branch and resumes the sole remain
   assert.equal(team.events(job.id).filter(e => e.type === 'RESUME_WIP').length, 1);
 });
 
+test('resumed WIP child branch picks up commits added to the job branch after it was created', async t => {
+  let calls = 0, sawSync = null;
+  const { team, job } = await fixture(t, async (agent, task) => {
+    if (agent.id === 'codex-2') {
+      if (++calls === 1) { writeFileSync(join(task.worktree, 't1.txt'), 'wip\n'); throw new Error('stop'); }
+      sawSync = existsSync(join(task.worktree, 'synced.txt'));
+      writeFileSync(join(task.worktree, 't1.txt'), 'done\n');
+    } else writeFileSync(join(task.worktree, 't2.txt'), 'done\n');
+    return completed;
+  });
+  await team.runJob(job);
+  assert.equal(team.get(job.id).status, 'blocked');
+  // The job branch moves on (e.g. master synced in) while T1 waits on its old child branch.
+  writeFileSync(join(job.worktree, 'synced.txt'), 'from master\n');
+  await git(job.worktree, 'add', 'synced.txt');
+  await git(job.worktree, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'sync');
+  const recovered = await resume(team, job.id);
+  assert.equal(sawSync, true, 'the resumed child must contain the new job head');
+  assert.equal(recovered.tasks[0].done, true);
+  assert.equal(readFileSync(join(job.worktree, 't1.txt'), 'utf8'), 'done\n');
+});
+
 test('resume adds an existing WIP branch after its worktree directory was lost', async t => {
   let recover = false, sawFile = false;
   const { team, job } = await fixture(t, async (agent, task) => {
