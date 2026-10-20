@@ -911,6 +911,7 @@
   "ui.ev.PLAN_APPROVED": "計画の承認",
   "ui.results.title": "結果",
   "ui.results.request": "依頼した内容",
+  "ui.results.docs": "調査資料",
   "ui.results.changed": "チームの変更内容",
   "ui.results.proof": "確認資料",
   "ui.results.decision": "次の判断",
@@ -1163,5 +1164,7 @@
   "ui.oracle.byDay": "日別",
   "ui.oracle.byJob": "ジョブ別",
   "ui.oracle.byProject": "プロジェクト別",
-  "ui.oracle.statsError": "Oracle統計を取得できませんでした"
+  "ui.oracle.statsError": "Oracle統計を取得できませんでした",
+  "ui.mergeQueue.title": "マージ順（上から）",
+  "ui.mergeQueue.waits": "{ids} 待ち"
 }

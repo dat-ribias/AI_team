@@ -911,6 +911,7 @@
   "ui.ev.PLAN_APPROVED": "Duyệt kế hoạch",
   "ui.results.title": "Kết quả",
   "ui.results.request": "Bạn đã yêu cầu gì",
+  "ui.results.docs": "Tài liệu nghiên cứu",
   "ui.results.changed": "Team đã đổi gì",
   "ui.results.proof": "Bằng chứng",
   "ui.results.decision": "Bạn cần quyết định gì",
@@ -1163,5 +1164,7 @@
   "ui.oracle.byDay": "Theo ngày",
   "ui.oracle.byJob": "Theo job",
   "ui.oracle.byProject": "Theo dự án",
-  "ui.oracle.statsError": "Không tải được thống kê Oracle"
+  "ui.oracle.statsError": "Không tải được thống kê Oracle",
+  "ui.mergeQueue.title": "Thứ tự merge (trên xuống)",
+  "ui.mergeQueue.waits": "chờ {ids}"
 }

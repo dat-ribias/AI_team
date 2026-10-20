@@ -1839,7 +1839,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (await git(child.wt, ['status', '--porcelain'])) {
           const id = task.ranBy || who, label = this.config.agents.find(a => a.id === id)?.label || id;
           await git(child.wt, ['add', '--all']);
-          await git(child.wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `AI Team ${job.id} T${i + 1} ${id}: WIP`]);
+          await git(child.wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `WIP: ${taskTitle(task)} (${cleanTitle(label)}) [#${job.id}]`]);
           task.checkpoint = { ...task.checkpoint, wip: { branch: child.branch, commit: await git(child.wt, ['rev-parse', 'HEAD']), at: now(), reason: redact(error.message) } };
           const fresh = this.get(job.id);
           if (fresh.status === 'cancelled') {

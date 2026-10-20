@@ -9,6 +9,7 @@ import { DEFAULT_SYSTEM_PROMPT } from './prompts.js';
 import { Accounts, accessList } from './accounts.js';
 import { exportTransfer, importTransfer } from './transfer.js';
 import { initializeUsage } from './usage.js';
+import { spawn } from 'node:child_process';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -230,6 +231,17 @@ function broadcast() {
 team.on('event', broadcast); team.on('change', broadcast); team.on('fault', e => console.error(e));
 const heartbeat = setInterval(() => { for (const client of clients) client.write(': heartbeat\n\n'); }, 15000);
 const quotaTimer = setInterval(() => team.refreshQuota().catch(e => console.error(e)), 5 * 60_000);
+// Ping overlay (tools/ping-lite): giữ Alt + kéo chuột. Dùng lại Electron + hook-helper của lolPing; "ping": false để tắt.
+const pingDir = config.ping === false ? null : resolve(config.ping?.dir || 'D:\\p\\ping');
+const pingExe = pingDir && join(pingDir, 'node_modules/electron/dist/electron.exe');
+let ping = null;
+if (pingExe && existsSync(pingExe)) {
+  const env = { ...process.env, PING_PARENT: String(process.pid), PING_HELPER: join(pingDir, 'native/hook-helper/build/hook-helper.exe'), PING_ASSETS: join(pingDir, 'assets') };
+  delete env.ELECTRON_RUN_AS_NODE;
+  ping = spawn(pingExe, [join(root, 'tools/ping-lite')], { env, stdio: 'ignore', windowsHide: true });
+  ping.on('error', e => console.error('ping:', e.message));
+}
+process.on('exit', () => ping?.kill());
 server.listen(port, '127.0.0.1', () => {
   console.log(`AI Team ${config.demo ? 'DEMO' : 'LIVE'}: ${origin}`); team.start();
   (async () => { for (const a of team.config.agents) await accounts.refresh(a.id); await team.refreshQuota(); })().catch(e => console.error(e));
