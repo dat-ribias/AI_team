@@ -62,7 +62,7 @@ test('parallel failure keeps WIP on its child branch and resumes the sole remain
   assert.equal(blocked.status, 'blocked'); assert.equal(blocked.tasks[1].done, true);
   assert.equal(wip.branch, `${job.branch}-t1`); assert.equal(wip.reason, 'builder failed'); assert(Number.isFinite(Date.parse(wip.at)));
   assert.equal(await git(path, 'rev-parse', wip.branch), wip.commit);
-  assert.equal(await git(path, 'log', '-1', '--format=%s', wip.branch), `AI Team ${job.id} T1 codex-2: WIP`);
+  assert.equal(await git(path, 'log', '-1', '--format=%s', wip.branch), `WIP: T1 edit (codex-2) [#${job.id}]`);
   assert.equal(await git(path, 'log', '-1', '--format=%ae', wip.branch), 'codex-2@ai-team.local');
   assert(existsSync(`${job.worktree}-t1`)); assert(!existsSync(`${job.worktree}-t2`));
   assert(!existsSync(join(job.worktree, 't1.txt')), 'WIP must not merge into the job branch');

@@ -200,7 +200,7 @@ const server = createServer(async (req, res) => {
         const { file, type } = team.evidenceFile(id, url.searchParams.get('path'));
         const images = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
         if (type === 'html') res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
-        res.setHeader('Content-Disposition', type === 'other' ? 'attachment' : 'inline');
+        res.setHeader('Content-Disposition', type === 'other' ? `attachment; filename*=UTF-8''${encodeURIComponent(file.split(/[\\/]/).pop())}` : 'inline');
         res.writeHead(200, { 'Content-Type': type === 'image' ? images[extname(file).toLowerCase()] : type === 'html' ? 'text/html' : type === 'text' ? 'text/plain; charset=utf-8' : 'application/octet-stream' });
         res.end(readFileSync(file)); return;
       }
@@ -222,7 +222,7 @@ team.on('event', broadcast); team.on('change', broadcast); team.on('fault', e =>
 const heartbeat = setInterval(() => { for (const client of clients) client.write(': heartbeat\n\n'); }, 15000);
 const quotaTimer = setInterval(() => team.refreshQuota().catch(e => console.error(e)), 5 * 60_000);
 // Ping overlay (tools/ping-lite): giữ Alt + kéo chuột. Dùng lại Electron + hook-helper của lolPing; "ping": false để tắt.
-const pingDir = config.ping === false ? null : resolve(config.ping?.dir || 'D:\\p\\ping');
+const pingDir = config.ping === false || typeof spawn !== 'function' || process.env?.NODE_TEST_CONTEXT ? null : resolve(config.ping?.dir || 'D:\\p\\ping');
 const pingExe = pingDir && join(pingDir, 'node_modules/electron/dist/electron.exe');
 let ping = null;
 if (pingExe && existsSync(pingExe)) {

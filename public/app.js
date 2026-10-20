@@ -539,7 +539,7 @@ function drawState() {
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuAverage30s')],
   ].map(([label, value, note, warning]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small>${warning ? `<small class="metric-agents-warning">${esc(warning)}</small>` : ''}</div>`).join('');
   if (!$('recent-flaky')) $('metrics').insertAdjacentHTML('afterend', '<section id="recent-flaky" class="panel history" aria-labelledby="recent-flaky-title"></section>');
-  $('recent-flaky').innerHTML = `<h2 id="recent-flaky-title">${esc(t('ui.flaky.title'))}</h2>` + ((state.flaky || []).filter(item => { const p = state.jobs.find(j => j.id === item.job)?.project; return !p || p === curProject; }).slice(0, 10).map(item => `<p class="muted">${esc(t('ui.flaky.item', { test: item.test, job: item.job, at: clock(item.at) }))}</p>`).join('') || `<p class="muted">${esc(t('ui.flaky.empty'))}</p>`);
+  $('recent-flaky').innerHTML = `<h2 id="recent-flaky-title">${esc(t('ui.flaky.title'))}</h2>` + ((state.flaky || []).filter(item => { const p = state.jobs?.find(j => j.id === item.job)?.project; return !p || p === curProject; }).slice(0, 10).map(item => `<p class="muted">${esc(t('ui.flaky.item', { test: item.test, job: item.job, at: clock(item.at) }))}</p>`).join('') || `<p class="muted">${esc(t('ui.flaky.empty'))}</p>`);
   const resultJob = state.jobs.find(j => j.id === selected);
   if (resultsSelection !== selected) {
     resultsSelection = selected;
@@ -584,19 +584,19 @@ function mergeQueue() {
 
 function drawJobsList() {
   // Menu liệt kê MỌI việc của dự án đang mở (phiên chỉ là nhóm con, hiện trong dòng meta), việc của phiên hiện tại lên trước.
-  const sessionJobs = state.jobs.filter(j => !curProject || j.project === curProject).sort((a, b) => (b.sessionId === curSession) - (a.sessionId === curSession));
+  const queue = mergeQueue(), order = new Map(queue.map((q, i) => [q.job.id, i]));
+  // Job chưa vào nhánh gốc lên đầu theo thứ tự merge (số 1, 2, 3…), sau đó việc của phiên hiện tại.
+  const sessionJobs = state.jobs.filter(j => !curProject || j.project === curProject).sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9) || (b.sessionId === curSession) - (a.sessionId === curSession));
   const maxSidebar = 10;
   const showList = sessionJobs.slice(0, maxSidebar);
   const hasMore = sessionJobs.length > maxSidebar;
 
-  const queue = mergeQueue();
-  const queueHTML = queue.length ? `<div class="merge-queue"><p class="muted away-title">${esc(t('ui.mergeQueue.title'))}</p>` + queue.map(({ job: j, waits }, i) => `<button class="job-button merge-queue-item ${j.status === 'ready' && !waits.length ? 'merge-next' : ''}" data-job="${esc(j.id)}" title="${esc(jobTitle(j))}"><span class="merge-queue-n">${i + 1}</span><div class="job-button-content"><strong>${esc(jobTitle(j))}</strong><small>${badge(j)}<span class="job-list-meta"> · #${esc(j.id.slice(0, 8))}${waits.length ? ' · ' + esc(t('ui.mergeQueue.waits', { ids: waits.map(x => '#' + x.slice(0, 8)).join(', ') })) : ''}</span></small></div></button>`).join('') + '</div>' : '';
-  $('job-list').innerHTML = queueHTML + (showList.length ? showList.map(j => `
+  $('job-list').innerHTML = (showList.length ? showList.map(j => `
     <button class="job-button ${j.id === selected ? 'selected' : ''} ${runningOf(j).length ? 'working' : ''} ${j.status === 'blocked' ? 'blocked' : ''}" data-job="${esc(j.id)}" title="${esc(jobTitle(j))}">
-      <span class="job-dot-status ${j.status}"></span>
+      ${order.has(j.id) ? `<span class="merge-queue-n ${j.status === 'ready' && !queue[order.get(j.id)].waits.length ? 'merge-next' : ''}" title="${esc(t('ui.mergeQueue.title'))}">${order.get(j.id) + 1}</span>` : `<span class="job-dot-status ${j.status}"></span>`}
       <div class="job-button-content">
         <strong>${esc(jobTitle(j))}</strong>
-        <small>${badge(j)}<span class="job-list-meta"> · ${esc([state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
+        <small>${badge(j)}<span class="job-list-meta"> · ${esc([order.has(j.id) && queue[order.get(j.id)].waits.length ? t('ui.mergeQueue.waits', { ids: queue[order.get(j.id)].waits.map(x => '#' + x.slice(0, 8)).join(', ') }) : '', state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
       </div>
     </button>
   `).join('') : `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`)
@@ -1116,7 +1116,7 @@ async function drawResults() {
   const level = (key, ok) => `<li class="${ok ? 'evidence-pass' : 'muted'}"><b>${esc(t('ui.results.' + key))}</b><span>${esc(t(ok ? 'ui.results.pass' : 'ui.results.pending'))}</span></li>`;
   // Job nghiên cứu: kết quả thật nằm trong các tài liệu evidence → đưa lên đầu, mỗi tên file lấy bản mới nhất.
   const docs = new Map();
-  if (job.kind === 'research') for (const x of other) if (/\.(md|txt|csv|html)$/i.test(x.file.path)) { const name = x.file.path.split('/').pop(), old = docs.get(name); if (!old || Date.parse(x.item.at) >= Date.parse(old.item.at)) docs.set(name, x); }
+  if (job.kind === 'research') for (const x of other) if (/\.(md|txt|csv|html|docx|xlsx|pptx|pdf)$/i.test(x.file.path)) { const name = x.file.path.split('/').pop(), old = docs.get(name); if (!old || Date.parse(x.item.at) >= Date.parse(old.item.at)) docs.set(name, x); }
   const docsHTML = docs.size ? `<section class="result-section"><h3>${esc(t('ui.results.docs'))}</h3><ul class="evidence-files">${[...docs.values()].map(x => `<li>${evidenceLink(id, x.path, x.file.path.split('/').pop())} <span class="muted">${esc(Math.round((x.file.bytes || 0) / 1024))} KB · ${esc(names[x.item.agent] || x.item.agent || '')}</span></li>`).join('')}</ul></section>` : '';
   const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(jobTitle(job))}</p>${tokenJobLink(job)}<details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
     <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>${docsHTML}
