@@ -43,6 +43,7 @@ const cookieName = `team_session_${port}`;
 const clients = new Set();
 const send = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)); };
 const equal = value => typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
+const oracleState = () => ({ enabled: team.config.oracle.enabled, mode: team.config.oracle.mode, accounts: team.config.oracle.accounts.length, accountIds: team.config.oracle.accounts.map(a => a.id), maxPerJob: team.config.oracle.maxPerJob });
 async function body(req, limit = 100_000) {
   let text = ''; for await (const chunk of req) { text += chunk; if (text.length > limit) throw new Error(msg("srv.server.body_qua_lon")); }
   return text ? JSON.parse(text) : {};
@@ -75,7 +76,7 @@ const server = createServer(async (req, res) => {
       const state = team.state();
       state.agents = state.agents.map(a => ({ ...a, auth: accounts.snapshot(team.agent(a.id)) }));
       state.providers = accounts.providers();
-      Object.assign(state, { language: getLanguage(), languages, stale: stale(), oracle: { enabled: team.config.oracle.enabled, accounts: team.config.oracle.accounts.length } });
+      Object.assign(state, { language: getLanguage(), languages, stale: stale(), oracle: oracleState() });
       return send(res, 200, state);
     }
     if (req.method === 'GET' && url.pathname === '/api/usage') {
@@ -90,6 +91,12 @@ const server = createServer(async (req, res) => {
       const records = team.db.prepare(`SELECT * FROM usage_log WHERE ${filters.join(' AND ')} ORDER BY at, id`).all(...values);
       return send(res, 200, { ...report, breakdown, rankings, records });
     }
+    if (req.method === 'POST' && url.pathname === '/api/oracle/test') {
+      const input = await body(req), results = [];
+      for (const id of input.account === undefined ? team.config.oracle.accounts.map(a => a.id) : [input.account]) results.push(await team.testOracle(id));
+      return send(res, 200, { results });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/oracle/stats') return send(res, 200, team.oracleStats(Object.fromEntries(url.searchParams)));
     if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, team.skills(url.searchParams.has('refresh')).map(({ name, description, source }) => ({ name, description, source })));
     if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
     if (req.method === 'GET' && url.pathname === '/api/system-prompt') return send(res, 200, { ...team.systemPrompt(), default: DEFAULT_SYSTEM_PROMPT, history: team.systemPromptHistory() });
@@ -142,12 +149,15 @@ const server = createServer(async (req, res) => {
       const input = await body(req);
       if (input.language === undefined && input.oracle === undefined) throw new Error('Provide language or oracle');
       if (input.language !== undefined && !languages.includes(input.language)) throw new Error('language: vi | en | ja');
-      if (input.oracle !== undefined && typeof input.oracle !== 'boolean') throw new Error('oracle must be boolean');
+      if (input.oracle !== undefined && typeof input.oracle !== 'boolean' && !['off', 'auto', 'required'].includes(input.oracle)) throw new Error('oracle: off | auto | required');
       const next = structuredClone(team.config);
       if (input.language !== undefined) next.language = input.language;
-      if (input.oracle !== undefined) next.oracle.enabled = input.oracle;
+      if (input.oracle !== undefined) {
+        next.oracle.mode = typeof input.oracle === 'boolean' ? (input.oracle ? 'auto' : 'off') : input.oracle;
+        next.oracle.enabled = next.oracle.mode !== 'off';
+      }
       accounts.persist(next); setLanguage(next.language || getLanguage());
-      return send(res, 200, { language: getLanguage(), oracle: team.config.oracle.enabled });
+      return send(res, 200, { language: getLanguage(), oracle: oracleState() });
     }
     if (req.method === 'POST' && url.pathname === '/api/members') return send(res, 201, accounts.add(await body(req)));
     const memberMatch = /^\/api\/members\/([a-z0-9-]+)\/(login|cancel-login|refresh|role|profile|models|usage|terminal)$/.exec(url.pathname);

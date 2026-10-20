@@ -28,6 +28,7 @@ export async function runOracle({ command, args = [], prompt, followup, timeoutM
     const log = stripVTControlCharacters(result.stdout + '\n' + result.stderr);
     if (/too many requests/i.test(log)) throw new Error('Too many requests');
     if (/captcha|verify (?:that )?you are human|cloudflare challenge/i.test(log)) throw new Error('captcha challenge');
+    if (/session (?:has )?expired|log ?in again/i.test(log)) throw new Error('session expired');
     if (/not (?:logged|signed) in|please (?:log|sign) in|login required|sign.in required|unauthenticated|authentication required/i.test(log)) throw new Error('not logged in');
     if (/timed? out|timeout/i.test(log) && result.code !== 0) throw new Error('timeout');
     if (result.code !== 0) throw new Error(`exit ${result.code}`);
