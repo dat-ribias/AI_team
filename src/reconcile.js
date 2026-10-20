@@ -7,11 +7,13 @@ const branchId = name => name?.match(/^ai-team\/([0-9a-f]{8})(?:$|-)/i)?.[1] || 
 const treeId = path => basename(path).match(/^([0-9a-f]{8})(?:$|@|-)/i)?.[1] || null;
 const lines = value => value.split(/\r?\n/).filter(Boolean);
 
+// Một lượt reconcile chỉ đọc git: ctx.memo gom các lệnh trùng (for-each-ref, worktree list, nhánh chính...) giữa các job cùng repo.
+const cached = (ctx, key, fn) => { if (!ctx.memo) return fn(); if (!ctx.memo.has(key)) ctx.memo.set(key, fn()); return ctx.memo.get(key); };
 async function command(root, args, ctx) {
-  return ctx.run(['git'], ['--no-optional-locks', '-C', root, ...args], { allowFailure: true, timeoutMs: 60_000 });
+  return cached(ctx, `c\0${root}\0${args.join('\0')}`, () => ctx.run(['git'], ['--no-optional-locks', '-C', root, ...args], { allowFailure: true, timeoutMs: 60_000 }));
 }
 async function query(root, args, ctx) {
-  if (ctx.git) return ctx.git(root, ['--no-optional-locks', ...args]);
+  if (ctx.git) return cached(ctx, `q\0${root}\0${args.join('\0')}`, () => ctx.git(root, ['--no-optional-locks', ...args]));
   const result = await command(root, args, ctx);
   if (result.code !== 0) throw new Error(result.stderr || 'Git query failed');
   return result.stdout.trim();
@@ -81,8 +83,8 @@ async function count(root, base, tip, ctx) {
   return base ? Number(await query(root, ['rev-list', '--count', `${base}..${tip}`], ctx)) : null;
 }
 
-export async function inventoryJob({ job, root, project, dataDir, git, run }) {
-  const ctx = { git, run }, repos = [];
+export async function inventoryJob({ job, root, project, dataDir, git, run, memo }) {
+  const ctx = { git, run, memo }, repos = [];
   const sources = [{ ...job, path: root, config: project }, ...(job?.linked || []).map(linked => ({ ...linked, config: linked }))];
   for (const source of sources) {
     const repoRoot = source.path, read = (path, args) => query(path, args, ctx);
@@ -149,8 +151,8 @@ export function classify(job, inventory) {
   return { state: 'working', reason: status || 'working' };
 }
 
-export async function listOrphans({ projects, jobs, dataDir, git, run }) {
-  const ctx = { git, run }, items = [];
+export async function listOrphans({ projects, jobs, dataDir, git, run, memo }) {
+  const ctx = { git, run, memo }, items = [];
   const known = id => id && jobs.some(job => job.id.toLowerCase() === id.toLowerCase());
   const owned = tree => known(branchId(tree.branch)) || known(treeId(tree.worktree)) || jobs.some(job => [job, ...(job.linked || [])].some(source => source.worktree && same(source.worktree, tree.worktree) || source.branch && tree.branch && (tree.branch === source.branch || tree.branch.startsWith(`${source.branch}-`))));
   for (const project of projects) {

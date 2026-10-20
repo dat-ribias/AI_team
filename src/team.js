@@ -811,34 +811,40 @@ export class Team extends EventEmitter {
     if (count) decisions.push({ kind: 'orphans', count });
     return decisions;
   }
-  inventory(job) {
+  inventory(job, memo) {
     const project = this.project(job.project);
-    return inventoryJob({ job, project, root: project.path, dataDir: this.dataDir, git, run });
+    return inventoryJob({ job, project, root: project.path, dataDir: this.dataDir, git, run, memo });
   }
   reconcile({ force = false } = {}) {
     if (this.reconcilePending) return this.reconcilePending;
     if (this.closed || !force && this.reconciledAt && Date.now() - this.reconciledAt < 60_000) return Promise.resolve({ decisions: this.decisions() });
     this.reconciledAt = Date.now();
     this.reconcilePending = (async () => {
-      const before = JSON.stringify(this.decisions()), ids = new Set();
-      for (const job of this.jobs()) if (job.kind !== 'research') {
+      const before = JSON.stringify(this.decisions()), ids = new Set(), memo = new Map();
+      // Job đã kết thúc và đã ổn định (đã vào master / hủy sạch) với cùng revision thì không quét git lại.
+      const stable = job => { const s = this.gitStates.get(job.id); return s && s.rev === job.revision && s.status === job.status && ['merged', 'cancelled'].includes(job.status) && ['in_master', 'cancelled_clean'].includes(s.state); };
+      const check = async job => {
         ids.add(job.id);
-        const inventory = await this.inventory(job);
+        if (stable(job)) return;
+        const inventory = await this.inventory(job, memo);
         const row = this.db.prepare('SELECT body FROM jobs WHERE id=?').get(job.id);
-        if (!row) continue;
+        if (!row) return;
         const fresh = JSON.parse(row.body);
-        if (fresh.revision !== job.revision || JSON.stringify(fresh.linked) !== JSON.stringify(job.linked)) continue;
-        this.gitStates.set(job.id, { ...classify(fresh, inventory), checkedAt: now() });
-      }
+        if (fresh.revision !== job.revision || JSON.stringify(fresh.linked) !== JSON.stringify(job.linked)) return;
+        this.gitStates.set(job.id, { ...classify(fresh, inventory), checkedAt: now(), rev: fresh.revision, status: fresh.status });
+      };
+      // ponytail: 4 job song song cố định; tăng/giảm nếu git trên Windows bị nghẽn.
+      const list = this.jobs().filter(job => job.kind !== 'research');
+      for (let i = 0; i < list.length; i += 4) await Promise.all(list.slice(i, i + 4).map(check));
       for (const id of this.gitStates.keys()) if (!ids.has(id)) this.gitStates.delete(id);
-      this.gitOrphans = await this.orphans();
+      this.gitOrphans = await this.orphans(memo);
       const decisions = this.decisions();
       if (before !== JSON.stringify(decisions)) this.emit('change');
       return { decisions };
     })().finally(() => { this.reconcilePending = null; });
     return this.reconcilePending;
   }
-  orphans() { return listOrphans({ projects: this.config.projects, jobs: this.jobs(), dataDir: this.dataDir, git, run }); }
+  orphans(memo) { return listOrphans({ projects: this.config.projects, jobs: this.jobs(), dataDir: this.dataDir, git, run, memo }); }
   deleteOrphans(items) {
     return this.queueCleanup(async () => {
       const result = await applyOrphans({ ...this.cleanupContext(), items, mainBranchOf: root => mainBranchOf(root, this.config.projects.find(p => p.path === root), git) });
