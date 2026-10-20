@@ -531,15 +531,16 @@ function drawState() {
   $('mode').textContent = state.demo ? t('ui.header.demo') : 'LIVE · LOCAL';
   $('connection').textContent = t('ui.nav.connected');
   if (state.demo && !$('notice').textContent) notice(t('ui.header.demoNotice'));
-  const ready = state.jobs.filter(j => j.status === 'ready').length;
+  const projJobs = state.jobs.filter(j => j.project === curProject); // số liệu công việc theo dự án đang mở
+  const ready = projJobs.filter(j => j.status === 'ready').length;
   $('metrics').innerHTML = [
     [t('ui.metric.agents'), `${state.resources.active} <small>/ ${state.resources.slots ?? 1}</small>`, state.resources.waitingReason || t('ui.metric.onDemand'), state.resources.active > state.resources.maxAgents ? t('ui.metric.agentsAboveRecommended', { n: state.resources.active, m: state.resources.maxAgents }) : ''],
-    [t('ui.metric.jobs'), state.jobs.length, t('ui.metric.jobsNote', { running: state.jobs.filter(j => ['queued', 'running'].includes(j.status)).length, ready })],
+    [t('ui.metric.jobs'), projJobs.length, t('ui.metric.jobsNote', { running: projJobs.filter(j => ['queued', 'running'].includes(j.status)).length, ready })],
     [t('ui.metric.ram'), `${state.resources.ramPercent}%`, t('ui.metric.ramNote', { total: state.resources.totalGB, controller: state.resources.controllerMB })],
     [t('ui.metric.cpu'), `${state.resources.cpuPercent}%`, t('ui.metric.cpuAverage30s')],
   ].map(([label, value, note, warning]) => `<div class="metric"><span>${esc(label)}</span><strong>${value}</strong><small>${esc(note)}</small>${warning ? `<small class="metric-agents-warning">${esc(warning)}</small>` : ''}</div>`).join('');
   if (!$('recent-flaky')) $('metrics').insertAdjacentHTML('afterend', '<section id="recent-flaky" class="panel history" aria-labelledby="recent-flaky-title"></section>');
-  $('recent-flaky').innerHTML = `<h2 id="recent-flaky-title">${esc(t('ui.flaky.title'))}</h2>` + ((state.flaky || []).slice(0, 10).map(item => `<p class="muted">${esc(t('ui.flaky.item', { test: item.test, job: item.job, at: clock(item.at) }))}</p>`).join('') || `<p class="muted">${esc(t('ui.flaky.empty'))}</p>`);
+  $('recent-flaky').innerHTML = `<h2 id="recent-flaky-title">${esc(t('ui.flaky.title'))}</h2>` + ((state.flaky || []).filter(item => { const p = state.jobs.find(j => j.id === item.job)?.project; return !p || p === curProject; }).slice(0, 10).map(item => `<p class="muted">${esc(t('ui.flaky.item', { test: item.test, job: item.job, at: clock(item.at) }))}</p>`).join('') || `<p class="muted">${esc(t('ui.flaky.empty'))}</p>`);
   const resultJob = state.jobs.find(j => j.id === selected);
   if (resultsSelection !== selected) {
     resultsSelection = selected;
@@ -569,11 +570,12 @@ function drawState() {
   drawInspector(); drawQuota(); drawLogin();
 }
 
-let jobsFilter = 'all', jobsSearchQuery = '';
+let jobsFilter = 'all', jobsSearchQuery = '', jobsProject = '';
 
 function drawJobsList() {
-  const sessionJobs = state.jobs.filter(j => !curProject || j.project === curProject && (!curSession || j.sessionId === curSession));
-  const maxSidebar = 3;
+  // Menu liệt kê MỌI việc của dự án đang mở (phiên chỉ là nhóm con, hiện trong dòng meta), việc của phiên hiện tại lên trước.
+  const sessionJobs = state.jobs.filter(j => !curProject || j.project === curProject).sort((a, b) => (b.sessionId === curSession) - (a.sessionId === curSession));
+  const maxSidebar = 10;
   const showList = sessionJobs.slice(0, maxSidebar);
   const hasMore = sessionJobs.length > maxSidebar;
 
@@ -582,7 +584,7 @@ function drawJobsList() {
       <span class="job-dot-status ${j.status}"></span>
       <div class="job-button-content">
         <strong>${esc(jobTitle(j))}</strong>
-        <small>${badge(j)}<span class="job-list-meta"> · ${esc(jobWorker(j))} · ${esc(clock(j.updatedAt || j.createdAt))}</span></small>
+        <small>${badge(j)}<span class="job-list-meta"> · ${esc([state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
       </div>
     </button>
   `).join('') : `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`)
@@ -592,25 +594,23 @@ function drawJobsList() {
   const away = state.jobs.filter(j => ['running', 'queued', 'waiting'].includes(j.status) && !sessionJobs.includes(j));
   if (away.length) $('job-list').insertAdjacentHTML('beforeend', `<p class="muted away-title">${esc(t('ui.nav.runningElsewhere'))}</p>` + away.slice(0, 4).map(j => `<button class="job-button away ${runningOf(j).length ? 'working' : ''}" data-away="${esc(j.id)}" title="${esc(jobTitle(j))}"><span class="job-dot-status ${j.status}"></span><div class="job-button-content"><strong>${esc(jobTitle(j))}</strong><small>${esc(j.project)} · ${esc(state.sessions.find(x => x.id === j.sessionId)?.name || '')} · #${esc(j.id.slice(0, 8))}</small></div></button>`).join(''));
   document.querySelectorAll('[data-away]').forEach(b => b.onclick = () => gotoJob(b.dataset.away));
-  document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => attempt(async () => {
-    selected = b.dataset.job;
-    events = [];
-    if ($('jobs-dialog')?.open) $('jobs-dialog').close();
-    await refresh();
-  }));
+  document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => { if ($('jobs-dialog')?.open) $('jobs-dialog').close(); gotoJob(b.dataset.job); }); // chuyển luôn sang phiên của việc
 
   const moreBtn = $('sidebar-more-jobs');
   if (moreBtn) moreBtn.onclick = () => openJobsDialog();
 }
 
 function openJobsDialog() {
+  jobsProject = curProject; // mặc định chỉ hiện job của dự án đang mở
   $('jobs-dialog').showModal();
   drawJobsDialog();
 }
 
 function drawJobsDialog() {
   if (!$('jobs-dialog')?.open) return;
-  const allJobs = state.jobs || [];
+  const sel = $('jobs-project');
+  if (sel) { sel.innerHTML = `<option value="">${esc(t('ui.jobs.allProjects'))}</option>` + state.projects.map(p => `<option value="${esc(p.id)}">${esc(p.id)}</option>`).join(''); sel.value = jobsProject; }
+  const allJobs = (state.jobs || []).filter(j => !jobsProject || j.project === jobsProject);
   const q = (jobsSearchQuery || '').trim().toLowerCase();
 
   const counts = {
@@ -628,7 +628,9 @@ function drawJobsDialog() {
   if ($('count-cancelled')) $('count-cancelled').textContent = counts.cancelled;
   if ($('jobs-dialog-sub')) $('jobs-dialog-sub').textContent = t('ui.metric.jobsNote', { running: counts.running, ready: counts.ready });
 
-  const filtered = allJobs.filter(j => {
+  // Gõ mã job (hex) mà có job trùng mã thì chỉ hiện job đó, không lẫn các job có nhắc mã ấy trong mục tiêu.
+  const idHits = /^#?[0-9a-f]{4,}$/.test(q) ? allJobs.filter(j => j.id.startsWith(q.replace('#', ''))) : [];
+  const filtered = idHits.length ? idHits : allJobs.filter(j => {
     if (jobsFilter === 'running' && !['running', 'queued'].includes(j.status)) return false;
     if (jobsFilter === 'ready' && j.status !== 'ready') return false;
     if (jobsFilter === 'done' && !['done', 'merged'].includes(j.status)) return false;
@@ -691,13 +693,9 @@ function drawJobsDialog() {
       e.stopPropagation();
       const id = el.dataset.jobOpen || el.dataset.jobSelect;
       if (id) {
-        attempt(async () => {
-          selected = id;
-          events = [];
-          $('jobs-dialog').close();
-          view('work');
-          await refresh();
-        });
+        $('jobs-dialog').close();
+        view('work');
+        gotoJob(id); // chuyển luôn dự án/phiên theo job, không chỉ đổi selected
       }
     };
   });
@@ -724,10 +722,12 @@ function syncTab() {
 function drawSessions() {
   if (!state.projects.some(p => p.id === curProject)) curProject = state.projects[0]?.id || '';
   const list = state.sessions.filter(x => x.project === curProject);
-  if (!list.some(x => x.id === curSession)) curSession = list.at(-1)?.id || '';
+  // Chưa chọn phiên (vd vừa đổi dự án): mở phiên có việc mới nhất, không phải phiên mới tạo đang trống.
+  if (!list.some(x => x.id === curSession)) curSession = list.find(x => x.id === state.jobs.find(j => j.project === curProject)?.sessionId)?.id || list.at(-1)?.id || '';
   // Dự án có AI đang chạy: chấm ● + số AI trong ô chọn; ô sáng khi có dự án KHÁC đang chạy.
-  const busyOf = id => state.jobs.filter(j => j.project === id).reduce((n, j) => n + runningOf(j).length, 0);
-  $('session-project').innerHTML = state.projects.map(p => { const n = busyOf(p.id); return `<option value="${esc(p.id)}">${n ? `● ${esc(p.id)} · ${esc(t('ui.nav.agentsRunning', { n }))}` : esc(p.id)}</option>`; }).join('') + `<option value="__add">${esc(t('ui.project.add'))}</option>`;
+  // Đếm việc đang chạy (kể cả lúc controller chạy test/merge, khi không có AI nào) chứ không chỉ AI đang gọi.
+  const busyOf = id => state.jobs.filter(j => j.project === id && (['running', 'queued', 'merging'].includes(j.status) || runningOf(j).length)).length;
+  $('session-project').innerHTML = state.projects.map(p => { const n = busyOf(p.id); return `<option value="${esc(p.id)}">${n ? `● ${esc(p.id)} · ${esc(t('ui.nav.jobsRunning', { n }))}` : esc(p.id)}</option>`; }).join('') + `<option value="__add">${esc(t('ui.project.add'))}</option>`;
   $('session-project').classList.toggle('working', state.projects.some(p => p.id !== curProject && busyOf(p.id)));
   $('session-project').value = curProject;
   $('session-tabs').innerHTML = list.map(x => { const st = sessionState(x.id); return `<button role="tab" class="stab ${x.id === curSession ? 'active' : ''} ${st.cls}" data-session="${esc(x.id)}" title="${esc(x.name + ' · ' + st.label + ' · ' + sessionSummary(x))}"><span class="job-dot-status ${st.dot}"></span>${esc(cut(x.name, 28))}<span class="stab-x" data-session-del="${esc(x.id)}" title="${esc(t('ui.inspector.delete'))}">×</span></button>`; }).join('') || `<span class="muted">${esc(t('ui.session.none'))}</span>`;
@@ -941,7 +941,7 @@ function drawFlow() {
     const cls = [
       substitute && 'substitute',
       (job ? live.has(key) : a?.state === 'working') && 'working',
-      job && !live.has(key) && a?.state === 'working' && !(challenge && key === 'reviewer') && 'elsewhere',
+      job && !live.has(key) && a?.state === 'working' && !runs.some(r => r.agent === agentId) && !(challenge && key === 'reviewer') && 'elsewhere', // cùng member đang chạy vai khác TRONG job này thì không phải 'nơi khác'
       filter && filter === agentId && 'filtered',
       agentId === null && 'missing',
       a && !a.enabled && 'disabled',
@@ -1079,7 +1079,7 @@ function drawInspector() {
   if (job.comparison) {
     const peers = state.jobs.filter(j => j.comparison?.group === job.comparison.group);
     $('inspector').insertAdjacentHTML('beforeend', `<h3>${esc(t('ui.peer.compare'))} · ${esc(job.comparison.group)}</h3><p class="muted">${esc(t('ui.peer.compareNote'))}</p><table><thead><tr><th>${esc(t('ui.peer.mode'))}</th><th>${esc(t('ui.peer.calls'))}</th><th>${esc(t('ui.peer.tokens'))}</th><th>${esc(t('ui.peer.wrongToRight'))}</th><th>${esc(t('ui.peer.rightToWrong'))}</th><th>${esc(t('ui.peer.unjudged'))}</th></tr></thead><tbody>${peers.map(j => { const labels = (j.discussions || []).flatMap(d => d.claims || []).map(c => c.judgment?.transition || 'unjudged'), n = k => labels.filter(x => x === k).length; return `<tr><td><button data-compare-job="${esc(j.id)}">${esc(t('ui.peer.' + j.dialogueMode))}</button><br>${esc(jobStatusLabel(j))}</td><td>${j.usage?.calls || 0}/${j.callBudget}</td><td>${j.usage?.tokens || 0}/${j.tokenBudget}</td><td>${n('wrongToRight')}</td><td>${n('rightToWrong')}</td><td>${labels.length ? n('unjudged') : '—'}</td></tr>`; }).join('')}</tbody></table>`);
-    document.querySelectorAll('[data-compare-job]').forEach(b => b.onclick = () => { selected = b.dataset.compareJob; events = []; refresh(); });
+    document.querySelectorAll('[data-compare-job]').forEach(b => b.onclick = () => gotoJob(b.dataset.compareJob));
   }
   document.querySelectorAll('[data-score-thread]').forEach(b => b.onclick = () => { scoreTarget = { job: job.id, thread: b.dataset.scoreThread, claim: b.dataset.claim }; $('claim-score-form').reset(); $('claim-score-dialog').showModal(); });
   document.querySelectorAll('[data-obligation]').forEach(b => b.onclick = () => {
@@ -1588,8 +1588,10 @@ async function refresh() {
       const job = state.jobs.find(j => j.id === linkedJob);
       if (job) { curProject = job.project; curSession = job.sessionId || ''; selected = job.id; linkedJob = null; }
     }
-    if (selected && !state.jobs.some(j => j.id === selected)) selected = undefined; // việc đã bị xóa (ở tab khác hoặc vừa xóa)
-    if (!selected) selected = state.jobs.find(j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession))?.id;
+    const inView = j => (!curProject || j.project === curProject) && (!curSession || j.sessionId === curSession);
+    // Việc đã bị xóa, hoặc thuộc dự án/phiên khác (URL cũ, đổi dự án) → bỏ chọn để sơ đồ/inspector không hiện việc của dự án khác.
+    if (selected && !state.jobs.some(j => j.id === selected && inView(j))) selected = undefined;
+    if (!selected) selected = state.jobs.find(inView)?.id;
     if (state.language && state.language !== lang) await loadLanguage(state.language);
     if (eventsOf !== selected) { events = []; eventsOf = selected; }
     if (selected) {
@@ -1599,7 +1601,7 @@ async function refresh() {
     drawState(); drawDecisions(); syncTab(); drawTimeline();
   } finally { rendering = false; if (again) { again = false; refresh(); } }
 }
-const openTask = () => { $('task-dialog').showModal(); attempt(loadBaseBranches); };
+const openTask = () => { if (state.projects.some(p => p.id === curProject)) $('project').value = curProject; $('task-dialog').showModal(); attempt(loadBaseBranches); }; // mặc định giao việc cho dự án đang mở
 $('project').onchange = () => attempt(loadBaseBranches);
 ['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
 $('close-dialog').onclick = () => $('task-dialog').close(); $('close-diff').onclick = () => $('diff-dialog').close();
@@ -1607,6 +1609,7 @@ if ($('open-jobs-btn')) $('open-jobs-btn').onclick = openJobsDialog;
 if ($('close-jobs')) $('close-jobs').onclick = () => $('jobs-dialog').close();
 if ($('jobs-dialog-new')) $('jobs-dialog-new').onclick = () => { $('jobs-dialog').close(); openTask(); };
 if ($('jobs-search')) $('jobs-search').oninput = e => { jobsSearchQuery = e.target.value; drawJobsDialog(); };
+if ($('jobs-project')) $('jobs-project').onchange = e => { jobsProject = e.target.value; drawJobsDialog(); };
 document.querySelectorAll('[data-job-filter]').forEach(b => {
   b.onclick = () => {
     jobsFilter = b.dataset.jobFilter;
@@ -1615,7 +1618,7 @@ document.querySelectorAll('[data-job-filter]').forEach(b => {
   };
 });
 $('compare-modes').onchange = () => { $('token-budget').required = $('call-budget').required = $('compare-modes').checked; };
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, title: $('task-title').value.trim() || undefined, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, oracleMode: $('job-oracle-mode').value || undefined, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; $('task-title').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, title: $('task-title').value.trim() || undefined, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, oracleMode: $('job-oracle-mode').value || undefined, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; curProject = job.project; curSession = job.sessionId || ''; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; $('task-title').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
 let scoreTarget, obligationTarget;
 $('close-claim-score').onclick = () => $('claim-score-dialog').close();
 $('close-obligation').onclick = () => $('obligation-dialog').close();
@@ -1877,6 +1880,7 @@ $('flow-toggle').onclick = () => { store.set('flow', store.get('flow') === 'min'
 function gotoJob(id) {
   const j = state.jobs.find(x => x.id === id); if (!j) return;
   curProject = j.project; curSession = j.sessionId || ''; selected = j.id; events = []; filter = null;
+  view('work'); // chọn việc = xem điều phối; Token/Quota/Quyền là trang chung, không gắn với việc
   store.set('project', curProject); store.set('session', curSession); drawSessions(); attempt(refresh);
 }
 function selectSessionJob() {
@@ -1884,7 +1888,7 @@ function selectSessionJob() {
   if (!own.some(j => j.id === selected)) { selected = own[0]?.id; events = []; filter = null; }
   refresh();
 }
-$('session-project').onchange = () => { if ($('session-project').value === '__add') { $('session-project').value = curProject; $('open-project').click(); return; } curProject = $('session-project').value; curSession = ''; store.set('project', curProject); drawSessions(); selectSessionJob(); };
+$('session-project').onchange = () => { if ($('session-project').value === '__add') { $('session-project').value = curProject; $('open-project').click(); return; } curProject = $('session-project').value; curSession = ''; store.set('project', curProject); view('work'); drawSessions(); selectSessionJob(); };
 $('session-tab').onclick = () => window.open(location.pathname + '#' + new URLSearchParams({ p: curProject }), '_blank');
 $('session-new').onclick = () => attempt(async () => { const name = await ask(t('ui.session.newPrompt'), { input: true }); if (name === null) return; const s = await api('sessions', { project: curProject, name }); curSession = s.id; store.set('session', s.id); selected = undefined; events = []; await refresh(); });
 $('session-rename').onclick = () => attempt(async () => { if (!curSession) return; const name = await ask(t('ui.session.renamePrompt'), { input: true, value: state.sessions.find(x => x.id === curSession)?.name || '' }); if (name) { await api(`sessions/${curSession}/rename`, { name }); await refresh(); } });
