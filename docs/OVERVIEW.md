@@ -70,7 +70,7 @@ Member có thể được thay tạm khi quota thấp; checker ưu tiên ngườ
 ## Chức năng hiện có trên master
 
 - Lead tham khảo ChatGPT web qua `oracle --engine browser`, dùng quota web, chỉ ở bước plan (kể cả vòng rework). ChatGPT chỉ tư vấn, không nhận task hay sửa code. Có thể hỏi tiếp trong cùng cuộc trò chuyện của một job; câu hỏi/câu trả lời lưu trong lịch sử job, toàn văn thu gọn khi xem job. Mỗi tài khoản dùng một browser profile riêng, đăng nhập thủ công một lần; mỗi tài khoản chỉ có một cuộc hỏi tại một thời điểm, job khác chờ. Lỗi/timeout/captcha/chưa đăng nhập/Too many requests thì Lead bỏ qua, ghi WARNING và tiếp tục bình thường.
-- Oracle API: `GET /api/state` trả `oracle: {enabled, mode, accounts: number, accountIds: string[], maxPerJob}`; `POST /api/settings` nhận `{oracle: "off"|"auto"|"required"}` (hoặc boolean cũ) và trả `{language, oracle}` cùng shape. `POST /api/jobs` nhận thêm `oracleMode` tùy chọn. `POST /api/oracle/test` nhận `{account?: id}`, không chọn thì chạy tuần tự mọi tài khoản, kể cả khi mode `off`; trả `{results:[{account,ok,answer?,error?,code?,ms,at}]}`. Test dùng câu hỏi cố định, cùng hàng đợi với Lead, không ghi job hay tính thống kê. Lượt hỏi job lưu `{q,at,account,auto?,a?,error?,code?,ms?,waitMs?}`; `ms` không gồm thời gian chờ hàng đợi. Lead có thể ghi lý do không hỏi vào `oracleSkip`, lưu thành `job.oracle.skipReason` đã redact (tối đa 300 ký tự).
+- Oracle API: `GET /api/state` trả `oracle: {enabled, mode, accounts: number, accountIds: string[], maxPerJob}`; `POST /api/settings` nhận `{oracle: "off"|"auto"|"required"}` (hoặc boolean cũ) và trả `{language, oracle}` cùng shape. `POST /api/jobs` nhận thêm `oracleMode` và `lang` (`vi` / `ja` / `en`) tùy chọn; control action `language` nhận `payload.lang` để ghi đè ngôn ngữ job. `POST /api/oracle/test` nhận `{account?: id}`, không chọn thì chạy tuần tự mọi tài khoản, kể cả khi mode `off`; trả `{results:[{account,ok,answer?,error?,code?,ms,at}]}`. Test dùng câu hỏi cố định, cùng hàng đợi với Lead, không ghi job hay tính thống kê. Lượt hỏi job lưu `{q,at,account,auto?,a?,error?,code?,ms?,waitMs?}`; `ms` không gồm thời gian chờ hàng đợi. Lead có thể ghi lý do không hỏi vào `oracleSkip`, lưu thành `job.oracle.skipReason` đã redact (tối đa 300 ký tự).
 - `GET /api/oracle/stats?from&to&project&job` nhận mốc ISO, mặc định 7 ngày gần nhất, tính khoảng `[from,to)`. Kết quả `{from,to,timezone,totals,byDay,byJob,byProject}`; mỗi nhóm có `{asks,ok,failed,avgMs,auto}`, `byDay` thêm `key: YYYY-MM-DD`, `byJob` thêm `{key,title,project}`, `byProject` thêm `key`. Ngày theo `config.timezone` (mặc định `Asia/Tokyo`), `avgMs` chỉ tính lượt có `ms` (0 nếu chưa có), nhóm ngày tăng dần và nhóm job/dự án giảm dần theo số lượt. Lỗi chuẩn hóa: `not_logged_in` (gồm hết phiên), `timeout`, `captcha`, `rate_limited`, `disabled`, `error`. Câu hỏi tự động chỉ chứa project id, loại việc, tiêu đề và tối đa 2000 ký tự goal đã redact; không lấy nội dung file hay config.
 
 Cột Job ghi ID 8 ký tự đã đối chiếu lịch sử master và SQLite. `—` nghĩa là chức năng nền từ v1/v1.1 (01/10/2026) hoặc thay đổi cũ không có ID job trong commit; không suy đoán ID từ tên commit `new`/`test`. Bảng chỉ mô tả chức năng đã có trong code, không coi đề xuất trong báo cáo là tính năng.
@@ -79,7 +79,7 @@ Cột Job ghi ID 8 ký tự đã đối chiếu lịch sử master và SQLite. `
 |---|---|---|---|
 | Setup máy mới, demo với provider mock | CLI `npm run setup`, `npm run demo` | `src/setup.js` | — |
 | Dashboard local, xác thực controller, cập nhật SSE | UI; API `/state`, `/stream`; config port | `src/server.js`, `public/app.js` | — |
-| Ngôn ngữ Việt / Nhật / Anh | UI; config `language` | `src/i18n.js`, `locales/*.json` | — |
+| Ngôn ngữ Việt / Nhật / Anh | UI/controller dùng config `language`; từng job dùng `job.lang` | `src/i18n.js`, `src/team.js`, `locales/*.json` | — |
 | Đăng ký, sửa, xóa project; chọn thư mục và tests | UI; API `/projects` | `src/accounts.js`, `src/server.js` | — |
 | Phiên theo project, tên/ghi chú, xóa phiên | UI; API `/sessions` | `src/team.js`, `public/app.js` | — |
 | Tạo job, mục tiêu, đính kèm ảnh/log/tài liệu | UI; API `/jobs`; MCP `delegate_task` | `src/team.js`, `src/mcp.js` | — |
@@ -143,7 +143,7 @@ Cột Job ghi ID 8 ký tự đã đối chiếu lịch sử master và SQLite. `
 - `public/index.html`: khung dashboard và dialog.
 - `public/style.css`: bố cục, thành phần, màu và responsive.
 - `test/`: system integration, smoke, quota-failover và transient-failover.
-- `locales/`: `vi.json`, `ja.json`, `en.json` cho giao diện/thông báo.
+- `locales/`: `vi.json`, `ja.json`, `en.json` cho giao diện và thông báo controller; khi có bản dịch, controller ưu tiên locale theo `job.lang` cho thông báo thuộc job.
 - `scripts/`: `login.ps1`, `member-login.ps1` hỗ trợ đăng nhập member.
 
 ## Dữ liệu được lưu ở đâu
@@ -159,7 +159,7 @@ Cột Job ghi ID 8 ký tự đã đối chiếu lịch sử master và SQLite. `
 
 | Nhóm | Khóa và ý nghĩa |
 |---|---|
-| Controller | `port` (3333), `dataDir`, `demo`, `language` (vi/ja/en). |
+| Controller | `port` (3333), `dataDir`, `demo`, `language` (vi/ja/en) là ngôn ngữ mặc định của UI/server, tách biệt với `job.lang`. |
 | Đội hình | `agents[]`: id/provider/command/home/enabled/model/tier/kind/effort/systemPrompt/MCP; `pipeline`: manager/reviewer/verifier/builders. |
 | Project | `projects[]`: id/path/tests (argv tin cậy), access/network/readDirs, preview. Quyền theo phiên và `roleCaps` giới hạn quyền thực tế. |
 | Kế hoạch/sửa | `planApproval`, `planApprovalRework` mặc định true; `maxReworkRounds` 3; `peerDialogue` true, job `dialogueMode`; `resumeCodexTasks` false trong mẫu. |
@@ -173,3 +173,5 @@ Cột Job ghi ID 8 ký tự đã đối chiếu lịch sử master và SQLite. `
 | Provider/quyền | `codexWindowsSandbox` mẫu `unelevated`; `none` giảm cách ly. `agyAutoApprove: true` tự duyệt công cụ; `quotaPrintSupported` chỉ bật khi CLI hỗ trợ. |
 
 Các giới hạn cần nhớ: không benchmark chất lượng AI; quota Gemini CLI chưa tích hợp; preview chỉ hỗ trợ web và không phải sandbox bảo mật; repo liên kết chưa tự sync khi base đổi; chuyển máy hiện chỉ một repo. Memory/báo cáo là dữ liệu cần kiểm nguồn, không phải quyết định đã được owner duyệt.
+
+Mỗi job tự nhận diện `job.lang` từ goal: ký tự tiếng Việt có dấu chọn `vi`, kana/kanji chọn `ja`, còn lại chọn `en`; giá trị `lang` khi tạo job hoặc control action `language` có thể ghi đè. Tin nhắn mới nhất của owner cập nhật ngôn ngữ khi nhận diện đủ tin cậy: `vi`/`ja` cần ký tự đặc trưng, còn `en` cần câu ASCII tự nhiên dài ít nhất 40 ký tự và 6 từ. Chuỗi ASCII ngắn, đường dẫn, hash và log không làm đổi ngôn ngữ. Mọi prompt đều nhắc member viết phần văn bản cho người đọc bằng `job.lang` (code, identifier, commit message và đường dẫn giữ nguyên). Báo cáo dài nhưng rõ ràng sai ngôn ngữ được yêu cầu viết lại đúng một lần; nếu vẫn sai, controller ghi cảnh báo nhưng không chặn job.

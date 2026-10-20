@@ -1,5 +1,6 @@
 # Lịch sử thay đổi
 
+- 2026-10-20 · Ngôn ngữ theo job · Thêm `job.lang`, tự nhận diện `vi` / `ja` / `en` từ goal và cập nhật từ tin nhắn owner khi đủ tin cậy; hỗ trợ `lang` lúc tạo job và control action `language` để ghi đè. Mọi prompt yêu cầu văn bản cho người đọc theo ngôn ngữ job; báo cáo rõ ràng sai ngôn ngữ được gọi lại đúng một lần, sau đó chỉ cảnh báo và không chặn. Chuỗi ASCII ngắn, đường dẫn, hash và log không làm đổi ngôn ngữ; thông báo controller ưu tiên locale của job khi có.
 - 2026-10-20 · Oracle · Thống kê Oracle hiểu mốc ngày theo múi giờ báo cáo.
 - 2026-10-20 · Backend ChatGPT web (Oracle) · Thêm chế độ `off` / `auto` / `required` và ghi đè `oracleMode` theo job; hỏi tự động một lần trước plan, resume không gửi lại, lỗi vẫn tiếp tục. Lưu thời gian chờ/trả lời, mã lỗi và event `ORACLE_ERROR`, giữ `ORACLE_QUESTION` / `ORACLE_ANSWER`; lưu lý do Lead bỏ qua. Thêm API thử kết nối theo tài khoản dùng chung hàng đợi và thống kê theo ngày/job/dự án, nhận diện phiên web hết hạn; kiểm tra bằng adapter Oracle giả và router không mở cổng.
 
