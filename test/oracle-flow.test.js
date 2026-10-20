@@ -219,6 +219,27 @@ test('oracle: stats count all turns, average timed turns, honor timezone and fil
   for (const input of [{ from: 'bad' }, { from: '' }, { from: '2026-02-30' }, { ...options, to: options.from }, { from: options.to, to: options.from }]) assert.throws(() => f.team.oracleStats(input), /ISO/);
 });
 
+test('oracle: stats interpret date-only boundaries in the report timezone', async t => {
+  const f = await fixture(t);
+  f.team.config.timezone = 'Asia/Tokyo';
+  const row = { id: 'dates', project: 'test', oracle: { turns: [
+    { at: '2026-10-19T23:30:00Z', a: 'October 20 JST' },
+    { at: '2026-10-20T23:30:00Z', a: 'October 21 JST' },
+  ] } };
+  f.team.db.prepare('INSERT INTO jobs VALUES (?,?)').run(row.id, JSON.stringify(row));
+  const options = { from: '2026-10-20', to: '2026-10-21' }, report = f.team.oracleStats(options);
+  assert.equal(report.totals.asks, 1);
+  assert.equal(report.from, '2026-10-19T15:00:00.000Z');
+  assert.equal(report.to, '2026-10-20T15:00:00.000Z');
+  assert.equal(f.team.oracleStats({ from: options.from, to: '2026-10-19T23:45:00Z' }).totals.asks, 1);
+  assert.throws(() => f.team.oracleStats({ from: '2026-10-19T16:00:00Z', to: options.from }), /ISO/);
+  f.team.config.timezone = 'UTC';
+  const utc = f.team.oracleStats(options);
+  assert.equal(utc.from, '2026-10-20T00:00:00.000Z');
+  assert.equal(utc.to, '2026-10-21T00:00:00.000Z');
+  assert.equal(utc.totals.asks, 1);
+});
+
 test('oracle: config validates mode, migrates enabled and keeps enabled compatible', async t => {
   const f = await fixture(t);
   for (const mode of [null, '', true, 'invalid']) assert.throws(() => validateConfig({ ...f.config, oracle: { mode } }), /oracle/);

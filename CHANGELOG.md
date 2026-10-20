@@ -1,5 +1,6 @@
 # Lịch sử thay đổi
 
+- 2026-10-20 · Oracle · Thống kê Oracle hiểu mốc ngày theo múi giờ báo cáo.
 - 2026-10-20 · Backend ChatGPT web (Oracle) · Thêm chế độ `off` / `auto` / `required` và ghi đè `oracleMode` theo job; hỏi tự động một lần trước plan, resume không gửi lại, lỗi vẫn tiếp tục. Lưu thời gian chờ/trả lời, mã lỗi và event `ORACLE_ERROR`, giữ `ORACLE_QUESTION` / `ORACLE_ANSWER`; lưu lý do Lead bỏ qua. Thêm API thử kết nối theo tài khoản dùng chung hàng đợi và thống kê theo ngày/job/dự án, nhận diện phiên web hết hạn; kiểm tra bằng adapter Oracle giả và router không mở cổng.
 
 - 2026-10-19 · Thống nhất trạng thái job và đối soát Git · Bổ sung 7 trạng thái: Đang làm / Chờ chủ duyệt / Đã vào master / Kẹt merge / Hủy – còn code chưa vào master / Hủy – sạch / Xong. Đối soát định kỳ và khi mở dashboard bằng quan hệ tổ tiên trên nhánh chính, nhận diện merge tay và đối soát riêng repo liên kết; job đã vào dev nhưng chưa lên master là “Chờ chủ duyệt (RC)”, chủ duyệt RC trước khi lên master. Cấu hình nhánh qua `project.mainBranch` / `project.integrationBranch`.

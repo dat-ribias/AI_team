@@ -19,7 +19,7 @@ import { collect, kind, safeRel } from './evidence.js';
 import { planJob, planPeriodic, apply as applyCleanup, storageStats, archiveRef, archiveCommit, applyOrphans } from './cleanup.js';
 import { mainBranchOf, inventoryJob, classify, listOrphans } from './reconcile.js';
 import { validatePreview, startServer, startDemoServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
-import { initializeUsage } from './usage.js';
+import { initializeUsage, calendar } from './usage.js';
 
 const now = () => new Date().toISOString();
 const tokyo = iso => iso ? new Date(iso).toLocaleString('vi-VN', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '—';
@@ -2430,9 +2430,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     from ??= new Date(end - 7 * 86_400_000).toISOString(); to ??= new Date(end).toISOString();
     const iso = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) && Number.isFinite(Date.parse(value))
       && new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) === value.slice(0, 10);
-    if (!iso(from) || !iso(to) || Date.parse(from) >= Date.parse(to)) throw new Error('oracle stats: valid ISO from < to required');
-    from = new Date(from).toISOString(); to = new Date(to).toISOString();
-    const timezone = this.config.timezone || 'Asia/Tokyo', day = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    if (!iso(from) || !iso(to)) throw new Error('oracle stats: valid ISO from < to required');
+    const timezone = this.config.timezone || 'Asia/Tokyo', zone = calendar(timezone);
+    const boundary = value => /^\d{4}-\d{2}-\d{2}$/.test(value) ? zone.midnight(value) : new Date(value).toISOString();
+    try { from = boundary(from); to = boundary(to); }
+    catch { throw new Error('oracle stats: valid ISO from < to required'); }
+    if (Date.parse(from) >= Date.parse(to)) throw new Error('oracle stats: valid ISO from < to required');
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
     const empty = () => ({ asks: 0, ok: 0, failed: 0, auto: 0, ms: 0, timed: 0 });
     const totals = empty(), byDay = new Map(), byJob = new Map(), byProject = new Map();
     const add = (map, key, extra, turn) => {
