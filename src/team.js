@@ -19,7 +19,7 @@ import { collect, kind, safeRel } from './evidence.js';
 import { planJob, planPeriodic, apply as applyCleanup, storageStats, archiveRef, archiveCommit, applyOrphans } from './cleanup.js';
 import { mainBranchOf, inventoryJob, classify, listOrphans } from './reconcile.js';
 import { validatePreview, startServer, startDemoServer, waitReady, freePort, stopTree, findChrome, screenshot } from './preview.js';
-import { initializeUsage } from './usage.js';
+import { initializeUsage, calendar } from './usage.js';
 
 const now = () => new Date().toISOString();
 const tokyo = iso => iso ? new Date(iso).toLocaleString('vi-VN', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' }) : '—';
@@ -64,6 +64,16 @@ export const redact = text => String(text)
   .replace(/(\bBearer\s+)([^\s,"'{}\\]+)/gi, '$1[REDACTED]')
   .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
 const scrub = value => JSON.parse(redact(JSON.stringify(value)));
+const ORACLE_TEST_PROMPT = 'Connection test. Reply with exactly: OK';
+const oracleCode = error => {
+  const message = String(error.message || error);
+  if (/not logged in|session expired/i.test(message)) return 'not_logged_in';
+  if (/timeout/i.test(message)) return 'timeout';
+  if (/captcha/i.test(message)) return 'captcha';
+  if (/too many requests/i.test(message)) return 'rate_limited';
+  if (/disabled/i.test(message)) return 'disabled';
+  return 'error';
+};
 // Skill names may contain ':' (plugin:skill), which Windows forbids in folder names.
 const skillDir = name => name.replace(/[^\w.-]+/g, '-');
 const PEER_STAGES = new Set(['plan', 'implement', 'research', 'review', 'verify', 'challenge']);
@@ -265,6 +275,9 @@ export function validateConfig(config) {
   if (oracle.timeoutMin === undefined) oracle.timeoutMin = 10;
   if (oracle.maxPerJob === undefined) oracle.maxPerJob = 3;
   if (typeof oracle.enabled !== 'boolean') throw new Error('oracle.enabled must be boolean');
+  if (oracle.mode === undefined) oracle.mode = oracle.enabled ? 'auto' : 'off';
+  if (!['off', 'auto', 'required'].includes(oracle.mode)) throw new Error('oracle.mode: off | auto | required');
+  oracle.enabled = oracle.mode !== 'off';
   if (!Array.isArray(oracle.command) || !oracle.command.length || oracle.command.some(v => typeof v !== 'string' || !v.trim())) throw new Error('oracle.command must be an argv array');
   if (!Array.isArray(oracle.accounts) || oracle.accounts.length < 1 || oracle.accounts.length > 2 || oracle.accounts.some(a => !a || typeof a.id !== 'string' || !a.id.trim() || !Array.isArray(a.args) || a.args.some(v => typeof v !== 'string')) || new Set(oracle.accounts.map(a => a.id)).size !== oracle.accounts.length) throw new Error('oracle.accounts must contain 1-2 accounts with unique ids and argv args');
   if (!Number.isFinite(oracle.timeoutMin) || oracle.timeoutMin <= 0 || oracle.timeoutMin * 60_000 > 2_147_483_647) throw new Error('oracle.timeoutMin must be a positive timeout');
@@ -930,7 +943,8 @@ export class Team extends EventEmitter {
     const found = await run(['git'], ['-C', root, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { allowFailure: true });
     if (exists ? found.code !== 0 : found.code === 0) throw new Error(exists ? 'Local branch does not exist' : 'Branch already exists');
   }
-  async create({ project, goal, title, files, baseBranch, mode = 'full', sessionId, paused = false, dialogueMode = 'direct', tokenBudget, callBudget, planApproval }) {
+  async create({ project, goal, title, files, baseBranch, mode = 'full', sessionId, paused = false, dialogueMode = 'direct', tokenBudget, callBudget, planApproval, oracleMode }) {
+    if (oracleMode !== undefined && !['off', 'auto', 'required'].includes(oracleMode)) throw new Error('oracleMode: off | auto | required');
     if (planApproval !== undefined && typeof planApproval !== 'boolean') throw new Error(msg("srv.team.plan_approval_invalid"));
     if (!['off', 'direct', 'independent'].includes(dialogueMode)) throw new Error('Invalid dialogue mode');
     for (const v of [tokenBudget, callBudget]) if (v !== undefined && (!Number.isSafeInteger(v) || v < 1)) throw new Error('Budgets must be positive integers');
@@ -966,6 +980,7 @@ export class Team extends EventEmitter {
     const job = { id, project, goal: goal.trim(), title: title === undefined ? autoTitle(goal) : title, titleBy: title === undefined ? 'auto' : 'user', status: 'queued', stage: 'plan', branch, baseBranch, base, worktree,
       roster: members, dialogueMode, planApproval: planApproval ?? (this.config.planApproval !== false), plans: [], planGate: null, ...(tokenBudget ? { tokenBudget, fixedTokenBudget: true } : {}), ...(callBudget ? { callBudget } : {}), createdAt: now(), round: 0, tasks: [], taskIndex: 0, reports: [], messages: [], revision: base, reviewed: null, verified: null, tested: null, ...(linked.length ? { linked } : {}) };
     job.sessionId = this.sessionFor(project, sessionId);
+    if (oracleMode !== undefined) job.oracleMode = oracleMode;
     const names = await this.attach(job, files);
     // Bộ định tuyến không dùng AI: việc ngắn, không đụng phần nhạy cảm → 1 Builder làm luôn, không gọi Manager.
     const route = routeGoal(job.goal, mode, names.length);
@@ -1519,8 +1534,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       : stage === 'research' || stage === 'final' && job.kind === 'research'
         ? '{"summary":"short answer","status":"completed or blocked","findings":["finding with evidence"],"sources":["file:line, command, or URL"],"conclusion":"conclusion with reasoning","confidence":"low|medium|high","openQuestions":["what is still unknown"],"contextGaps":["what you had to look up beyond taskContext"]}'
         : `{"summary":"actual work and evidence","status":"completed or blocked","verdict":"approved or changes_requested","findings":[${finding}],"tests":"what actually ran; do not invent"${stage === 'implement' ? ',"contextGaps":["what you had to look up beyond taskContext"]' + (job.round ? ',"responses":[{"finding":"F1 from lastChecks","action":"fixed|rejected|unclear","evidence":"proof (rejected needs evidence)"}]' : '') : ''}${stage === 'verify' ? ',"rulings":[{"finding":"F1","upheld":true,"evidence":"check you ran and its result"}]' : ''}}`;
-    const oracleEnabled = stage === 'plan' && this.config.oracle.enabled && !job.oracle?.unavailable;
+    const oracleEnabled = stage === 'plan' && this.oracleMode(job) !== 'off' && !job.oracle?.unavailable;
     if (oracleEnabled) shape = shape.replace('planned | needs_input | blocked', 'planned | needs_input | blocked | consult').replace(/}$/, ',"consult":{"question":"short self-contained question"}}');
+    if (stage === 'plan' && this.oracleMode(job) !== 'off') shape = shape.replace(/}$/, ',"oracleSkip":"optional: why you did not consult ChatGPT web"}');
     if (['implement', 'research'].includes(stage)) shape = shape.replace(/}$/, ',"checkpoint":{"done":"completed work and evidence","remaining":"unfinished work","failedAttempts":["attempt and failure"],"next":"next concrete step"}}');
     if (stage === 'final') shape = shape.replace(/}$/, ',"memory":{"add":["durable fact"],"remove":["M3"],"session":"2-4 sentence session summary"}}');
     if (stage === 'assess') shape = '{"summary":"independent analysis","status":"completed","answer":"your conclusion and uncertainty","evidence":["file:line, output or URL"]}';
@@ -1823,7 +1839,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (await git(child.wt, ['status', '--porcelain'])) {
           const id = task.ranBy || who, label = this.config.agents.find(a => a.id === id)?.label || id;
           await git(child.wt, ['add', '--all']);
-          await git(child.wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `AI Team ${job.id} T${i + 1} ${id}: WIP`]);
+          await git(child.wt, [...gitAuthor(id, `${label} (AI Team)`), 'commit', '--no-verify', '-m', `WIP: ${taskTitle(task)} (${cleanTitle(label)}) [#${job.id}]`]);
           task.checkpoint = { ...task.checkpoint, wip: { branch: child.branch, commit: await git(child.wt, ['rev-parse', 'HEAD']), at: now(), reason: redact(error.message) } };
           const fresh = this.get(job.id);
           if (fresh.status === 'cancelled') {
@@ -2349,42 +2365,109 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     if (job.round > 0 && job.approvedPlan && this.config.planApprovalRework === false) return false;
     return true;
   }
-  async askOracle(job, lead, question) {
-    const config = this.config.oracle, signal = this.runs.get(job.id)?.abort.signal;
-    const account = job.oracle.account ? config.accounts.find(a => a.id === job.oracle.account)
-      : config.accounts.find(a => !this.oracleLocks.has(a.id)) || config.accounts[0];
-    if (!account) throw new Error('ChatGPT account unavailable');
-    job.oracle.account = account.id;
-    const turn = { q: redact(question.slice(0, 4000)), at: now(), account: account.id };
-    job.oracle.turns.push(turn); this.save(job);
-    this.event(job.id, lead, 'chatgpt', 'ORACLE_QUESTION', 'Asking ChatGPT web for a second opinion', { question: turn.q });
+  oracleMode(job) { return job.oracleMode || this.config.oracle.mode; }
+  async withOracleAccount(accountId, signal, fn) {
     // Reserve the queue position synchronously, including while waiting for another job.
-    const previous = this.oracleLocks.get(account.id) || Promise.resolve();
+    const previous = this.oracleLocks.get(accountId) || Promise.resolve();
     let release, aborted;
     const gate = new Promise(resolve => { release = resolve; }), pending = previous.then(() => gate);
-    this.oracleLocks.set(account.id, pending);
+    this.oracleLocks.set(accountId, pending);
     try {
       const cancelled = new Promise((_, reject) => { aborted = () => reject(signal.reason); signal?.addEventListener('abort', aborted, { once: true }); });
       signal?.throwIfAborted();
       await Promise.race([previous, cancelled]);
       signal?.throwIfAborted();
-      if (!this.config.oracle.enabled) throw new Error('ChatGPT web disabled');
-      const result = await this.oracleRun({ command: config.command, args: account.args, prompt: turn.q, followup: job.oracle.session, timeoutMs: config.timeoutMin * 60_000, signal });
-      signal?.throwIfAborted();
-      if (typeof result?.answer !== 'string' || !result.answer.trim() || typeof result.session !== 'string' || !result.session) throw new Error('ChatGPT web returned no answer/session');
-      turn.a = redact(result.answer); job.oracle.session = result.session;
-      this.save(job);
-      this.event(job.id, 'chatgpt', lead, 'ORACLE_ANSWER', 'ChatGPT web second opinion received', { answer: turn.a });
-    } catch (error) {
-      signal?.throwIfAborted();
-      turn.error = redact(String(error.message || error)).slice(0, 180);
-      if (error.session) job.oracle.session = String(error.session).slice(0, 200);
-      this.save(job); throw error;
+      return await fn();
     } finally {
       signal?.removeEventListener('abort', aborted); release();
       // An aborted waiter must not clear a lock still owned by the preceding job.
-      pending.then(() => { if (this.oracleLocks.get(account.id) === pending) this.oracleLocks.delete(account.id); });
+      pending.then(() => { if (this.oracleLocks.get(accountId) === pending) this.oracleLocks.delete(accountId); });
     }
+  }
+  async askOracle(job, lead, question, opts = {}) {
+    const config = this.config.oracle, signal = this.runs.get(job.id)?.abort.signal;
+    job.oracle ||= { turns: [] }; job.oracle.turns ||= [];
+    const account = job.oracle.account ? config.accounts.find(a => a.id === job.oracle.account)
+      : config.accounts.find(a => !this.oracleLocks.has(a.id)) || config.accounts[0];
+    if (!account) throw new Error('ChatGPT account unavailable');
+    job.oracle.account = account.id;
+    const queued = Date.now(), turn = { q: redact(question).slice(0, 4000), at: now(), account: account.id, ...(opts.auto ? { auto: true } : {}) };
+    job.oracle.turns.push(turn); this.save(job);
+    this.event(job.id, lead, 'chatgpt', 'ORACLE_QUESTION', 'Asking ChatGPT web for a second opinion', { question: turn.q, ...(opts.auto ? { auto: true } : {}) });
+    try {
+      await this.withOracleAccount(account.id, signal, async () => {
+        if (this.oracleMode(job) === 'off') throw new Error('ChatGPT web disabled');
+        turn.waitMs = Date.now() - queued;
+        const started = Date.now();
+        let result;
+        try { result = await this.oracleRun({ command: config.command, args: account.args, prompt: turn.q, followup: job.oracle.session, timeoutMs: config.timeoutMin * 60_000, signal }); }
+        finally { turn.ms = Date.now() - started; }
+        signal?.throwIfAborted();
+        if (typeof result?.answer !== 'string' || !result.answer.trim() || typeof result.session !== 'string' || !result.session) throw new Error('ChatGPT web returned no answer/session');
+        turn.a = redact(result.answer); job.oracle.session = result.session;
+        this.save(job);
+        this.event(job.id, 'chatgpt', lead, 'ORACLE_ANSWER', 'ChatGPT web second opinion received', { answer: turn.a });
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      turn.error = redact(String(error.message || error)).slice(0, 180); turn.code = oracleCode(error);
+      if (error.session) job.oracle.session = String(error.session).slice(0, 200);
+      this.save(job);
+      this.event(job.id, 'chatgpt', lead, 'ORACLE_ERROR', `ChatGPT web error: ${turn.error}`.slice(0, 200), { error: turn.error, code: turn.code });
+      throw error;
+    }
+  }
+  async testOracle(accountId) {
+    const config = this.config.oracle, account = config.accounts.find(a => a.id === accountId);
+    if (!account) throw new Error('unknown oracle account');
+    return this.withOracleAccount(account.id, undefined, async () => {
+      const started = Date.now(), at = now();
+      try {
+        const result = await this.oracleRun({ command: config.command, args: account.args, prompt: ORACLE_TEST_PROMPT, timeoutMs: config.timeoutMin * 60_000 });
+        if (typeof result?.answer !== 'string' || !result.answer.trim()) throw new Error('ChatGPT web returned no answer');
+        return { account: account.id, ok: true, answer: redact(result.answer).slice(0, 500), ms: Date.now() - started, at };
+      } catch (error) {
+        return { account: account.id, ok: false, error: redact(String(error.message || error)).slice(0, 180), code: oracleCode(error), ms: Date.now() - started, at };
+      }
+    });
+  }
+  oracleStats({ from, to, project, job } = {}) {
+    const end = Date.now();
+    from ??= new Date(end - 7 * 86_400_000).toISOString(); to ??= new Date(end).toISOString();
+    const iso = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(value) && Number.isFinite(Date.parse(value))
+      && new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) === value.slice(0, 10);
+    if (!iso(from) || !iso(to)) throw new Error('oracle stats: valid ISO from < to required');
+    const timezone = this.config.timezone || 'Asia/Tokyo', zone = calendar(timezone);
+    const boundary = value => /^\d{4}-\d{2}-\d{2}$/.test(value) ? zone.midnight(value) : new Date(value).toISOString();
+    try { from = boundary(from); to = boundary(to); }
+    catch { throw new Error('oracle stats: valid ISO from < to required'); }
+    if (Date.parse(from) >= Date.parse(to)) throw new Error('oracle stats: valid ISO from < to required');
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    const empty = () => ({ asks: 0, ok: 0, failed: 0, auto: 0, ms: 0, timed: 0 });
+    const totals = empty(), byDay = new Map(), byJob = new Map(), byProject = new Map();
+    const add = (map, key, extra, turn) => {
+      if (!map.has(key)) map.set(key, { key, ...extra, ...empty() });
+      count(map.get(key), turn);
+    };
+    const count = (row, turn) => {
+      row.asks++; if (turn.a) row.ok++; if (turn.error) row.failed++; if (turn.auto) row.auto++;
+      if (Number.isFinite(turn.ms)) { row.ms += turn.ms; row.timed++; }
+    };
+    for (const row of this.db.prepare('SELECT id, body FROM jobs').all()) {
+      const saved = JSON.parse(row.body);
+      if (job && row.id !== job || project && saved.project !== project) continue;
+      for (const turn of saved.oracle?.turns || []) {
+        const at = Date.parse(turn.at);
+        if (!Number.isFinite(at) || at < Date.parse(from) || at >= Date.parse(to)) continue;
+        count(totals, turn);
+        add(byDay, day.format(new Date(at)), {}, turn);
+        add(byJob, row.id, { title: jobTitle(saved), project: saved.project }, turn);
+        add(byProject, saved.project, {}, turn);
+      }
+    }
+    const finish = ({ ms, timed, ...row }) => ({ ...row, avgMs: timed ? ms / timed : 0 });
+    const ranked = map => [...map.values()].map(finish).sort((a, b) => b.asks - a.asks);
+    return { from, to, timezone, totals: finish(totals), byDay: [...byDay.values()].map(finish).sort((a, b) => a.key.localeCompare(b.key)), byJob: ranked(byJob), byProject: ranked(byProject) };
   }
   async step(job) {
     if (!job.comparison) this.refreshRoster(job);
@@ -2399,11 +2482,20 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       case 'plan': {
         const lead = this.pickMember(job, 'manager');
         const instruction = msg("srv.team.phan_tich_muc_tieu_va_chia", { 0: members.builders.join(', ') });
+        if (this.oracleMode(job) === 'required' && !job.oracle?.preplan) {
+          job.oracle ||= { turns: [] }; job.oracle.preplan = now(); this.save(job);
+          const question = redact(`Second opinion before planning. Project: ${job.project}, kind: ${job.kind || 'code'}, title: ${jobTitle(job)}. Goal: ${redact(job.goal).slice(0, 2000)}. List main risks, a recommended approach and pitfalls.`);
+          try { await this.askOracle(job, lead, question, { auto: true }); }
+          catch (error) {
+            this.runs.get(job.id)?.abort.signal.throwIfAborted();
+            this.event(job.id, 'controller', lead, 'WARNING', redact(`ChatGPT unavailable, plan without it: ${error.message || error}`).slice(0, 200));
+          }
+        }
         let plan = await this.call(job, lead, 'plan', instruction);
         while (plan.status === 'consult') {
           job.oracle ||= { turns: [] };
           let error;
-          if (!this.config.oracle.enabled || job.oracle.unavailable) error = 'ChatGPT web unavailable';
+          if (this.oracleMode(job) === 'off' || job.oracle.unavailable) error = 'ChatGPT web unavailable';
           else if (job.oracle.turns.length >= this.config.oracle.maxPerJob) error = 'ChatGPT web per-job limit reached';
           else if (typeof plan.consult?.question !== 'string' || !plan.consult.question.trim()) error = 'ChatGPT web question missing';
           else {
@@ -2416,6 +2508,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
           }
           plan = await this.call(job, lead, 'plan', instruction);
           if (job.oracle.unavailable) break; // One final planning call with consultation removed.
+        }
+        if (this.oracleMode(job) !== 'off' && !job.oracle?.turns?.some(t => !t.auto) && typeof plan.oracleSkip === 'string') {
+          job.oracle ||= { turns: [] }; job.oracle.skipReason = redact(plan.oracleSkip).slice(0, 300); this.save(job);
         }
         // Lead hỏi lại: dừng chờ Bạn trả lời, câu trả lời được đưa vào lần lập kế hoạch tiếp theo.
         if (plan.status === 'needs_input' && Array.isArray(plan.questions) && plan.questions.length) {

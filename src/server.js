@@ -9,6 +9,7 @@ import { DEFAULT_SYSTEM_PROMPT } from './prompts.js';
 import { Accounts, accessList } from './accounts.js';
 import { exportTransfer, importTransfer } from './transfer.js';
 import { initializeUsage } from './usage.js';
+import { spawn } from 'node:child_process';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -43,6 +44,7 @@ const cookieName = `team_session_${port}`;
 const clients = new Set();
 const send = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)); };
 const equal = value => typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
+const oracleState = () => ({ enabled: team.config.oracle.enabled, mode: team.config.oracle.mode, accounts: team.config.oracle.accounts.length, accountIds: team.config.oracle.accounts.map(a => a.id), maxPerJob: team.config.oracle.maxPerJob });
 async function body(req, limit = 100_000) {
   let text = ''; for await (const chunk of req) { text += chunk; if (text.length > limit) throw new Error(msg("srv.server.body_qua_lon")); }
   return text ? JSON.parse(text) : {};
@@ -75,7 +77,7 @@ const server = createServer(async (req, res) => {
       const state = team.state();
       state.agents = state.agents.map(a => ({ ...a, auth: accounts.snapshot(team.agent(a.id)) }));
       state.providers = accounts.providers();
-      Object.assign(state, { language: getLanguage(), languages, stale: stale(), oracle: { enabled: team.config.oracle.enabled, accounts: team.config.oracle.accounts.length } });
+      Object.assign(state, { language: getLanguage(), languages, stale: stale(), oracle: oracleState() });
       return send(res, 200, state);
     }
     if (req.method === 'GET' && url.pathname === '/api/usage') {
@@ -90,6 +92,12 @@ const server = createServer(async (req, res) => {
       const records = team.db.prepare(`SELECT * FROM usage_log WHERE ${filters.join(' AND ')} ORDER BY at, id`).all(...values);
       return send(res, 200, { ...report, breakdown, rankings, records });
     }
+    if (req.method === 'POST' && url.pathname === '/api/oracle/test') {
+      const input = await body(req), results = [];
+      for (const id of input.account === undefined ? team.config.oracle.accounts.map(a => a.id) : [input.account]) results.push(await team.testOracle(id));
+      return send(res, 200, { results });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/oracle/stats') return send(res, 200, team.oracleStats(Object.fromEntries(url.searchParams)));
     if (req.method === 'GET' && url.pathname === '/api/skills') return send(res, 200, team.skills(url.searchParams.has('refresh')).map(({ name, description, source }) => ({ name, description, source })));
     if (req.method === 'GET' && url.pathname === '/api/mcp/claude') return send(res, 200, accounts.claudeMcp());
     if (req.method === 'GET' && url.pathname === '/api/system-prompt') return send(res, 200, { ...team.systemPrompt(), default: DEFAULT_SYSTEM_PROMPT, history: team.systemPromptHistory() });
@@ -142,12 +150,15 @@ const server = createServer(async (req, res) => {
       const input = await body(req);
       if (input.language === undefined && input.oracle === undefined) throw new Error('Provide language or oracle');
       if (input.language !== undefined && !languages.includes(input.language)) throw new Error('language: vi | en | ja');
-      if (input.oracle !== undefined && typeof input.oracle !== 'boolean') throw new Error('oracle must be boolean');
+      if (input.oracle !== undefined && typeof input.oracle !== 'boolean' && !['off', 'auto', 'required'].includes(input.oracle)) throw new Error('oracle: off | auto | required');
       const next = structuredClone(team.config);
       if (input.language !== undefined) next.language = input.language;
-      if (input.oracle !== undefined) next.oracle.enabled = input.oracle;
+      if (input.oracle !== undefined) {
+        next.oracle.mode = typeof input.oracle === 'boolean' ? (input.oracle ? 'auto' : 'off') : input.oracle;
+        next.oracle.enabled = next.oracle.mode !== 'off';
+      }
       accounts.persist(next); setLanguage(next.language || getLanguage());
-      return send(res, 200, { language: getLanguage(), oracle: team.config.oracle.enabled });
+      return send(res, 200, { language: getLanguage(), oracle: oracleState() });
     }
     if (req.method === 'POST' && url.pathname === '/api/members') return send(res, 201, accounts.add(await body(req)));
     const memberMatch = /^\/api\/members\/([a-z0-9-]+)\/(login|cancel-login|refresh|role|profile|models|usage|terminal)$/.exec(url.pathname);
@@ -199,7 +210,7 @@ const server = createServer(async (req, res) => {
         const { file, type } = team.evidenceFile(id, url.searchParams.get('path'));
         const images = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
         if (type === 'html') res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
-        res.setHeader('Content-Disposition', type === 'other' ? 'attachment' : 'inline');
+        res.setHeader('Content-Disposition', type === 'other' ? `attachment; filename*=UTF-8''${encodeURIComponent(file.split(/[\\/]/).pop())}` : 'inline');
         res.writeHead(200, { 'Content-Type': type === 'image' ? images[extname(file).toLowerCase()] : type === 'html' ? 'text/html' : type === 'text' ? 'text/plain; charset=utf-8' : 'application/octet-stream' });
         res.end(readFileSync(file)); return;
       }
@@ -220,6 +231,17 @@ function broadcast() {
 team.on('event', broadcast); team.on('change', broadcast); team.on('fault', e => console.error(e));
 const heartbeat = setInterval(() => { for (const client of clients) client.write(': heartbeat\n\n'); }, 15000);
 const quotaTimer = setInterval(() => team.refreshQuota().catch(e => console.error(e)), 5 * 60_000);
+// Ping overlay (tools/ping-lite): giữ Alt + kéo chuột. Dùng lại Electron + hook-helper của lolPing; "ping": false để tắt.
+const pingDir = config.ping === false || typeof spawn !== 'function' || process.env?.NODE_TEST_CONTEXT ? null : resolve(config.ping?.dir || 'D:\\p\\ping');
+const pingExe = pingDir && join(pingDir, 'node_modules/electron/dist/electron.exe');
+let ping = null;
+if (pingExe && existsSync(pingExe)) {
+  const env = { ...process.env, PING_PARENT: String(process.pid), PING_HELPER: join(pingDir, 'native/hook-helper/build/hook-helper.exe'), PING_ASSETS: join(pingDir, 'assets') };
+  delete env.ELECTRON_RUN_AS_NODE;
+  ping = spawn(pingExe, [join(root, 'tools/ping-lite')], { env, stdio: 'ignore', windowsHide: true });
+  ping.on('error', e => console.error('ping:', e.message));
+}
+process.on('exit', () => ping?.kill());
 server.listen(port, '127.0.0.1', () => {
   console.log(`AI Team ${config.demo ? 'DEMO' : 'LIVE'}: ${origin}`); team.start();
   (async () => { for (const a of team.config.agents) await accounts.refresh(a.id); await team.refreshQuota(); })().catch(e => console.error(e));
