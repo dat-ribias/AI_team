@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { memberProtection } from '../src/providers.js';
 
 const source = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+const index = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
 const locale = JSON.parse(fs.readFileSync(new URL('../locales/en.json', import.meta.url), 'utf8'));
 const translate = key => locale[key] || key;
 function harness(agents, t = translate) {
@@ -44,6 +45,64 @@ function harness(agents, t = translate) {
 function member(id, provider, config = {}, overrides = {}, platform = 'win32') {
   const agent = { id, label: id, provider, enabled: true, ...overrides };
   return { ...agent, protection: memberProtection(agent, config, platform) };
+}
+
+function securityHarness(agents, t) {
+  const nodes = new Map(['security-matrix', 'security-notes', 'caps-save', 'caps-undo'].map(id => [id, { innerHTML: '' }]));
+  const state = { agents, caps: { builder: { network: false } }, projects: [{ id: 'fixture', path: 'fixture', network: false, readDirs: ['docs'] }] };
+  const context = vm.createContext({
+    state, t, structuredClone, roleLabel: role => role,
+    document: { getElementById: id => nodes.get(id), querySelectorAll: () => [] },
+    attempt: fn => fn(), api: async () => {}, refresh: async () => {}, notice: () => {},
+  });
+  const start = source.indexOf('function drawSecurity('), end = source.indexOf('\n}', start) + 2;
+  vm.runInContext(`const $ = id => document.getElementById(id);
+    ${source.match(/^const esc = .*;$/m)[0]}
+    let capsDraft = null;
+    ${source.slice(start, end)}`, context);
+  return { state, render: () => { vm.runInContext('drawSecurity()', context); return nodes.get('security-matrix').innerHTML + nodes.get('security-notes').innerHTML; } };
+}
+
+for (const lang of ['vi', 'en', 'ja']) {
+  test(`security uses corrected intro and descriptions in ${lang} with network off and unrestricted members`, () => {
+    const messages = JSON.parse(fs.readFileSync(new URL(`../locales/${lang}.json`, import.meta.url), 'utf8'));
+    const used = [], t = key => { used.push(key); assert.equal(typeof messages[key], 'string', key); return messages[key]; };
+    const escape = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+    const introKey = index.match(/<p\b[^>]*data-i18n="([^"]+)"[^>]*><\/p><div class="access-box" id="project-access">/)[1];
+    assert.equal(introKey, 'ui.sec.introExpected');
+    const intro = t(introKey);
+    const agents = [member('codex', 'codex', { codexWindowsSandbox: 'none' }), member('agy', 'antigravity', { agyAutoApprove: true })];
+    const security = securityHarness(agents, t), before = JSON.stringify(security.state);
+    const html = security.render();
+    const replaced = ['ui.sec.intro', 'ui.sec.how.read', 'ui.sec.how.outside', 'ui.sec.how.network', 'ui.sec.how.push', 'ui.sec.networkOff', 'ui.sec.rolesIntro', 'ui.sec.locked'];
+    for (const key of replaced) {
+      const corrected = key + 'Expected';
+      assert.ok(used.includes(corrected), corrected);
+      assert.ok((key === 'ui.sec.intro' ? intro : html).includes(key === 'ui.sec.intro' ? messages[corrected] : escape(messages[corrected])), corrected);
+      assert.ok(!used.includes(key), key);
+      assert.ok(!(intro + html).includes(escape(messages[key])), key);
+      assert.doesNotMatch(messages[corrected], /Ã|á»|\uFFFD/, corrected);
+      assert.doesNotMatch(messages[corrected], /\?/, corrected);
+    }
+    for (const key of ['edit', 'delete', 'shell', 'commit', 'merge', 'mcp', 'secrets', 'accounts']) assert.ok(used.includes('ui.sec.how.' + key), key);
+    assert.ok(!used.includes('ui.sec.networkOn'));
+    assert.ok(html.includes('docs'));
+    assert.match(html, /data-cap="builder:network" aria-pressed="false"/);
+    assert.match(html, /data-cap="manager:network" aria-pressed="true"/);
+    assert.equal((html.match(/<tr>/g) || []).length, 13);
+    assert.equal((html.match(/data-cap=/g) || []).length, 9);
+    assert.equal(JSON.stringify(security.state), before);
+    assert.equal(security.render(), html);
+    const accessHtml = harness(agents, t).render();
+    assert.ok(accessHtml.includes(escape(messages['ui.access.protectionUnrestricted'])));
+    assert.ok(accessHtml.includes('--sandbox danger-full-access'));
+    assert.ok(accessHtml.includes('--dangerously-skip-permissions'));
+    assert.ok(accessHtml.includes('network=unrestricted'));
+    security.state.projects[0].network = true;
+    const networkOn = security.render();
+    assert.ok(networkOn.includes(escape(messages['ui.sec.networkOn'])));
+    assert.ok(!networkOn.includes(escape(messages['ui.sec.networkOffExpected'])));
+  });
 }
 
 test('protection renders Codex Windows none, sandbox and member overrides from metadata', () => {

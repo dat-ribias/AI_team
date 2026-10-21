@@ -1796,13 +1796,14 @@ function drawSecurity() {
   ];
   const mark = { Y: ['ok', '✓'], N: ['no', '✗'], P: ['part', '~'] };
   const cell = (k, v, col) => {
-    if (v !== 'C') return `<td class="${mark[v][0]}" title="${esc(t('ui.sec.locked'))}">${mark[v][1]}</td>`;
+    if (v !== 'C') return `<td class="${mark[v][0]}" title="${esc(t('ui.sec.lockedExpected'))}">${mark[v][1]}</td>`;
     const on = caps[col]?.[k] !== false;
     return `<td class="${on ? 'ok' : 'no'}"><button class="cap-toggle" data-cap="${col}:${k}" aria-pressed="${on}" title="${esc(t('ui.sec.toggle'))}">${on ? '✓' : '✗'}</button></td>`;
   };
   const head = cols.map(c => `<th>${esc(c === 'controller' ? 'Controller' : c === 'you' ? t('ui.who.user') : roleLabel(c))}</th>`).join('');
-  $('security-matrix').innerHTML = `<h3>${esc(t('ui.sec.rolesTitle'))}</h3><p class="muted">${esc(t('ui.sec.rolesIntro'))}</p>
-    <table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map((x, i) => cell(k, x, cols[i])).join('')}<td class="how">${esc(t('ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table>
+  const howKeys = { read: 'ui.sec.how.readExpected', outside: 'ui.sec.how.outsideExpected', network: 'ui.sec.how.networkExpected', push: 'ui.sec.how.pushExpected' };
+  $('security-matrix').innerHTML = `<h3>${esc(t('ui.sec.rolesTitle'))}</h3><p class="muted">${esc(t('ui.sec.rolesIntroExpected'))}</p>
+    <table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map((x, i) => cell(k, x, cols[i])).join('')}<td class="how">${esc(t(howKeys[k] || 'ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table>
     <div class="access-bar"><button id="caps-save" class="primary" ${capsDraft ? '' : 'disabled'}>${esc(t('ui.access.save'))}</button><button id="caps-undo" ${capsDraft ? '' : 'disabled'}>${esc(t('ui.access.undo'))}</button>
     <span class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))} · ${esc(t('ui.sec.legendToggle'))}</span></div>`;
   document.querySelectorAll('[data-cap]').forEach(b => b.onclick = () => {
@@ -1811,7 +1812,7 @@ function drawSecurity() {
   });
   $('caps-undo').onclick = () => { capsDraft = null; drawSecurity(); };
   $('caps-save').onclick = () => attempt(async () => { await api('role-caps', capsDraft); capsDraft = null; await refresh(); drawSecurity(); notice(t('ui.access.saved')); });
-  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOff'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
+  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOffExpected'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
 }
 // Quyền theo dự án hoặc theo phiên, riêng từng AI: thư mục trong repo (Xem / Sửa / Sửa + Xóa), thư mục ngoài repo (chỉ đọc), repo sửa cùng, Internet, chạy lệnh.
 let acc = null; const repoDirs = {};
