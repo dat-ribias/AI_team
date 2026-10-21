@@ -1105,6 +1105,8 @@
   "ui.settings.oracle": "Lead consults ChatGPT web",
   "ui.settings.oracleHint": "Lead can ask ChatGPT web using web quota; errors are skipped automatically.",
   "ui.settings.oracleResearchMode": "Mode for research jobs",
+  "ui.settings.oracleModel": "ChatGPT web model",
+  "ui.settings.oracleModelPlaceholder": "Model name in ChatGPT, e.g. Thinking (empty = keep current)",
   "ui.settings.oracleUnavailable": "Configure a ChatGPT web account and use a supported server to enable.",
   "ui.ev.ORACLE_QUESTION": "Ask ChatGPT web",
   "ui.ev.ORACLE_ANSWER": "ChatGPT web answer",

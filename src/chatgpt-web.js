@@ -3,8 +3,8 @@
 // Selector và cách nhận biết "trả lời xong" (nút Stop biến mất + nút Copy của lượt trả lời xuất hiện + nội dung đứng yên)
 // tham khảo từ miuuyy/codex-chatgpt-web (MIT): src/chatgpt-session.ts, src/adapters/chatgpt-web/browser-worker.ts. Xem NOTICE.md.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { findChrome, previewEnv, stopTree } from './preview.js';
 
@@ -16,6 +16,8 @@ const SEL = {
   assistant: '[data-message-author-role="assistant"], [data-turn="assistant"], [data-turn-key]:has([data-conversation-role="assistant"])',
   answer: '.markdown, [data-markdown-text-style="assistant-message"]',
   copy: 'button[data-testid="copy-turn-action-button"], .turn-action-controls button',
+  model: '[data-testid="model-switcher-dropdown-button"], button[aria-haspopup="menu"][aria-label*="odel" i], form button[aria-haspopup="menu"]:not([data-testid*="plus" i]):not([aria-label*="attach" i])',
+  modelItem: '[role="menuitem"], [role="menuitemradio"], [role="option"]',
 };
 
 // Đọc trạng thái trang trong một lần evaluate: không phụ thuộc chữ hiển thị trừ các thông báo lỗi đã biết.
@@ -37,6 +39,32 @@ const PROBE = `(() => {
     expired: /session has expired/i.test(dialogs),
   };
 })()`;
+
+// Bấm bằng sự kiện chuột thật của CDP (menu của ChatGPT mở bằng pointerdown, element.click() không đủ).
+async function press(page, expression) {
+  const box = await page.evaluate(`(() => { const e = ${expression}; if (!e) return null; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+  if (!box) return false;
+  for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await page.send('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
+  return true;
+}
+const label = text => String(text || '').replace(/\s+/g, ' ').trim();
+// Chọn model theo TÊN hiển thị trong menu model của ChatGPT (vd "Instant", "Thinking", "Pro"): không phụ thuộc slug nội bộ.
+// Trả tên model đang dùng. Không có nút chọn model (giao diện khác) thì giữ model hiện tại; có menu mà không có tên này → lỗi kèm danh sách.
+async function chooseModel(page, wanted, pollMs) {
+  const button = `[...document.querySelectorAll(${JSON.stringify(SEL.model)})].find(e => e.offsetWidth || e.offsetHeight)`;
+  const current = label(await page.evaluate(`(${button})?.innerText`));
+  if (!wanted || !current && !(await page.evaluate(`!!(${button})`))) return current || null;
+  const match = text => label(text).toLowerCase().startsWith(String(wanted).toLowerCase());
+  if (match(current)) return current;
+  await press(page, button);
+  let names = [];
+  for (let i = 0; i < 20 && !names.length; i++) { await delay(Math.min(pollMs, 250)); names = (await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(SEL.modelItem)})].map(e => e.innerText)`)).map(x => label(String(x).split('\n').find(l => l.trim()))).filter(Boolean); }
+  const index = names.findIndex(match);
+  if (index < 0) { await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); throw fail(`model "${wanted}" not found (có: ${names.join(', ') || 'không mở được menu model'})`); }
+  await press(page, `[...document.querySelectorAll(${JSON.stringify(SEL.modelItem)})][${index}]`);
+  await delay(Math.min(pollMs * 2, 800));
+  return label(await page.evaluate(`(${button})?.innerText`)) || names[index];
+}
 
 const browsers = new Map(); // profileDir -> { child, port, visible }
 
@@ -95,7 +123,11 @@ async function connect(port) {
   await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', () => reject(new Error('ChatGPT web: CDP connection failed')), { once: true }); });
   let seq = 0;
   socket.addEventListener('message', event => { const data = JSON.parse(event.data), p = pending.get(data.id); if (!p) return; pending.delete(data.id); data.error ? p.reject(new Error(data.error.message)) : p.resolve(data.result); });
-  const send = (method, params = {}) => new Promise((resolve, reject) => { const id = ++seq; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })); });
+  // Mỗi lệnh CDP tối đa 20 s: tab treo không được giữ cả lượt hỏi (và hàng đợi tài khoản) mãi mãi.
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++seq, timer = setTimeout(() => { pending.delete(id); reject(new Error(`ChatGPT web: browser not responding (${method})`)); }, 20_000);
+    pending.set(id, { resolve: v => { clearTimeout(timer); resolve(v); }, reject: e => { clearTimeout(timer); reject(e); } }); socket.send(JSON.stringify({ id, method, params }));
+  });
   const evaluate = async expression => { const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw new Error('ChatGPT web: page script failed'); return r.result.value; };
   const close = async () => { socket.close(); await fetch(`http://127.0.0.1:${port}/json/close/${target.id}`, { signal: AbortSignal.timeout(3000) }).catch(() => {}); };
   return { send, evaluate, close };
@@ -109,41 +141,48 @@ function check(state) {
 }
 
 // Gửi một câu hỏi và chờ câu trả lời đầy đủ. followup = URL cuộc trò chuyện trước của job (hỏi tiếp trong cùng chat).
-export async function askChatGpt({ profileDir, prompt, followup, timeoutMs = 600_000, signal, chrome, baseUrl = CHATGPT_URL, headless = false, pollMs = 1000, settleMs = 2000 }) {
+export async function askChatGpt({ profileDir, prompt, followup, model, timeoutMs = 600_000, signal, chrome, baseUrl = CHATGPT_URL, headless = false, pollMs = 1000, settleMs = 2000 }) {
   const until = Date.now() + timeoutMs, browser = await ensureBrowser(profileDir, { chrome, headless });
   const page = await connect(browser.port);
-  const tick = async () => { signal?.throwIfAborted(); if (Date.now() > until) throw fail('timeout'); await delay(pollMs, undefined, { signal }); };
+  // phase + trạng thái trang cuối cùng đi kèm lỗi timeout, kèm ảnh chụp trang để biết kẹt ở đâu (ô nhập, gửi, chờ trả lời).
+  let phase = 'open', state;
+  const where = () => `${phase}; ${state ? `composer=${state.composer} turns=${state.turns} stop=${state.stop} done=${state.done} text=${state.text.length} url=${state.url}` : 'page not readable'}`;
+  const tick = async () => { signal?.throwIfAborted(); if (Date.now() > until) throw fail(`timeout (${where()})`); await delay(pollMs, undefined, { signal }); };
   try {
     const start = followup && /^https?:\/\//.test(followup) ? followup : baseUrl;
     await page.send('Page.enable');
     await page.send('Page.navigate', { url: start });
-    let state;
     for (const ready = Date.now() + Math.min(45_000, timeoutMs); ; await tick()) {
       state = await page.evaluate(PROBE).catch(() => null);
       if (state) { check(state); if (state.composer) break; }
-      if (Date.now() > ready) throw fail(state?.login || state ? 'not logged in (không thấy ô nhập; bấm "Đăng nhập ChatGPT" trên dashboard)' : 'timeout');
+      if (Date.now() > ready) throw fail(state?.login || state ? `not logged in (không thấy ô nhập; bấm "Đăng nhập ChatGPT" trên dashboard; ${where()})` : `timeout (${where()})`);
     }
     // Lịch sử cuộc trò chuyện cũ có thể hiện sau ô nhập: chờ một nhịp rồi mới chốt mốc để không đọc nhầm câu trả lời cũ.
     await delay(Math.min(1500, settleMs)); state = await page.evaluate(PROBE); check(state);
-    const before = state.turns, previous = state.text;
+    phase = 'model'; const used = await chooseModel(page, model, pollMs); state = await page.evaluate(PROBE);
+    const before = state.turns, previous = state.text; phase = 'send';
     await page.evaluate(`(() => { const e = [...document.querySelectorAll(${JSON.stringify(SEL.composer)})].find(x => x.offsetWidth || x.offsetHeight); e.focus(); return true; })()`);
     await page.send('Input.insertText', { text: prompt });
     await delay(300);
     const clicked = await page.evaluate(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(SEL.send)})].find(x => !x.disabled); if (!b) return false; b.click(); return true; })()`);
     if (!clicked) for (const type of ['keyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    let last = '', stableSince = 0;
+    let last = '', stableSince = 0; phase = 'answer';
     for (; ; await tick()) {
-      state = await page.evaluate(PROBE).catch(() => null);
-      if (!state) continue;
+      const next = await page.evaluate(PROBE).catch(() => null);
+      if (!next) continue; state = next;
       check(state);
       if (state.turns <= before || state.stop || !state.text || state.text === previous && state.turns === before) { last = ''; continue; }
       if (state.text !== last) { last = state.text; stableSince = Date.now(); continue; }
       // Xong khi nút Copy của lượt trả lời đã hiện và nội dung đứng yên; thiếu nút Copy thì chờ đứng yên lâu hơn.
       if (Date.now() - stableSince >= (state.done ? settleMs : settleMs * 5)) break;
     }
-    return { answer: state.text, session: state.url };
+    return { answer: state.text, session: state.url, model: used };
   } catch (error) {
     if (signal?.aborted) throw signal.reason || error;
-    throw /^ChatGPT web:/.test(error.message) ? error : fail(error.message);
+    const shot = join(dirname(profileDir), `${basename(profileDir)}-last-error.png`);
+    const saved = await page.send('Page.captureScreenshot', { format: 'png' }).then(r => { writeFileSync(shot, Buffer.from(r.data, 'base64')); return true; }).catch(() => false);
+    const e = /^ChatGPT web:/.test(error.message) ? error : fail(`${error.message} (${where()})`);
+    if (saved) e.message += ` · ảnh trang: ${shot}`;
+    throw e;
   } finally { await page.close(); }
 }

@@ -12,6 +12,13 @@
   "planApprovalRework": true,
   "resumeCodexTasks": false,
   "peerDialogue": true,
+  "bot": {
+    "defaultProject": "<PROJECT_ID>",
+    "pollSec": 10,
+    "chatwork": { "roomId": 123456789, "allow": [1234567] },
+    "telegram": { "allow": [] }
+  },
+  "remote": { "hosts": [] },
   "oracle": {
     "enabled": false,
     "accounts": [{ "id": "chatgpt-1" }],

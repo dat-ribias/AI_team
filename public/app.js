@@ -575,6 +575,7 @@ $('close-cleanup').onclick = () => $('cleanup-dialog').close();
 function drawState() {
   $('oracle-mode').value = state.oracle?.mode || 'off';
   $('oracle-research-mode').value = state.oracle?.researchMode || 'required';
+  if (document.activeElement !== $('oracle-model')) $('oracle-model').value = state.oracle?.model || '';
   $('oracle-mode').title = t('ui.settings.oracleHint') + (!state.oracle?.accounts ? ' ' + t('ui.settings.oracleUnavailable') : '');
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
@@ -917,7 +918,7 @@ async function testOracleAccounts(accounts) {
         const result = response.results.find(row => row.account === account);
         if (!result) throw new Error(t('ui.oracle.error.error'));
         target.className = result.ok ? 'evidence-pass' : 'evidence-fail';
-        target.textContent = result.ok ? `✓ ${result.answer || ''} · ${oracleSeconds(result.ms)}` : `✗ ${oracleError(result)} · ${oracleSeconds(result.ms)}`;
+        target.textContent = result.ok ? `✓ ${result.answer || ''}${result.model ? ' · ' + result.model : ''} · ${oracleSeconds(result.ms)}` : `✗ ${oracleError(result)} · ${oracleSeconds(result.ms)}`;
       } catch (error) { target.className = 'evidence-fail'; target.textContent = '✗ ' + oracleError({ error: error.message }); }
     }
   } finally { oracleTestBusy = false; buttons.forEach(button => button.disabled = false); }
@@ -947,24 +948,69 @@ function flowRounds(job) {
     const part = reports.slice(from < 0 ? 0 : from + 1, to < 0 ? reports.length : to);
     const builders = [];
     (plan.tasks || []).forEach((x, i) => { if (x.kind === 'review') return; const id = x.agent, b = builders.find(y => y.id === id) || (builders.push({ id, tasks: [] }), builders.at(-1)); b.tasks.push(i + 1); });
-    const step = stage => { const list = part.filter(x => x.stage === stage); if (!list.length) return null; const last = list.at(-1); return { agent: last.agent, ok: stage === 'test' ? !/^Test failed/i.test(last.summary || '') : last.verdict !== 'changes_requested', findings: last.findings?.length || 0 }; };
+    const step = stage => { const list = part.filter(x => x.stage === stage); if (!list.length) return null; const last = list.at(-1); return { agent: last.agent, report: last, ok: stage === 'test' ? !/^Test failed/i.test(last.summary || '') : last.verdict !== 'changes_requested', findings: last.findings?.length || 0, summary: last.summary || '', details: (last.findings || []).slice(0, 6).map(f => typeof f === 'string' ? f : `${f.id ? f.id + ' ' : ''}${f.claim || ''}`) }; };
     const cause = next.reason === 'rework' ? (/test failed/i.test(next.trigger || '') ? 'test' : step('verify')?.ok === false ? 'verify' : 'review') : next.reason;
-    return { n: k + 1, version: plan.version, builders, tests: step('test'), review: step('review'), verify: step('verify'), cause, trigger: next.trigger || '' };
+    return { n: k + 1, version: plan.version, plan, part, builders, tests: step('test'), review: step('review'), verify: step('verify'), cause, trigger: next.trigger || '' };
   });
 }
-function flowRoundsHTML(job) {
-  const rounds = flowRounds(job); if (!rounds.length) return '';
-  const who = id => esc(names[id] || id || '—');
-  const node = (label, cls = '') => `<span class="fr-node ${cls}">${label}</span>`;
-  const check = (name, s, failed) => s ? node(`${esc(name)}${s.agent ? ' · ' + who(s.agent) : ''} ${s.ok ? '✓' : '✗'}${s.findings ? ' ' + esc(t('ui.flow.findings', { n: s.findings })) : ''}`, failed ? 'failed' : 'done') : '';
-  const row = r => `<div class="flow-round past"><b class="fr-title">${esc(t('ui.flow.round', { n: r.n }))}</b>${node(esc('Manager'), 'done')}${r.builders.map(b => node(`${who(b.id)} · ${b.tasks.map(n => 'T' + n).join(',')}`, 'done')).join('')}${check('Tests', r.tests, r.cause === 'test')}${check('Review', r.review, r.cause === 'review')}${check('Verify', r.verify, r.cause === 'verify')}<span class="fr-cause">↳ ${esc(t('ui.flow.cause.' + r.cause))}${r.trigger && r.cause !== 'test' ? ' · ' + esc(cut(r.trigger, 80)) : ''}</span></div>`;
-  const old = rounds.slice(0, -1), last = rounds.at(-1);
-  return `<div class="flow-rounds">${old.length ? `<details class="flow-older" ${flowOlderOpen ? 'open' : ''}><summary>${esc(t('ui.flow.olderRounds', { n: old.length }))}</summary>${old.map(row).join('')}</details>` : ''}${row(last)}<b class="fr-title fr-current">${esc(t('ui.flow.round', { n: rounds.length + 1 }))} · ${esc(t('ui.flow.roundCurrent'))}</b></div>`;
+// Mỗi vòng đã qua vẽ thành sơ đồ đầy đủ (Manager → builder → Tests → Review → Verify) xếp chồng phía trên vòng hiện tại,
+// trong cùng SVG với sơ đồ chính: mũi tên đi từ bước hỏng của vòng này xuống Manager của vòng sau (vòng cuối: xuống Manager
+// của vòng đang chạy, ở độ cao currentY), ghi lý do quay lại. Rê chuột lên bước để xem lỗi/tóm tắt. Trả { svg, h } (h = chiều cao phần này).
+function flowRoundsHTML(job, W = 700, currentY = 0) {
+  const rounds = flowRounds(job); if (!rounds.length) return { svg: '', h: 0 };
+  const who = id => names[id] || id || '—', rowH = 50, gap = 54, mgX = 140, mgW = 172;
+  let y = 4, svg = '';
+  const layout = rounds.map(r => {
+    const nb = Math.max(1, r.builders.length), top = y + 22, cy = top + nb * rowH / 2, nodes = {};
+    nodes.manager = { x: mgX, y: cy, w: mgW };
+    r.builders.forEach((b, i) => { nodes['b' + i] = { x: 365, y: cy + (i - (nb - 1) / 2) * rowH, w: 172 }; });
+    let x = r.builders.length ? 585 : 365;
+    const chain = [['tests', r.tests, 96], ['review', r.review, 172], ['verify', r.verify, 172]].filter(c => c[1]);
+    for (const [key, , w] of chain) { nodes[key] = { x, y: cy, w }; x += w + 45; }
+    const out = { r, top: y, cy, nodes, chain, bottom: top + nb * rowH };
+    y = out.bottom + gap; return out;
+  });
+  const H = y - gap + 30;
+  const box = (n, title, sub, cls, tip, key) => `<g class="node fr-step ${cls} ${frOpen === key ? 'selected' : ''}" data-fr="${key}" role="button" tabindex="0" transform="translate(${n.x},${n.y - 20})"><title>${esc(tip || title)}</title><rect width="${n.w}" height="40" rx="8"/>${svgText({ text: title, x: 10, y: 16, cls: 't', maxW: n.w - 16, baseSize: 11.5, minSize: 9 })}${svgText({ text: sub, x: 10, y: 32, cls: 's', maxW: n.w - 16, baseSize: 10, minSize: 7.5 })}</g>`;
+  const line = (A, B) => `<path class="edge used" d="M${A.x + A.w} ${A.y} C${(A.x + A.w + B.x) / 2} ${A.y} ${(A.x + A.w + B.x) / 2} ${B.y} ${B.x} ${B.y}"/>`;
+  layout.forEach((L, k) => {
+    const { r, nodes, chain } = L, failedKey = { test: 'tests', review: 'review', verify: 'verify' }[r.cause] || chain.at(-1)?.[0] || 'manager';
+    let edges = '', boxes = `<text class="fr-title" x="10" y="${L.top + 12}">${esc(t('ui.flow.round', { n: r.n }))} · plan v${r.version}</text>`;
+    boxes += box(nodes.manager, 'Manager', `plan v${r.version}`, 'done', '', `${k}:manager`);
+    r.builders.forEach((b, i) => { edges += line(nodes.manager, nodes['b' + i]); boxes += box(nodes['b' + i], `Builder · ${who(b.id)}`, b.tasks.map(n => 'T' + n).join(', '), 'done', '', `${k}:b:${b.id}`); });
+    const firstKey = chain[0]?.[0];
+    if (firstKey) (r.builders.length ? r.builders.map((b, i) => nodes['b' + i]) : [nodes.manager]).forEach(n => { edges += line(n, nodes[firstKey]); });
+    chain.forEach(([key, s, w], i) => {
+      if (i) edges += line(nodes[chain[i - 1][0]], nodes[key]);
+      const failed = key === failedKey && !s.ok, title = key === 'tests' ? 'Tests' : `${key === 'review' ? 'Review' : 'Verify'} · ${who(s.agent)}`;
+      const sub = `${s.ok ? '✓' : '✗'}${s.findings ? ' ' + t('ui.flow.findings', { n: s.findings }) : ''}`;
+      boxes += box(nodes[key], title, sub, failed ? 'failed' : 'done', [title, cut(s.summary, 300), ...s.details.map(d => '• ' + cut(d, 200))].filter(Boolean).join('\n'), `${k}:${key}`);
+    });
+    // Mũi tên quay lại: từ bước hỏng xuống Manager của vòng sau (vòng cuối: xuống mép dưới = Manager của vòng đang chạy).
+    const F = nodes[failedKey], fx = F.x + F.w / 2, fy = F.y + 20, next = layout[k + 1], tx = mgX + mgW / 2, ty = next ? next.cy - 20 : H + currentY;
+    const label = `↳ ${t('ui.flow.cause.' + r.cause)}${r.trigger && r.cause !== 'test' ? ' · ' + cut(r.trigger, 80) : ''}`, right = fx < W * 0.6;
+    // Nhãn đặt cạnh đoạn đầu (thẳng đứng) của mũi tên, phía còn trống, để không đè lên đường cong.
+    edges += `<path class="edge fr-back" marker-end="url(#fr-arrow)" d="M${fx} ${fy} C${fx} ${fy + 40} ${tx} ${ty - 40} ${tx} ${ty}"/><text class="edge-label fr-cause" x="${right ? fx + 10 : fx - 18}" y="${fy + 13}" text-anchor="${right ? 'start' : 'end'}">${esc(label)}</text>`;
+    svg += `<g class="fr-round past">${edges}${boxes}</g>`;
+  });
+  return { h: H, svg: `<g class="flow-past"><defs><marker id="fr-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10z" class="fr-arrowhead"/></marker></defs>${svg}<text class="fr-title fr-current" x="10" y="${H + 14}">${esc(t('ui.flow.round', { n: rounds.length + 1 }))} · ${esc(t('ui.flow.roundCurrent'))}</text></g>` };
 }
-let flowOlderOpen = false;
+// Bấm một bước của vòng đã qua → khung chi tiết dưới sơ đồ: plan của vòng, báo cáo builder, lỗi review/verify, log test.
+let frOpen = null;
+function frDetailHTML(job) {
+  if (!frOpen) return '';
+  const [k, step, id] = frOpen.split(':'), r = flowRounds(job)[Number(k)]; if (!r) return '';
+  const who = x => esc(names[x] || x || '—'), finding = f => typeof f === 'string' ? `<li>${esc(f)}</li>` : `<li><b>${esc(f.id || '')}</b>${f.impact ? ` <span class="tag">${esc(f.impact)}</span>` : ''} ${esc(f.claim || f.title || '')}${f.evidence ? `<div class="muted">${esc(f.evidence)}</div>` : ''}${f.file ? `<div class="muted">${esc(f.file)}${f.line ? ':' + esc(f.line) : ''}</div>` : ''}</li>`;
+  const report = x => x ? `<p>${esc(x.summary || '')}</p>${x.findings?.length ? `<ol class="fr-findings">${x.findings.map(finding).join('')}</ol>` : ''}${x.output ? `<pre>${esc(String(x.output).slice(-4000))}</pre>` : ''}` : `<p class="muted">—</p>`;
+  let title, body;
+  if (step === 'manager') { title = `Manager · plan v${r.version}`; body = `<p>${esc(t('ui.plan.reason.' + r.plan.reason))}${r.plan.trigger ? ' · ' + esc(r.plan.trigger) : ''}</p><p>${esc(r.plan.summary || '')}</p><ol>${(r.plan.tasks || []).map(x => `<li>${who(x.agent)}: ${esc(x.title || x.instruction || '')}</li>`).join('')}</ol>`; }
+  else if (step === 'b') { title = `Builder · ${who(id)}`; const own = r.part.filter(x => ['implement', 'research'].includes(x.stage) && x.agent === id); body = own.length ? own.map(report).join('') : `<p class="muted">—</p>`; }
+  else { const s = r[step === 'tests' ? 'tests' : step]; title = step === 'tests' ? 'Tests' : `${step === 'review' ? 'Review' : 'Verify'} · ${who(s?.agent)}`; body = report(s?.report); }
+  return `<section class="fr-detail" aria-live="polite"><header><b>${esc(t('ui.flow.round', { n: r.n }))} · ${title}</b><button type="button" class="fr-close" aria-label="close">✕</button></header>${body}</section>`;
+}
 function drawFlow() {
   const current = state.jobs.find(j => j.id === selected), plans = current?.plans || [], latest = plans.at(-1);
-  if (planView.job !== selected) planView = { job: selected, version: null };
+  if (planView.job !== selected) { planView = { job: selected, version: null }; frOpen = null; }
   const plan = plans.find(p => p.version === planView.version) || latest, readonly = !!plan && plan !== latest;
   const job = readonly ? { ...current, tasks: plan.tasks, flow: plan.flow, round: plan.round, running: [], current: null, checkers: {}, override: {}, skipped: [] } : current, r = job?.roster || state.roster;
   let history = '';
@@ -1084,8 +1130,11 @@ function drawFlow() {
   const skipNote = ['review', 'verify'].filter(x => job && skipped(x));
   const notes = [skipNote.length ? t('ui.flow.skippedSteps', { list: skipNote.join(', ') }) : '', job && !oracle.visible && job.oracle?.skipReason ? t('ui.oracle.notAsked') + ' · ' + job.oracle.skipReason : ''].filter(Boolean);
   const W = Math.max(Wfit, 700);
-  $('flow').innerHTML = history + planTasks + (readonly ? '' : flowRoundsHTML(job)) + (notes.length ? `<p class="muted flow-notes">${notes.map(esc).join(' · ')}</p>` : '') + (job || builders.length || r.manager || graph ? `<svg class="flow ${oracle.visible ? 'oracle-flow' : ''}" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
-  $('flow').querySelectorAll('.flow-older').forEach(d => d.ontoggle = () => { flowOlderOpen = d.open; });
+  // Vòng đã qua nằm phía trên trong cùng SVG; sơ đồ vòng hiện tại dịch xuống pastH, mũi tên vòng cuối chạm đỉnh node Manager hiện tại.
+  const past = readonly ? { svg: '', h: 0 } : flowRoundsHTML(job, W, 22 + nodes.manager.y - 24), pastH = past.h ? past.h + 22 : 0; // 22 = chỗ cho dòng "Vòng n · đang chạy"
+  $('flow').innerHTML = history + planTasks + (notes.length ? `<p class="muted flow-notes">${notes.map(esc).join(' · ')}</p>` : '') + (job || builders.length || r.manager || graph ? `<svg class="flow ${oracle.visible ? 'oracle-flow' : ''}" viewBox="0 0 ${W} ${pastH + top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${past.svg}<g class="flow-now" transform="translate(0,${pastH})">${waves}${edges}${nodesSvg}</g></svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`) + (readonly ? '' : frDetailHTML(job));
+  $('flow').querySelectorAll('[data-fr]').forEach(g => { g.onclick = () => { frOpen = frOpen === g.dataset.fr ? null : g.dataset.fr; drawFlow(); $('flow').querySelector('.fr-detail')?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' }); }; g.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); g.onclick(); } }; });
+  $('flow').querySelectorAll('.fr-close').forEach(b => { b.onclick = () => { frOpen = null; drawFlow(); }; });
   document.querySelectorAll('[data-plan-version]').forEach(b => b.onclick = () => { const version = Number(b.dataset.planVersion); planView.version = version === latest.version ? null : version; drawState(); });
   // CSP cấm style="" trong markup; đặt qua CSSOM để vòng sáng không giật lại từ đầu mỗi lần vẽ lại.
   const phase = `-${(Date.now() % 2000) / 1000}s`; $('flow').querySelectorAll('rect.ring').forEach(x => { x.style.animationDelay = phase; });
@@ -2047,6 +2096,14 @@ $('oracle-research-mode').onchange = async () => {
     drawFlow();
   } catch (e) { notice(e.message); select.value = previous; }
   finally { select.disabled = false; }
+};
+// Tên model như trong menu model của ChatGPT; để trống = giữ model đang chọn trên web.
+$('oracle-model').onchange = async () => {
+  const input = $('oracle-model'), previous = state?.oracle?.model || '';
+  input.disabled = true;
+  try { const result = await api('settings', { oracleModel: input.value }); state.oracle = result.oracle; input.value = state.oracle.model || ''; }
+  catch (e) { notice(e.message); input.value = previous; }
+  finally { input.disabled = false; }
 };
 $('oracle-test').onclick = openOracleTest;
 $('oracle-test-all').onclick = () => testOracleAccounts(state.oracle?.accountIds || []);

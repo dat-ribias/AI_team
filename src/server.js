@@ -10,6 +10,7 @@ import { Accounts, accessList } from './accounts.js';
 import { exportTransfer, importTransfer } from './transfer.js';
 import { initializeUsage } from './usage.js';
 import { spawn } from 'node:child_process';
+import { Bot } from './bot.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const flag = process.argv.indexOf('--config');
@@ -41,10 +42,18 @@ const accounts = new Accounts(team, file, root);
 team.claudeUsage = (id, opts) => accounts.usage(id, opts);
 const port = config.port || 3333, origin = `http://127.0.0.1:${port}`;
 const cookieName = `team_session_${port}`;
+// Truy cập từ xa qua tunnel (Cloudflare Tunnel/ngrok…): chỉ các host khai báo trong config.remote.hosts, luôn phải nhập khóa truy cập
+// (dataDir/remote.key) trước khi nhận cookie phiên — trang "/" qua tunnel KHÔNG tự cấp cookie như ở 127.0.0.1.
+const remoteHosts = (config.remote?.hosts || []).map(h => String(h).toLowerCase());
+const remoteKeyFile = join(dataDir, 'remote.key');
+const remoteKey = !remoteHosts.length ? null : existsSync(remoteKeyFile) ? readFileSync(remoteKeyFile, 'utf8').trim() : randomBytes(18).toString('base64url');
+if (remoteKey && !existsSync(remoteKeyFile)) writeFileSync(remoteKeyFile, remoteKey, { mode: 0o600 });
+const remoteFails = [];
+const sameKey = value => typeof value === 'string' && !!remoteKey && Buffer.byteLength(value) === Buffer.byteLength(remoteKey) && timingSafeEqual(Buffer.from(value), Buffer.from(remoteKey));
 const clients = new Set();
 const send = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(body)); };
 const equal = value => typeof value === 'string' && Buffer.byteLength(value) === Buffer.byteLength(token) && timingSafeEqual(Buffer.from(value), Buffer.from(token));
-const oracleState = () => ({ enabled: team.config.oracle.enabled, mode: team.config.oracle.mode, researchMode: team.config.oracle.researchMode, accounts: team.config.oracle.accounts.length, accountIds: team.config.oracle.accounts.map(a => a.id), maxPerJob: team.config.oracle.maxPerJob, maxPerResearchJob: team.config.oracle.maxPerResearchJob });
+const oracleState = () => ({ enabled: team.config.oracle.enabled, mode: team.config.oracle.mode, researchMode: team.config.oracle.researchMode, accounts: team.config.oracle.accounts.length, accountIds: team.config.oracle.accounts.map(a => a.id), maxPerJob: team.config.oracle.maxPerJob, maxPerResearchJob: team.config.oracle.maxPerResearchJob, model: team.config.oracle.model || '' });
 async function body(req, limit = 100_000) {
   let text = ''; for await (const chunk of req) { text += chunk; if (text.length > limit) throw new Error(msg("srv.server.body_qua_lon")); }
   return text ? JSON.parse(text) : {};
@@ -53,15 +62,25 @@ const server = createServer(async (req, res) => {
   res.setHeader('Cache-Control', 'no-store'); res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   try {
-    if (req.headers.host !== `127.0.0.1:${port}`) return send(res, 403, { error: msg("srv.server.host_khong_hop_le_dung_127") });
-    if (req.headers.origin && req.headers.origin !== origin) return send(res, 403, { error: msg("srv.server.origin_khong_hop_le") });
+    const host = String(req.headers.host || '').toLowerCase(), remote = remoteHosts.includes(host), here = remote ? `https://${host}` : origin;
+    if (host !== `127.0.0.1:${port}` && !remote) return send(res, 403, { error: msg("srv.server.host_khong_hop_le_dung_127") });
+    if (req.headers.origin && req.headers.origin !== here) return send(res, 403, { error: msg("srv.server.origin_khong_hop_le") });
     if (req.headers['sec-fetch-site'] === 'cross-site') return send(res, 403, { error: 'Cross-site request denied' });
-    const url = new URL(req.url, origin);
-    const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+    const url = new URL(req.url, here);
+    const cookieOf = () => (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(cookieName + '='))?.slice(cookieName.length + 1);
+    if (remote && req.method === 'POST' && url.pathname === '/api/remote-login') {
+      const now = Date.now(); while (remoteFails.length && now - remoteFails[0] > 15 * 60_000) remoteFails.shift();
+      if (remoteFails.length >= 10) return send(res, 429, { error: 'Too many attempts, try again later' });
+      const input = await body(req, 1000);
+      if (!sameKey(input.key)) { remoteFails.push(now); return send(res, 401, { error: 'Wrong access key' }); }
+      res.setHeader('Set-Cookie', `${cookieName}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=2592000`); return send(res, 200, { ok: true });
+    }
+    const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/remote-login.js': ['remote-login.js', 'text/javascript'] };
     const locale = /^\/locales\/(vi|en|ja)\.json$/.exec(url.pathname);
     if (req.method === 'GET' && locale) { res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(readFileSync(join(root, 'locales', `${locale[1]}.json`))); return; }
     if (req.method === 'GET' && assets[url.pathname]) {
-      if (url.pathname === '/') res.setHeader('Set-Cookie', `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/`);
+      if (url.pathname === '/' && remote && !equal(cookieOf())) { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(readFileSync(join(root, 'public', 'remote-login.html'))); return; }
+      if (url.pathname === '/' && !remote) res.setHeader('Set-Cookie', `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/`);
       const [name, type] = assets[url.pathname]; res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` }); res.end(readFileSync(join(root, 'public', name))); return;
     }
     const bearer = req.headers.authorization?.replace(/^Bearer /, '');
@@ -70,7 +89,7 @@ const server = createServer(async (req, res) => {
       if (req.method !== 'GET' || url.pathname !== '/api/memory/search') return send(res, 403, { error: 'Memory connection is read-only and task-scoped' });
       return send(res, 200, await team.searchMemory({ ...memoryReader, query: url.searchParams.get('query') || '', limit: url.searchParams.get('limit'), memoryId: url.searchParams.get('memoryId') }, memoryReader.worktree));
     }
-    const cookie = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(cookieName + '='))?.slice(cookieName.length + 1);
+    const cookie = cookieOf();
     if (!equal(bearer) && !equal(cookie)) return send(res, 401, { error: msg("srv.server.mo_dashboard_de_tao_phien_dang") });
     if (req.method === 'POST' && req.headers['x-team-request'] !== '1') return send(res, 403, { error: msg("srv.server.thieu_csrf_header") });
     if (req.method === 'GET' && url.pathname === '/api/state') {
@@ -149,13 +168,15 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/api/settings') {
       const input = await body(req);
-      if (input.language === undefined && input.oracle === undefined && input.oracleResearch === undefined) throw new Error('Provide language, oracle or oracleResearch');
+      if (input.language === undefined && input.oracle === undefined && input.oracleResearch === undefined && input.oracleModel === undefined) throw new Error('Provide language, oracle, oracleResearch or oracleModel');
+      if (input.oracleModel !== undefined && (typeof input.oracleModel !== 'string' || input.oracleModel.length > 60)) throw new Error('oracleModel: model name shown in ChatGPT');
       if (input.language !== undefined && !languages.includes(input.language)) throw new Error('language: vi | en | ja');
       if (input.oracle !== undefined && typeof input.oracle !== 'boolean' && !['off', 'auto', 'required'].includes(input.oracle)) throw new Error('oracle: off | auto | required');
       if (input.oracleResearch !== undefined && !['off', 'auto', 'required'].includes(input.oracleResearch)) throw new Error('oracleResearch: off | auto | required');
       const next = structuredClone(team.config);
       if (input.language !== undefined) next.language = input.language;
       if (input.oracleResearch !== undefined) next.oracle.researchMode = input.oracleResearch;
+      if (input.oracleModel !== undefined) { if (input.oracleModel.trim()) next.oracle.model = input.oracleModel.trim(); else delete next.oracle.model; }
       if (input.oracle !== undefined) {
         next.oracle.mode = typeof input.oracle === 'boolean' ? (input.oracle ? 'auto' : 'off') : input.oracle;
         next.oracle.enabled = next.oracle.mode !== 'off';
@@ -247,7 +268,11 @@ if (pingExe && existsSync(pingExe)) {
 process.on('exit', () => ping?.kill());
 server.listen(port, '127.0.0.1', () => {
   console.log(`AI Team ${config.demo ? 'DEMO' : 'LIVE'}: ${origin}`); team.start();
+  if (remoteKey) console.log(`Truy cập từ xa: ${remoteHosts.map(h => 'https://' + h).join(', ')} · khóa truy cập trong ${remoteKeyFile}`);
+  // Điều khiển qua Chatwork/Telegram (polling, không cần tunnel); chỉ bật khi có cấu hình bot.
+  if (config.bot && typeof Bot === 'function') { bot = new Bot(team, config.bot); if (bot.start(config.bot.pollSec)) console.log('Bot: Chatwork/Telegram đang nghe lệnh'); }
   (async () => { for (const a of team.config.agents) await accounts.refresh(a.id); await team.refreshQuota(); })().catch(e => console.error(e));
 });
-async function shutdown() { clearInterval(heartbeat); clearInterval(quotaTimer); for (const c of clients) c.end(); server.close(); await accounts.close(); await team.close(); process.exit(0); }
+let bot;
+async function shutdown() { bot?.stop(); clearInterval(heartbeat); clearInterval(quotaTimer); for (const c of clients) c.end(); server.close(); await accounts.close(); await team.close(); process.exit(0); }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

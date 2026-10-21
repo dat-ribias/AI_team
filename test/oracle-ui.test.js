@@ -133,7 +133,7 @@ test('Oracle edges connect unique builder requesters and show pending research/i
   h.context.state.roster = { manager: 'lead', builders: ['builder', 'other'] };
   const job = { id: 'demo', status: 'running', stage: 'research', tasks: [], oracle: { turns: [{ role: 'builder', by: 'builder', a: 'OK' }, { role: 'builder', by: 'missing', a: 'OK' }, { role: 'builder', by: 'builder', q: 'Ask' }] } };
   h.context.state.jobs = [job];
-  h.run(['let flowOlderOpen = false;', functionSource('svgText'), functionSource('flowRounds'), functionSource('flowRoundsHTML'), functionSource('drawFlow')].join('\n'));
+  h.run(['let frOpen = null;', functionSource('svgText'), functionSource('flowRounds'), functionSource('flowRoundsHTML'), functionSource('frDetailHTML'), functionSource('drawFlow')].join('\n'));
   const paths = () => [...h.get('flow').innerHTML.matchAll(/<path class="edge oracle used ([^"]*)" d="([^"]+)"/g)];
   for (const stage of ['research', 'implement']) {
     job.stage = stage; h.run('drawFlow()');

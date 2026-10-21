@@ -1105,6 +1105,8 @@
   "ui.settings.oracle": "Lead が ChatGPT web に相談",
   "ui.settings.oracleHint": "Lead は web の利用枠で ChatGPT web に相談できます。エラー時はスキップします。",
   "ui.settings.oracleResearchMode": "調査ジョブのモード",
+  "ui.settings.oracleModel": "ChatGPT web のモデル",
+  "ui.settings.oracleModelPlaceholder": "ChatGPT のモデル名（例: Thinking、空欄 = 変更しない）",
   "ui.settings.oracleUnavailable": "有効にするには ChatGPT web アカウントの設定と対応サーバーが必要です。",
   "ui.ev.ORACLE_QUESTION": "ChatGPT web への質問",
   "ui.ev.ORACLE_ANSWER": "ChatGPT web の回答",

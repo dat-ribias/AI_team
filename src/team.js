@@ -329,6 +329,7 @@ export function validateConfig(config) {
   if (typeof oracle.baseUrl !== 'string' || !/^https?:\/\//.test(oracle.baseUrl)) throw new Error('oracle.baseUrl must be an http(s) URL');
   if (typeof oracle.headless !== 'boolean') throw new Error('oracle.headless must be boolean');
   if (oracle.chrome !== undefined && (typeof oracle.chrome !== 'string' || !oracle.chrome.trim())) throw new Error('oracle.chrome must be a browser path');
+  if ([oracle.model, ...oracle.accounts.map(a => a.model)].some(m => m !== undefined && (typeof m !== 'string' || m.length > 60))) throw new Error('oracle.model: model name shown in ChatGPT (e.g. "Thinking")');
   if (!Number.isFinite(oracle.timeoutMin) || oracle.timeoutMin <= 0 || oracle.timeoutMin * 60_000 > 2_147_483_647) throw new Error('oracle.timeoutMin must be a positive timeout');
   if (!Number.isSafeInteger(oracle.maxPerJob) || oracle.maxPerJob < 1) throw new Error('oracle.maxPerJob must be a positive integer');
   if (!Number.isSafeInteger(oracle.maxPerResearchJob) || oracle.maxPerResearchJob < 1) throw new Error('oracle.maxPerResearchJob must be a positive integer');
@@ -866,8 +867,8 @@ export class Team extends EventEmitter {
   sampleResources() {
     return { cpuPercent: Math.round(this.cpuPercent), ramPercent: Math.round(100 * (1 - freemem() / totalmem())), totalGB: +(totalmem() / 2 ** 30).toFixed(1), controllerMB: Math.round(process.memoryUsage().rss / 2 ** 20) };
   }
-  decisions() {
-    const decisions = this.jobs().flatMap(job => {
+  decisions(all = this.jobs()) {
+    const decisions = all.flatMap(job => {
       const deps = terminal.has(job.status) ? [] : (job.dependsOn || []).filter(id => ['cancelled', 'deleted'].includes(job.dependWait?.results?.[id]?.reason) && !job.dependsAck?.includes(id));
       if (deps.length) return [{ jobId: job.id, title: jobTitle(job), kind: 'depends_broken', state: 'awaiting_owner', reason: deps.map(id => msg('srv.team.depends_broken', { 0: id, 1: job.dependWait.results[id].reason })).join('; '), deps }];
       const state = this.gitStates.get(job.id);
@@ -922,14 +923,15 @@ export class Team extends EventEmitter {
     });
   }
   state() {
-    const busy = this.busyAgents(), cap = this.capacity(), used = this.runningSlots();
-    return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), decisions: this.decisions(), jobs: this.jobs().map(j => ({ ...j, ...(j.mergeQueue ? { mergeQueue: { ...j.mergeQueue, branch: j.mergeQueue.target.branch, position: this.mergeQueueJobs(j.mergeQueue.key).findIndex(q => q.id === j.id) + 1 } } : {}), title: jobTitle(j), depends: this.dependsState(j), git: this.gitStates.get(j.id), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
+    // Đọc + parse toàn bộ job đúng 1 lần cho cả state (trước đây mỗi job parse lại tất cả → O(n²), ~2 s với vài chục job).
+    const busy = this.busyAgents(), cap = this.capacity(), used = this.runningSlots(), all = this.jobs();
+    return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), decisions: this.decisions(all), jobs: all.map(j => ({ ...j, ...(j.mergeQueue ? { mergeQueue: { ...j.mergeQueue, branch: j.mergeQueue.target.branch, position: this.mergeQueueJobs(j.mergeQueue.key, all).findIndex(q => q.id === j.id) + 1 } } : {}), title: jobTitle(j), depends: this.dependsState(j, all), git: this.gitStates.get(j.id), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
         mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       quotaCheck: this.quotaCheck || null,
-      flaky: this.jobs().flatMap(j => (j.flaky || []).map(({ test, revision, at }) => ({ job: j.id, title: jobTitle(j), test, revision, at }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 50),
+      flaky: all.flatMap(j => (j.flaky || []).map(({ test, revision, at }) => ({ job: j.id, title: jobTitle(j), test, revision, at }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 50),
       resources: { ...this.sampleResources(), maxAgents: this.config.resources?.maxAgents ?? 3, maxConcurrentTests: this.testLimit(), slots: used + cap.start, active: used, waitingReason: this.waitingReason },
       storage: this.storage(),
     };
@@ -1021,8 +1023,8 @@ export class Team extends EventEmitter {
     visit(job.id);
     return [...new Set(ids)];
   }
-  dependsState(job) {
-    const jobs = new Map(this.jobs().map(j => [j.id, j]));
+  dependsState(job, all = this.jobs()) {
+    const jobs = new Map(all.map(j => [j.id, j]));
     const current = job.dependWait?.baseTip && job.dependWait.baseTip === this.dependBaseTips.get(`${job.project}:${job.baseBranch}`);
     return (job.dependsOn || []).map(id => {
       const dep = jobs.get(id), result = current && job.dependWait.results?.[id];
@@ -2559,7 +2561,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       throw error;
     }
   }
-  oracleBrowser(accountId) { const c = this.config.oracle; return { account: accountId, profileDir: profileDirOf(this.dataDir, accountId), baseUrl: c.baseUrl, headless: c.headless, ...(c.chrome ? { chrome: c.chrome } : {}) }; }
+  // model: tên hiển thị trong menu model của ChatGPT ("Instant", "Thinking", "Pro"…); theo tài khoản, rồi theo oracle.model; trống = giữ model đang chọn.
+  oracleBrowser(accountId) { const c = this.config.oracle, model = c.accounts.find(a => a.id === accountId)?.model || c.model; return { account: accountId, profileDir: profileDirOf(this.dataDir, accountId), baseUrl: c.baseUrl, headless: c.headless, ...(model ? { model } : {}), ...(c.chrome ? { chrome: c.chrome } : {}) }; }
   // Mở cửa sổ ChatGPT hiện ra để chủ dự án đăng nhập tài khoản này một lần (profile lưu trong dataDir).
   async oracleLogin(accountId) {
     if (!this.config.oracle.accounts.some(a => a.id === accountId)) throw new Error('unknown oracle account');
@@ -2569,14 +2572,20 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
   async testOracle(accountId) {
     const config = this.config.oracle, account = config.accounts.find(a => a.id === accountId);
     if (!account) throw new Error('unknown oracle account');
+    // Tài khoản đang được job dùng (một tài khoản một cửa sổ, hỏi tuần tự): báo ngay thay vì xếp hàng im lặng.
+    if (this.oracleLocks.has(account.id)) {
+      const users = this.jobs().filter(j => this.runs.has(j.id) && j.oracle).map(j => '#' + j.id.slice(0, 8));
+      return { account: account.id, ok: false, error: `ChatGPT web: account busy (đang được ${users.join(', ') || 'một job'} dùng, thử lại sau)`, code: 'busy', ms: 0, at: now() };
+    }
     return this.withOracleAccount(account.id, undefined, async () => {
       const started = Date.now(), at = now();
       try {
-        const result = await this.oracleRun({ ...this.oracleBrowser(account.id), prompt: ORACLE_TEST_PROMPT, timeoutMs: config.timeoutMin * 60_000 });
+        // Thử kết nối tối đa 2 phút (job vẫn dùng timeoutMin): câu trả lời "OK" không cần lâu hơn.
+        const result = await this.oracleRun({ ...this.oracleBrowser(account.id), prompt: ORACLE_TEST_PROMPT, timeoutMs: Math.min(config.timeoutMin * 60_000, 120_000) });
         if (typeof result?.answer !== 'string' || !result.answer.trim()) throw new Error('ChatGPT web returned no answer');
-        return { account: account.id, ok: true, answer: redact(result.answer).slice(0, 500), ms: Date.now() - started, at };
+        return { account: account.id, ok: true, answer: redact(result.answer).slice(0, 500), ...(result.model ? { model: String(result.model).slice(0, 60) } : {}), ms: Date.now() - started, at };
       } catch (error) {
-        return { account: account.id, ok: false, error: redact(String(error.message || error)).slice(0, 180), code: oracleCode(error), ms: Date.now() - started, at };
+        return { account: account.id, ok: false, error: redact(String(error.message || error)).slice(0, 600), code: oracleCode(error), ms: Date.now() - started, at };
       }
     });
   }
@@ -3464,8 +3473,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     for (const l of job.linked || []) diff += `\n\n### ${l.project} (${l.path})\n` + await git(l.worktree, ['diff', '--no-ext-diff', l.base]);
     return { diff, status: await git(job.worktree, ['status', '--short']), revision: await git(job.worktree, ['rev-parse', 'HEAD']) };
   }
-  mergeQueueJobs(key) {
-    return this.jobs().reverse().filter(j => j.mergeQueue?.key === key).sort((a, b) => a.mergeQueue.at.localeCompare(b.mergeQueue.at));
+  mergeQueueJobs(key, all = this.jobs()) {
+    return [...all].reverse().filter(j => j.mergeQueue?.key === key).sort((a, b) => a.mergeQueue.at.localeCompare(b.mergeQueue.at));
   }
   mergeBusy(key, id) {
     return this.jobs().some(j => j.id !== id && j.status === 'merging' && !this.runs.get(j.id)?.mergeWaiting && (this.runs.get(j.id)?.mergeKey || j.mergeQueue?.key || `${j.project}|${j.mergeTargetCheck?.branch || j.baseBranch}`) === key);

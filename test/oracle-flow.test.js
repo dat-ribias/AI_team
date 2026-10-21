@@ -271,38 +271,31 @@ test('oracle: testOracle works while off, bounds/redacts output, classifies erro
   for (const [message, code] of [['timeout', 'timeout'], ['not logged in', 'not_logged_in'], ['session expired', 'not_logged_in'], ['captcha', 'captcha'], ['Too many requests', 'rate_limited'], ['disabled', 'disabled'], ['other', 'error']]) {
     failure = `${message}: ${secretSamples[1]}`;
     const failed = await f.team.testOracle('web'); assert.equal(failed.ok, false); assert.equal(failed.code, code);
-    assert(failed.error.length <= 180); assert(!failed.error.includes(secretSamples[1])); assert(Number.isFinite(failed.ms));
+    assert(failed.error.length <= 600); assert(!failed.error.includes(secretSamples[1])); assert(Number.isFinite(failed.ms));
   }
   await assert.rejects(f.team.testOracle('missing'), /unknown oracle account/);
   assert.equal(f.team.oracleStats().totals.asks, 0);
 });
 
-test('oracle: connection test shares the consultation queue and excludes queue time from ms', async t => {
+test('oracle: connection test reports a busy account at once instead of queueing silently behind a job', async t => {
   let release, started;
   const gate = new Promise(resolve => { release = resolve; }), entered = new Promise(resolve => { started = resolve; });
   const order = [];
-  let clock = 1000;
   const f = await fixture(t, { mode: 'auto', accounts: [{ id: 'web', args: [] }] }, {
-    runOracle: async input => {
-      order.push(input.prompt);
-      if (input.prompt === 'Question?') { started(); await gate; }
-      else clock += 7;
-      return { answer: 'OK', session: 'one' };
-    },
+    runOracle: async input => { order.push(input.prompt); if (input.prompt === 'Question?') { started(); await gate; } return { answer: 'OK', session: 'one' }; },
   });
   const job = await f.job();
-  const nowMock = t.mock.method(Date, 'now', () => clock);
   const ask = f.team.askOracle(job, 'lead', 'Question?');
-  let connection;
   try {
-    await entered; connection = f.team.testOracle('web');
-    await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(order, ['Question?']);
-    clock += 10000;
-    release(); await ask; const result = await connection;
-    assert.equal(result.ok, true); assert.equal(result.ms, 7); assert.deepEqual(order, ['Question?', 'Connection test. Reply with exactly: OK']);
-    nowMock.mock.restore();
-    assert.equal(job.oracle.turns.length, 1); assert.equal(f.team.oracleStats().totals.asks, 1); assert.equal(f.team.oracleLocks.size, 0);
-  } finally { release(); await Promise.allSettled([ask, connection]); }
+    await entered;
+    const busy = await f.team.testOracle('web');
+    assert.equal(busy.ok, false); assert.equal(busy.code, 'busy'); assert.match(busy.error, /account busy/); assert.deepEqual(order, ['Question?']);
+    release(); await ask;
+    const result = await f.team.testOracle('web');
+    assert.equal(result.ok, true); assert.deepEqual(order, ['Question?', 'Connection test. Reply with exactly: OK']);
+    assert(order.length === 2 && f.team.oracleLocks.size === 0);
+    assert.equal(job.oracle.turns.length, 1); assert.equal(f.team.oracleStats().totals.asks, 1);
+  } finally { release(); await Promise.allSettled([ask]); }
 });
 
 test('oracle: aborted required preplan propagates cancellation without warning or Lead call', async t => {
@@ -482,7 +475,7 @@ test('oracle HTTP: settings/state share Oracle shape, accept legacy booleans and
   for (const [input, mode] of [[true, 'auto'], [false, 'off'], ['required', 'required'], ['auto', 'auto'], ['off', 'off']]) {
     const response = await f.request('/api/settings', { method: 'POST', body: { oracle: input } });
     assert.equal(response.status, 200);
-    assert.deepEqual(response.result.oracle, { enabled: mode !== 'off', mode, researchMode: 'required', accounts: 2, accountIds: ['web-1', 'web-2'], maxPerJob: 3, maxPerResearchJob: 8 });
+    assert.deepEqual(response.result.oracle, { enabled: mode !== 'off', mode, researchMode: 'required', accounts: 2, accountIds: ['web-1', 'web-2'], maxPerJob: 3, maxPerResearchJob: 8, model: '' });
     assert.deepEqual((await f.request('/api/state')).result.oracle, response.result.oracle);
   }
   const bad = await f.request('/api/settings', { method: 'POST', body: { oracle: 'bad' } });
@@ -500,5 +493,11 @@ test('oracle HTTP: settings/state share Oracle shape, accept legacy booleans and
     assert.equal(response.status, 400); assert.equal(response.result.error, 'oracleResearch: off | auto | required');
   }
   const empty = await f.request('/api/settings', { method: 'POST', body: {} });
-  assert.equal(empty.status, 400); assert.equal(empty.result.error, 'Provide language, oracle or oracleResearch');
+  assert.equal(empty.status, 400); assert.equal(empty.result.error, 'Provide language, oracle, oracleResearch or oracleModel');
+  // Model ChatGPT web: tên hiển thị trong ChatGPT; chuỗi rỗng = bỏ chọn (giữ model đang dùng trên web).
+  let response = await f.request('/api/settings', { method: 'POST', body: { oracleModel: ' Thinking ' } });
+  assert.equal(response.status, 200); assert.equal(response.result.oracle.model, 'Thinking'); assert.equal((await f.request('/api/state')).result.oracle.model, 'Thinking');
+  response = await f.request('/api/settings', { method: 'POST', body: { oracleModel: '' } });
+  assert.equal(response.result.oracle.model, '');
+  assert.equal((await f.request('/api/settings', { method: 'POST', body: { oracleModel: 5 } })).status, 400);
 });

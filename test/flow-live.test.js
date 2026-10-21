@@ -8,7 +8,7 @@ const start = source.indexOf('function drawFlow() {');
 assert.ok(start >= 0);
 const flowSource = source.slice(start, source.indexOf('\n}', start) + 2);
 const fn = name => { const i = source.indexOf(`function ${name}(`); return source.slice(i, source.indexOf('\n}', i) + 2); };
-const helpers = ['oracleFlowState', 'flowRounds', 'flowRoundsHTML'].map(fn).join('\n') + '\nlet flowOlderOpen = false;';
+const helpers = ['oracleFlowState', 'flowRounds', 'flowRoundsHTML', 'frDetailHTML'].map(fn).join('\n') + '\nlet frOpen = null;';
 
 function harness(job, version = null) {
   const nodes = new Map();
