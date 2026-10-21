@@ -1815,6 +1815,33 @@ function drawSecurity() {
 }
 // Quyền theo dự án hoặc theo phiên, riêng từng AI: thư mục trong repo (Xem / Sửa / Sửa + Xóa), thư mục ngoài repo (chỉ đọc), repo sửa cùng, Internet, chạy lệnh.
 let acc = null; const repoDirs = {};
+function accessProtection(members) {
+  const label = key => esc(t('ui.access.protection' + key));
+  const context = value => {
+    if (value?.applicable === false) return `<p>${label('NotApplicable')}</p>`;
+    if (value?.applicable !== true) return `<p>${label('Unknown')}</p>`;
+    const mode = value.sandbox?.mode, approval = value.approval?.mode;
+    const status = mode === 'danger-full-access' || approval === 'skip-permissions' ? 'Unrestricted'
+      : ['read-only', 'workspace-write'].includes(mode) ? 'Sandboxed'
+      : value.providerSettingsRequired === true ? 'Provider' : mode === 'not-applicable' ? 'NotApplicable' : 'Unknown';
+    const flags = Array.isArray(value.cliFlags) ? value.cliFlags : [];
+    const settings = Object.entries(value.settings || {}).map(([key, setting]) => `${key}=${setting.value} (${setting.source}, applicable=${setting.applicable})`);
+    const inputs = value.inputs ? ['stage', 'checks', 'network'].map(key => `inputs.${key}=${value.inputs[key]}`).join(', ') : '';
+    return `<p>${label(status)}${value.providerSettingsRequired && status !== 'Provider' ? ` ${label('Provider')}` : ''}</p>
+      <p><b>${label('Cli')}</b>: <code>${esc(flags.length ? flags.join(' ') : t('ui.access.protection' + (status === 'Provider' || value.providerSettingsRequired ? 'Provider' : status === 'NotApplicable' ? 'NotApplicable' : 'Unknown')))}</code></p>
+      <p class="muted"><code>${esc([`sandbox=${mode}`, `approval=${approval}`, `network=${value.sandbox?.network}`, value.scope, ...settings, inputs].filter(x => x != null && x !== '').join(' · '))}</code></p>
+      ${value.dependsOn?.length ? `<p class="muted">${label('StageDependent')}: <code>${esc(value.dependsOn.join(', '))}</code></p>` : ''}
+      <p class="muted">${label('Controller')}: <code>${esc(value.enforcement?.postCheck || t('ui.access.protectionUnknown'))}</code></p>`;
+  };
+  return `<section class="access-protection"><h3>${label('Title')}</h3><p class="muted">${label('Scope')}</p>
+    <p class="muted">${label('Controller')}. ${label('Limits')}</p>
+    <div class="access-protection-members">${members.map(a => {
+      const protection = a.protection, contexts = protection?.contexts || {};
+      return `<article class="access-protection-member"><h4>${esc(a.label || a.id)} <small class="muted">${esc(a.provider)} · ${esc(protection?.platform || t('ui.access.protectionUnknown'))}</small></h4>
+        <b>${label('Job')}</b>${context(contexts.job)}
+        <details><summary>${label('Exceptions')}</summary>${[['accessProposal', 'Proposal'], ['previewProposal', 'Preview'], ['intake', 'Intake']].map(([key, title]) => `<div class="access-protection-context"><b>${label(title)}</b>${context(contexts[key])}</div>`).join('')}</details></article>`;
+    }).join('')}</div></section>`;
+}
 function drawAccess(reset = false) {
   const projects = state.projects;
   if (!projects.length) { $('project-access').innerHTML = ''; return; }
@@ -1833,7 +1860,8 @@ function drawAccess(reset = false) {
   const others = projects.filter(p => p.id !== acc.project && !acc.folders.some(f => f.path === p.path));
   const sessions = state.sessions.filter(s => s.project === acc.project), pr = acc.proposal, why = w => w ? `<br><small class="muted">${esc(w)}</small>` : '';
   const head = (icon, title, hint) => `<tr class="sec-head"><th colspan="${span}">${icon} ${esc(t(title))} <small class="muted">${esc(t(hint))}</small></th></tr>`;
-  $('project-access').innerHTML = `<h3>${esc(t('ui.access.title'))}</h3><p class="muted">${esc(t('ui.access.intro'))}</p>
+  $('project-access').innerHTML = `<h3>${esc(t('ui.access.title'))}</h3><p class="muted">${esc(t('ui.access.protectionIntro'))}</p>
+    ${accessProtection(members)}
     <div class="access-bar"><select id="acc-project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === acc.project ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select>
       <select id="acc-scope"><option value="">${esc(t('ui.access.scopeProject'))}</option>${sessions.map(s => `<option value="${esc(s.id)}" ${s.id === acc.scope ? 'selected' : ''}>${esc(t('ui.access.scopeSession', { 0: s.name }))}${s.access ? ' ★' : ''}</option>`).join('')}</select>
       <button id="acc-propose" ${acc.busy ? 'disabled' : ''}>${esc(t(acc.busy ? 'ui.access.proposing' : 'ui.access.propose'))}</button>
