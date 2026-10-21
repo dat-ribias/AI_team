@@ -12,7 +12,7 @@ import { cpus, totalmem, freemem, homedir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { run, executable } from './process.js';
-import { runAgent, readQuota } from './providers.js';
+import { runAgent, readQuota, memberProtection } from './providers.js';
 import { runOracle } from './oracle.js';
 import { CHATGPT_URL, profileDirOf, openLogin, closeAll as closeChatGpt } from './chatgpt-web.js';
 import { scanSkills, skillRoots } from './skills.js';
@@ -927,7 +927,7 @@ export class Team extends EventEmitter {
     const busy = this.busyAgents(), cap = this.capacity(), used = this.runningSlots(), all = this.jobs();
     return { demo: !!this.config.demo, silenceWarnMin: this.config.silenceWarnMin ?? 5, roster: roster(this.config), caps: capsOf(this.config), sessions: this.sessions(), decisions: this.decisions(all), jobs: all.map(j => ({ ...j, ...(j.mergeQueue ? { mergeQueue: { ...j.mergeQueue, branch: j.mergeQueue.target.branch, position: this.mergeQueueJobs(j.mergeQueue.key, all).findIndex(q => q.id === j.id) + 1 } } : {}), title: jobTitle(j), depends: this.dependsState(j, all), git: this.gitStates.get(j.id), eta: this.eta(j), overMinutes: this.overrun(j) })), projects: this.config.projects.map(p => { const a = accessOf(p); return { id: p.id, path: p.path, tests: p.tests, preview: p.preview || null, network: a.network.length > 0, readDirs: a.folders.map(f => f.path), access: a }; }),
       agents: this.config.agents.map(a => ({ id: a.id, label: a.label, role: a.role, kind: a.kind || null, provider: a.provider, configured: a.enabled !== false, enabled: a.enabled !== false, home: a.home,
-        mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '',
+        mcp: a.mcp || null, speed: this.speed(a), model: a.model || null, effort: a.effort || null, tier: tierOf(a), systemPrompt: a.systemPrompt || '', protection: memberProtection(a, this.config),
         state: busy.has(a.id) ? 'working' : 'idle', quota: { ...this.quota(a.id), pct: this.remaining(a.id) } })),
       limits: { rounds: this.config.maxReworkRounds ?? 3, tokens: this.config.maxTokensPerJob || null },
       quotaCheck: this.quotaCheck || null,
