@@ -1892,45 +1892,73 @@ function drawAccess(reset = false) {
   });
 }
 // Bộ nhớ của dự án/phiên + sao lưu: bạn thấy đúng thứ AI được nhắc lại, sửa/xóa được.
-let memoryQuery = '', memoryHistory = false;
+let memoryQuery = '', memoryHistory = false, memoryRender = 0;
 async function drawMemory() {
-  const [m, b] = await Promise.all([api(`memory?project=${encodeURIComponent(curProject)}&session=${encodeURIComponent(curSession)}${memoryHistory ? '&history=1' : ''}`), api('backups')]);
-  if (memoryQuery.trim()) m.facts = (await api(`memory/search?project=${encodeURIComponent(curProject)}&query=${encodeURIComponent(memoryQuery)}`)).results;
-  const ses = state.sessions.find(x => x.id === curSession);
+  const project = curProject, session = curSession, query = memoryQuery, history = memoryHistory, render = ++memoryRender;
+  const current = () => render === memoryRender && project === curProject && session === curSession;
+  const [m, b] = await Promise.all([api(`memory?project=${encodeURIComponent(project)}&session=${encodeURIComponent(session)}${history ? '&history=1' : ''}`), api('backups')]);
+  if (!current()) return;
+  if (query.trim()) m.facts = (await api(`memory/search?project=${encodeURIComponent(project)}&query=${encodeURIComponent(query)}`)).results;
+  if (!current()) return;
+  const ses = state.sessions.find(x => x.id === session), summaryRevision = m.summaryRevision;
+  const canSaveSummary = !!session && Number.isSafeInteger(summaryRevision) && summaryRevision >= 0;
   $('memory-body').innerHTML = `<p class="muted">${esc(t('ui.mem.intro'))}</p>
-    <div class="row-input"><input id="mem-query" value="${esc(memoryQuery)}" placeholder="${esc(t('ui.mem.search'))}" aria-label="${esc(t('ui.mem.search'))}"><button id="mem-search">${esc(t('ui.mem.search'))}</button></div>
-    <label><input type="checkbox" id="mem-history" ${memoryHistory ? 'checked' : ''}> ${esc(t('ui.mem.history'))}</label>
+    <div class="row-input"><input id="mem-query" value="${esc(query)}" placeholder="${esc(t('ui.mem.search'))}" aria-label="${esc(t('ui.mem.search'))}"><button id="mem-search">${esc(t('ui.mem.search'))}</button></div>
+    <label><input type="checkbox" id="mem-history" ${history ? 'checked' : ''}> ${esc(t('ui.mem.history'))}</label>
     <div class="row-input"><button id="mem-export">${esc(t('ui.mem.exportMemory'))}</button><label>${esc(t('ui.mem.import'))}<input type="file" id="mem-import" accept=".json,application/json"></label></div><p id="mem-result" role="status"></p>
-    <h3>${esc(t('ui.mem.facts', { project: curProject, n: m.facts.length }))}</h3>
+    <h3>${esc(t('ui.mem.facts', { project, n: m.facts.length }))}</h3>
     <ul class="mem-list">${m.facts.filter(f => f.kind === 'fact').map(f => `<li><span>${esc(f.text)}<br><small class="muted">M${esc(f.id)} · ${esc(f.source)} · ${esc(t('ui.mem.' + f.scope))} · ${esc(t('ui.mem.' + f.status))} · ${esc(f.commitSha?.slice(0, 8) || '')} · ${esc(clock(f.at))}</small></span>${f.status === 'active' ? `<button type="button" data-mem-stale="${esc(f.id)}" data-mem-revision="${esc(f.revision)}">${esc(t('ui.mem.stale'))}</button><button class="icon-btn" data-mem-del="${esc(f.id)}" data-mem-revision="${esc(f.revision)}" aria-label="${esc(t('ui.inspector.delete'))}">✕</button>` : ''}</li>`).join('') || `<li class="muted">${esc(t('ui.mem.none'))}</li>`}</ul>
     <div class="row-input"><input id="mem-add" maxlength="300" placeholder="${esc(t('ui.mem.addPlaceholder'))}"><button id="mem-add-btn">${esc(t('ui.mem.add'))}</button></div>
     <h3>${esc(t('ui.mem.session', { name: ses?.name || '—' }))}</h3>
-    <textarea id="mem-summary" rows="4" maxlength="1500">${esc(m.summary)}</textarea><button id="mem-summary-save">${esc(t('ui.mem.saveSummary'))}</button>
+    <textarea id="mem-summary" rows="4" maxlength="1500">${esc(m.summary)}</textarea><button id="mem-summary-save" ${canSaveSummary ? '' : 'disabled'}>${esc(t('ui.mem.saveSummary'))}</button>
+    <button id="mem-summary-reload">${esc(t('ui.mem.reloadSummary'))}</button><p id="mem-summary-error" class="error-box" role="alert" ${canSaveSummary ? 'hidden' : ''}>${canSaveSummary ? '' : esc(t('ui.mem.summaryReloadRequired'))}</p>
     <details><summary>${esc(t('ui.mem.log', { n: m.log.length }))}</summary><ul class="mem-log">${m.log.map(l => `<li>${esc(l.text)}</li>`).join('')}</ul></details>
     <h3>${esc(t('ui.mem.backups'))}</h3><p class="muted">${esc(b.dir)}</p>
     <ul class="mem-log">${b.list.slice(0, 5).map(x => `<li>${esc(x.file.split(/[\\/]/).pop())} · ${esc(clock(x.at))} · ${Math.round(x.bytes / 1024)} KB</li>`).join('') || `<li class="muted">${esc(t('ui.mem.noBackup'))}</li>`}</ul>
     <div class="cleanup-actions"><button id="backup-now">${esc(t('ui.mem.backupNow'))}</button>${cleanupButtons('memory')}</div>`;
-  const edit = body => attempt(async () => { await api('memory', { project: curProject, session: curSession, ...body }); await drawMemory(); });
+  const edit = body => attempt(async () => { if (!current()) return; await api('memory', { project, session, ...body }); if (current()) await drawMemory(); });
   wireCleanup('memory');
   document.querySelectorAll('[data-mem-stale]').forEach(x => x.onclick = () => edit({ stale: Number(x.dataset.memStale), revision: Number(x.dataset.memRevision) }));
   document.querySelectorAll('[data-mem-del]').forEach(x => x.onclick = () => edit({ remove: x.dataset.memDel, revision: Number(x.dataset.memRevision) }));
-  $('mem-search').onclick = () => attempt(async () => { memoryQuery = $('mem-query').value; await drawMemory(); });
-  $('mem-query').onkeydown = e => { if (e.key === 'Enter') $('mem-search').click(); };
-  $('mem-history').onchange = () => attempt(async () => { memoryHistory = $('mem-history').checked; memoryQuery = ''; await drawMemory(); });
-  $('mem-export').onclick = () => { location.href = `/api/memory/export?project=${encodeURIComponent(curProject)}`; };
+  $('mem-search').onclick = () => attempt(async () => { if (!current()) return; memoryQuery = $('mem-query').value; await drawMemory(); });
+  $('mem-query').onkeydown = e => { if (current() && e.key === 'Enter') $('mem-search').click(); };
+  $('mem-history').onchange = () => attempt(async () => { if (!current()) return; memoryHistory = $('mem-history').checked; memoryQuery = ''; await drawMemory(); });
+  $('mem-export').onclick = () => { if (current()) location.href = `/api/memory/export?project=${encodeURIComponent(project)}`; };
   $('mem-import').onchange = () => attempt(async () => {
+    if (!current()) return;
     const file = $('mem-import').files[0]; if (!file) return;
     if (file.size > 160e6) throw new Error(t('ui.mem.tooLarge'));
     const pack = JSON.parse(await file.text()), transfer = pack.format === 'ai-team-transfer';
-    const result = await api(transfer ? 'transfer/import' : 'memory/import', { project: curProject, package: pack });
+    if (!current()) return;
+    const result = await api(transfer ? 'transfer/import' : 'memory/import', { project, package: pack });
+    if (!current()) return;
     if (transfer) { selected = result.job.id; curSession = result.job.sessionId; }
-    await refresh(); await drawMemory();
+    await refresh();
+    if (render !== memoryRender || project !== curProject || curSession !== (transfer ? result.job.sessionId : session)) return;
+    await drawMemory();
+    if (render + 1 !== memoryRender || project !== curProject || curSession !== (transfer ? result.job.sessionId : session)) return;
     const counts = transfer ? result.memory : result;
     $('mem-result').textContent = t('ui.mem.imported', { n: counts.added, conflicts: counts.conflicts }) + (transfer ? ' ' + t('ui.mem.importPaused') : '');
   });
-  $('mem-add-btn').onclick = () => $('mem-add').value.trim() && edit({ add: $('mem-add').value });
-  $('mem-summary-save').onclick = () => edit({ summary: $('mem-summary').value });
-  $('backup-now').onclick = () => attempt(async () => { $('backup-now').disabled = true; await api('backup', {}); await drawMemory(); });
+  $('mem-add-btn').onclick = () => current() && $('mem-add').value.trim() && edit({ add: $('mem-add').value });
+  $('mem-summary-reload').onclick = () => attempt(async () => { if (current()) await drawMemory(); });
+  const save = $('mem-summary-save');
+  let summaryConflict = false;
+  save.onclick = () => attempt(async () => {
+    if (!current() || !canSaveSummary || save.disabled) return;
+    save.disabled = true;
+    try {
+      await api('memory', { project, session, summary: $('mem-summary').value, summaryRevision });
+      if (current()) await drawMemory();
+    } catch (e) {
+      if (!current()) return;
+      if (e.status !== 409 || e.details?.code !== 'SESSION_SUMMARY_CONFLICT') throw e;
+      summaryConflict = true;
+      $('mem-summary-error').textContent = t('ui.mem.summaryConflict');
+      $('mem-summary-error').hidden = false;
+    } finally { if (current()) save.disabled = summaryConflict; }
+  });
+  $('backup-now').onclick = () => attempt(async () => { if (!current()) return; $('backup-now').disabled = true; await api('backup', {}); if (current()) await drawMemory(); });
 }
 $('memory-open').onclick = () => attempt(async () => { await drawMemory(); $('memory-dialog').showModal(); });
 $('close-memory').onclick = () => $('memory-dialog').close();
