@@ -96,3 +96,100 @@ test('review does not retry unrelated provider errors', async t => {
   assert.equal(calls, 1); assert.equal(team.get(job.id).status, 'blocked');
   assert.match(team.get(job.id).error, /provider failed/);
 });
+
+const wrongLanguage = 'The implementation is complete and all focused checks have passed successfully.';
+const correctLanguage = 'Đã hoàn thành triển khai và kiểm tra các trường hợp liên quan thành công.';
+const languageWarnings = (team, job) => team.events(job.id).filter(e => e.type === 'WARNING' && e.details?.reason === 'language');
+
+for (const provider of ['codex', 'claude', 'gemini', 'antigravity']) test(`review rewrites a wrong-language report once with the same task and session (${provider})`, async t => {
+  const calls = [];
+  const { team, job } = await fixture(t, async (agent, task, prompt, opts) => {
+    calls.push({ agent, task, prompt, opts });
+    if (calls.length === 1) {
+      opts.onEvent('SESSION', { details: { id: 'language-session' } });
+      return { ...completed, summary: wrongLanguage };
+    }
+    assert.equal(task.sessionId, 'language-session');
+    assert.deepEqual(task, { ...calls[0].task, sessionId: 'language-session' });
+    assert.equal(agent, calls[0].agent);
+    assert.equal(opts.signal, calls[0].opts.signal);
+    assert.equal(opts.onEvent, calls[0].opts.onEvent);
+    assert.match(prompt, /Rewrite only reader-facing text/);
+    assert.match(prompt, /Do not run commands or repeat work/);
+    assert(prompt.includes(wrongLanguage));
+    if (['gemini', 'antigravity'].includes(provider)) assert.equal(readFileSync(join(task.worktree, task.promptFile), 'utf8'), prompt);
+    return { ...completed, summary: correctLanguage, status: 'blocked', verdict: 'changes_requested' };
+  }, provider);
+  await team.control(job.id, 'language', { lang: 'vi' });
+  await team.runJob(team.get(job.id));
+  const result = team.get(job.id);
+  assert.equal(calls.length, 2);
+  assert.equal(result.usage.calls, 2);
+  assert.notEqual(result.status, 'blocked');
+  assert.equal(result.stage, 'verify');
+  assert.equal(result.reports.at(-1).summary, correctLanguage);
+  assert.equal(result.reports.at(-1).verdict, 'approved');
+  assert.equal(languageWarnings(team, job).length, 0);
+});
+
+test('a second wrong-language report is kept with exactly one language warning and no block', async t => {
+  let calls = 0;
+  const { team, job } = await fixture(t, async () => {
+    calls++;
+    return { ...completed, summary: calls === 1 ? wrongLanguage : `${wrongLanguage} No further changes are needed.` };
+  });
+  await team.control(job.id, 'language', { lang: 'vi' });
+  await team.runJob(team.get(job.id));
+  const result = team.get(job.id);
+  assert.equal(calls, 2);
+  assert.equal(result.usage.calls, 2);
+  assert.notEqual(result.status, 'blocked');
+  assert.equal(result.stage, 'verify');
+  assert.equal(result.reports.at(-1).summary, `${wrongLanguage} No further changes are needed.`);
+  const warnings = languageWarnings(team, job);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].details.lang, 'vi');
+  assert.deepEqual(warnings[0].details.fields, ['summary']);
+});
+
+test('a report already in the job language does not retry', async t => {
+  let calls = 0;
+  const { team, job } = await fixture(t, async () => {
+    calls++;
+    return { ...completed, summary: correctLanguage };
+  });
+  await team.control(job.id, 'language', { lang: 'vi' });
+  await team.runJob(team.get(job.id));
+  const result = team.get(job.id);
+  assert.equal(calls, 1);
+  assert.equal(result.usage.calls, 1);
+  assert.equal(result.reports.at(-1).summary, correctLanguage);
+  assert.equal(languageWarnings(team, job).length, 0);
+  assert.equal(result.stage, 'verify');
+});
+
+for (const invalidRewrite of [false, true]) test(`JSON recovery followed by language correction stays bounded (invalid rewrite: ${invalidRewrite})`, async t => {
+  const calls = [];
+  const { team, job } = await fixture(t, async (agent, task, prompt, opts) => {
+    calls.push({ task, prompt });
+    if (calls.length === 1) {
+      opts.onEvent('SESSION', { details: { id: 'json-language-session' } });
+      return invalidReport();
+    }
+    assert.equal(task.sessionId, 'json-language-session');
+    assert.deepEqual(task, { ...calls[0].task, sessionId: 'json-language-session' });
+    if (calls.length === 2) return { ...completed, summary: wrongLanguage };
+    if (invalidRewrite) return invalidReport();
+    return { ...completed, summary: correctLanguage };
+  });
+  await team.control(job.id, 'language', { lang: 'vi' });
+  await team.runJob(team.get(job.id));
+  const result = team.get(job.id);
+  assert.equal(calls.length, 3);
+  assert.equal(result.usage.calls, 3);
+  assert.notEqual(result.status, 'blocked');
+  assert.equal(result.stage, 'verify');
+  assert.equal(result.reports.at(-1).summary, invalidRewrite ? wrongLanguage : correctLanguage);
+  assert.equal(team.events(job.id).filter(e => e.type === 'WARNING' && /not JSON/.test(e.summary)).length, 1);
+  assert.equal(languageWarnings(team, job).length, invalidRewrite ? 1 : 0);
+});
