@@ -228,8 +228,8 @@ for (const mode of ['ff', 'merge']) test(`accept is revision-bound, filters evid
   assert.equal(check.target.mode, mode);
   assert.deepEqual(check.acceptance, { required: true, ok: false, revision: null });
   assert.deepEqual(check.paths, [{ path: 'hello.txt', added: 1, removed: 1 }]);
-  await assert.rejects(team.control(job.id, 'accept', { revision: job.base }), new RegExp(msg('srv.preview.accept_invalid')));
-  await assert.rejects(team.merge(job.id, { target }), new RegExp(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) })));
+  await assert.rejects(team.control(job.id, 'accept', { revision: job.base }), new RegExp(msg('srv.preview.accept_invalid', {}, job.lang)));
+  await assert.rejects(team.merge(job.id, { target }), new RegExp(msg('srv.preview.accept_required', { 0: job.revision.slice(0, 8) }, job.lang)));
   assert.equal(team.get(job.id).status, 'ready');
   await team.runPreview(team.get(job.id));
   const fresh = team.get(job.id), entry = fresh.evidence.at(-1), valid = entry.files.map(f => `${entry.dir}/${f.path}`);
@@ -297,7 +297,7 @@ test('preview without Chrome keeps the server running and feedback revokes accep
   await team.runPreview(job);
   const fresh = team.get(job.id);
   assert.equal(fresh.preview.status, 'running'); assert.equal(fresh.preview.screenshots, false); assert.equal(fresh.preview.error, undefined);
-  assert(team.events(job.id).some(e => e.type === 'PREVIEW_WARNING' && e.summary === msg('srv.preview.no_chrome')));
+  assert(team.events(job.id).some(e => e.type === 'PREVIEW_WARNING' && e.summary === msg('srv.preview.no_chrome', {}, job.lang)));
   await team.control(job.id, 'accept', { revision: job.revision });
   await team.control(job.id, 'message', { message: 'Please revise' }); assert.equal(team.get(job.id).acceptance, null);
 });

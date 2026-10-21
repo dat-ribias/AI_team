@@ -237,7 +237,7 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     const delay = Number(process.env.AI_TEAM_DEMO_DELAY_MS) || 450;
     await new Promise((resolve, reject) => {
       const activity = delay > 450 && process.env.AI_TEAM_DEMO_SILENT !== '1'
-        ? setInterval(() => onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong") }), 20_000) : null;
+        ? setInterval(() => onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong", {}, task.lang) }), 20_000) : null;
       const aborted = () => { clearTimeout(timer); clearInterval(activity); reject(signal.reason); };
       const timer = setTimeout(() => { clearInterval(activity); signal?.removeEventListener('abort', aborted); resolve(); }, delay);
       signal?.addEventListener('abort', aborted, { once: true });
@@ -245,13 +245,13 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     signal?.throwIfAborted();
     if (task.stage === 'plan' && /hỏi lại|ask me/i.test(task.goal) && !task.messages?.length) return { summary: 'DEMO: cần làm rõ', status: 'needs_input', questions: ['DEMO: bạn muốn áp dụng cho trang nào?'] };
     const report = task.stage === 'plan'
-      ? { summary: msg("srv.providers.demo_giao_builder_cap_nhat_hello"), kind: /research|nghiên cứu/i.test(task.goal) ? 'research' : 'code', rigor: /light|nhẹ/i.test(task.goal) ? 'light' : 'standard', risk: 'low', tasks: [{ agent: task.roster?.builders[0] || 'codex-2', difficulty: /hard|khó/i.test(task.goal) ? 4 : 2, instruction: msg("srv.providers.cap_nhat_hello_txt_va_kiem") }] }
-      : { summary: msg("srv.providers.demo_hoan_tat_bang_bo_mo", { 0: task.stage }), status: 'completed', verdict: 'approved', findings: [] };
+      ? { summary: msg("srv.providers.demo_giao_builder_cap_nhat_hello", {}, task.lang), kind: /research|nghiên cứu/i.test(task.goal) ? 'research' : 'code', rigor: /light|nhẹ/i.test(task.goal) ? 'light' : 'standard', risk: 'low', tasks: [{ agent: task.roster?.builders[0] || 'codex-2', difficulty: /hard|khó/i.test(task.goal) ? 4 : 2, instruction: msg("srv.providers.cap_nhat_hello_txt_va_kiem", {}, task.lang) }] }
+      : { summary: msg("srv.providers.demo_hoan_tat_bang_bo_mo", { 0: task.stage }, task.lang), status: 'completed', verdict: 'approved', findings: [] };
     if (task.stage === 'implement') {
       const { writeFile } = await import('node:fs/promises');
       await writeFile(join(task.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
     }
-    onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong") });
+    onEvent('ACTIVITY', { summary: msg("srv.providers.demo_hoat_dong_mo_phong", {}, task.lang) });
     return report;
   }
   let final = '', failed = '', policyBlocked = false;

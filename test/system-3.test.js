@@ -42,7 +42,7 @@ test('plan approval: assignment updates the gated hash, survives stale saves and
   assert.equal(team.get(job.id).plans.at(-1).hash, p.hash, 'role overrides do not change the hash');
   team.save(stale);
   assert.equal(team.get(job.id).plans.at(-1).hash, p.hash); assert.equal(team.get(job.id).planGate.hash, p.hash);
-  await assert.rejects(team.control(job.id, 'approve-plan', old), { message: msg('srv.team.plan_changed') });
+  await assert.rejects(team.control(job.id, 'approve-plan', old), { message: msg('srv.team.plan_changed', {}, job.lang) });
   await team.control(job.id, 'approve-plan', p);
   const ready = await settle(team, job.id, 'ready');
   assert(calls.some(([stage, agent]) => stage === 'implement' && agent === 'codex-4'));
@@ -575,7 +575,7 @@ test('job title: create validates, lead title never overrides owner title, renam
   const renamed = await team.control(auto.id, 'rename', { title: '  Owner   title  ' });
   assert.equal(renamed.title, 'Owner title'); assert.equal(renamed.titleBy, 'user');
   assert.equal(team.get(auto.id).title, 'Owner title');
-  assert(team.events(auto.id).some(e => e.type === 'CONTROL' && e.from === 'user' && e.to === 'team' && e.summary === msg('srv.team.renamed', { 0: 'Owner title' })));
+  assert(team.events(auto.id).some(e => e.type === 'CONTROL' && e.from === 'user' && e.to === 'team' && e.summary === msg('srv.team.renamed', { 0: 'Owner title' }, auto.lang)));
   team.save(planned);
   assert.equal(team.get(auto.id).title, 'Owner title', 'stale saves preserve the owner title');
   for (const status of ['running', 'merging', 'done', 'merged', 'cancelled']) {

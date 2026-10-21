@@ -77,10 +77,10 @@ test('plan approval: stale version/hash and invalid state are rejected; approval
   await assert.rejects(team.create({ project: 'test', goal: 'Update hello', planApproval: 'yes' }), { message: msg('srv.team.plan_approval_invalid') });
   const job = await team.create({ project: 'test', goal: 'Update hello', planApproval: true });
   const waiting = await settle(team, job.id, 'waiting'), p = waiting.plans.at(-1);
-  await assert.rejects(team.control(job.id, 'approve-plan', { version: p.version, hash: 'stale' }), { message: msg('srv.team.plan_changed') });
-  await assert.rejects(team.control(job.id, 'approve-plan', { version: p.version + 1, hash: p.hash }), { message: msg('srv.team.plan_changed') });
+  await assert.rejects(team.control(job.id, 'approve-plan', { version: p.version, hash: 'stale' }), { message: msg('srv.team.plan_changed', {}, job.lang) });
+  await assert.rejects(team.control(job.id, 'approve-plan', { version: p.version + 1, hash: p.hash }), { message: msg('srv.team.plan_changed', {}, job.lang) });
   team.runs.set(job.id, {});
-  try { await assert.rejects(team.control(job.id, 'approve-plan', p), { message: msg('srv.team.plan_not_waiting') }); }
+  try { await assert.rejects(team.control(job.id, 'approve-plan', p), { message: msg('srv.team.plan_not_waiting', {}, job.lang) }); }
   finally { team.runs.delete(job.id); }
   const approved = await team.control(job.id, 'approve-plan', p);
   assert.equal(approved.stage, 'implement'); assert.equal(approved.taskIndex, waiting.taskIndex); assert.equal(approved.planGate, null);
@@ -91,7 +91,7 @@ test('plan approval: stale version/hash and invalid state are rejected; approval
   assert.deepEqual(ready.plans[0].tasks, p.tasks, 'execution does not mutate the snapshot');
   assert.equal(team.planBlocked({ ...ready, tasks: [...ready.tasks, { auto: true }] }), false);
   assert.deepEqual(team.events(job.id).find(e => e.type === 'PLAN_APPROVED').details, { version: p.version, hash: p.hash });
-  await assert.rejects(team.control(job.id, 'approve-plan', p), { message: msg('srv.team.plan_not_waiting') });
+  await assert.rejects(team.control(job.id, 'approve-plan', p), { message: msg('srv.team.plan_not_waiting', {}, job.lang) });
 });
 
 test('plan approval: review rework waits again unless planApprovalRework is disabled', async t => {
