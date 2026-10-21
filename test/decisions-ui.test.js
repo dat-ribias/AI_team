@@ -14,7 +14,7 @@ function functionSource(name) {
   const lineEnd = source.indexOf('\n', start), first = source.slice(start, lineEnd).trimEnd();
   return first.endsWith('}') ? first : source.slice(start, source.indexOf('\n}', start) + 2);
 }
-const functions = ['jobStatusLabel', 'badge', 'decisionId', 'decisionReason', 'drawDecisions', 'reconcileAndRefresh', 'deleteJob', 'drawOrphans', 'openOrphans', 'deleteOrphans'];
+const functions = ['gitOf', 'jobStatusLabel', 'badge', 'decisionId', 'decisionReason', 'drawDecisions', 'reconcileAndRefresh', 'deleteJob', 'drawOrphans', 'openOrphans', 'deleteOrphans'];
 const code = functions.map(name => `${['reconcileAndRefresh', 'deleteJob', 'openOrphans', 'deleteOrphans'].includes(name) ? 'async ' : ''}${functionSource(name)}`).join('\n');
 function harness() {
   const nodes = new Map(), storage = new Map(), calls = [], asks = [], notices = [];

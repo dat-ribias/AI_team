@@ -71,8 +71,10 @@ function wireAttach(kind, input, target) {
   target.addEventListener('drop', e => { if (e.dataTransfer.files.length) { e.preventDefault(); attempt(() => addFiles(kind, [...e.dataTransfer.files])); } });
 }
 const statusLabel = s => t(`ui.status.${s}`);
-function jobStatusLabel(job) { return job.git ? t(`ui.gitState.${job.git.state}`) : statusLabel(job.status); }
-function badge(job) { return `<span class="status ${esc(job.git?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
+// Trạng thái git chỉ đúng khi được tính trên đúng status hiện tại của job; job vừa đổi status (vd running → blocked) thì dùng status mới.
+function gitOf(job) { return job.git && (job.git.status === undefined || job.git.status === job.status) ? job.git : null; }
+function jobStatusLabel(job) { const g = gitOf(job); return g ? t(`ui.gitState.${g.state}`) : statusLabel(job.status); }
+function badge(job) { return `<span class="status ${esc(gitOf(job)?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
 
 let decisionNewIds = new Set(), reconcilePending;
 function decisionId(item) { return item.kind === 'orphans' ? 'orphans' : item.jobId; }
