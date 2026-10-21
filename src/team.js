@@ -1084,10 +1084,11 @@ export class Team extends EventEmitter {
     this.event(id, 'controller', 'team', 'ROUTE', msg(route.fast ? "srv.team.route_fast" : "srv.team.route_full", { 0: route.reason }, job.lang), route); this.kick(); return job;
   }
   // .ai-team/ (file đính kèm, prompt) nằm trong worktree nhưng git luôn bỏ qua.
-  recordRuleContext(id, agent, stage, prompt, sources) {
+  recordRuleContext(id, agent, stage, prompt, sources, delivery) {
     // Nguồn không có số phiên bản dùng hash nội dung làm phiên bản.
     this.event(id, 'controller', agent.id, 'RULE_CONTEXT', 'Controller rule context', { provider: agent.provider, stage, schemaVersion: 1,
-      sources: sources.map(source => ({ ...source, version: source.version ?? source.hash })), promptChars: prompt.length, promptHash: hash(prompt) });
+      sources: sources.map(source => ({ ...source, version: source.version ?? source.hash,
+        ...(delivery?.delivery === 'session_inherited' ? { delivery: 'session_inherited', verified: false } : {}) })), promptChars: prompt.length, promptHash: hash(prompt), ...delivery });
   }
   // Leader đề xuất quyền cho project (lần đầu khỏi phải tự set từng thư mục). Chỉ trả bản nháp; bạn xem rồi bấm Lưu.
   async proposeAccess(projectId, candidates = []) {
@@ -1770,8 +1771,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (Date.now() - lastActivitySavedAt >= 10_000) { const fresh = this.get(job.id); if (['paused', 'cancelled'].includes(fresh.status)) job.status = fresh.status; this.save(job); lastActivitySavedAt = Date.now(); }
         if (type === 'RATE_LIMIT') this.observeQuota(agentId, data.details); if (type === 'USAGE') { usage.push(data.details); const n = usageTokens(data.details); tokens += n; job.usage.tokens += n; } this.event(job.id, agentId, 'controller', type, data.summary, data.details);
         if (type === 'ACTIVITY' && !access.shell && agent.provider !== 'codex' && !shellUsed && isShell(data.details)) { shellUsed = String(data.summary || 'shell'); stop.abort(new Error('shell')); } };
-    const call = (sessionId, text) => {
-      this.recordRuleContext(job.id, agent, stage, text, ruleSources);
+    const call = (sessionId, text, inherited = false) => {
+      this.recordRuleContext(job.id, agent, stage, text, ruleSources, inherited ? { delivery: 'session_inherited', inheritedFrom: hash(prompt) } : undefined);
       return this.agentRun(agent, { ...taskObj, sessionId }, text, { signal: runSignal, onEvent });
     };
     try {
@@ -1781,17 +1782,19 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         this.event(job.id, 'controller', agentId, 'WARNING', 'Agent report was not JSON; requesting a JSON report again.');
         job.usage.calls += 1;
         const reminder = `Lượt trước chưa trả JSON. Không chạy thêm lệnh dài; trả ngay báo cáo JSON đúng schema dựa trên kết quả đã có.\nReturn ONLY valid JSON matching this structure: ${shape}`;
-        const retryPrompt = `${prompt}\n${reminder}`;
+        const inherited = Boolean(cliSessionId && ['codex', 'claude'].includes(agent.provider));
+        const retryPrompt = inherited ? `${reminder}\n${language}` : `${prompt}\n${reminder}`;
         if (promptFile) writeFileSync(join(worktree, promptFile), retryPrompt);
-        report = await call(cliSessionId, retryPrompt);
+        report = await call(cliSessionId, retryPrompt, inherited);
       }
       const wrong = wrongReportLanguage(report, job.lang);
       if (wrong.length) {
         job.usage.calls += 1;
         const reminder = `${language}\nRewrite only reader-facing text in the existing JSON report, especially ${wrong.join(', ')}. Preserve all other values and structure. Do not run commands or repeat work. Return ONLY the corrected JSON report.\n${JSON.stringify(report)}`;
-        const retryPrompt = `${prompt}\n${reminder.slice(language.length + 1)}`;
+        const inherited = Boolean(cliSessionId && ['codex', 'claude'].includes(agent.provider));
+        const retryPrompt = inherited ? reminder : `${prompt}\n${reminder.slice(language.length + 1)}`;
         if (promptFile) writeFileSync(join(worktree, promptFile), retryPrompt);
-        try { report = rewriteReportText(report, await call(cliSessionId, retryPrompt)); }
+        try { report = rewriteReportText(report, await call(cliSessionId, retryPrompt, inherited)); }
         catch (error) { if (runSignal.aborted || error.name === 'AbortError' || shellUsed) throw error; }
         const remaining = wrongReportLanguage(report, job.lang);
         if (remaining.length) this.event(job.id, 'controller', agentId, 'WARNING', msg('srv.team.language_warning', { lang: job.lang }, job.lang), { reason: 'language', lang: job.lang, fields: remaining });

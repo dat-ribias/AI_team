@@ -64,13 +64,17 @@ function assertAuthorityContract(prompt) {
   assert(data, 'missing explicit memory/report/web data boundary');
 }
 
-function assertRuleEvent(event, { provider, stage, prompt, rules }) {
+function assertRuleEvent(event, { provider, stage, prompt, rules, inheritedFrom }) {
   assert(event, `missing RULE_CONTEXT for ${provider}/${stage}`);
   assert.equal(event.details.provider, provider);
   assert.equal(event.details.stage, stage);
   assert.equal(event.details.schemaVersion, 1);
   assert.equal(event.details.promptChars, prompt.length);
   assert.equal(event.details.promptHash, digest(prompt));
+  if (inheritedFrom) {
+    assert.equal(event.details.delivery, 'session_inherited');
+    assert.equal(event.details.inheritedFrom, inheritedFrom);
+  } else assert.notEqual(event.details.delivery, 'session_inherited');
   assert(Array.isArray(event.details.sources));
   for (const [kind, text] of Object.entries(rules)) {
     const source = event.details.sources.find(item => item.kind === kind);
@@ -79,8 +83,8 @@ function assertRuleEvent(event, { provider, stage, prompt, rules }) {
     assert.notEqual(source.source, '');
     assert(source.version !== undefined && source.version !== null);
     assert.equal(source.hash, digest(text));
-    assert(['controller_injected', 'cli_expected'].includes(source.delivery));
-    if (source.delivery === 'cli_expected') assert.equal(source.verified, false);
+    assert((inheritedFrom ? ['session_inherited'] : ['controller_injected', 'cli_expected']).includes(source.delivery));
+    if (inheritedFrom || source.delivery === 'cli_expected') assert.equal(source.verified, false);
     else assert.notEqual(source.verified, false);
   }
 }
@@ -324,11 +328,12 @@ test('rule contract: JSON and language retries keep each rule once and audit eve
   const counts = new Map();
   const systemRule = "SYSTEM_RETRY $$ $& $' $`";
   const memberRule = "MEMBER_RETRY $$ $& $' $`";
-  const f = await fixture(t, false, async (agent, task, prompt) => {
+  const f = await fixture(t, false, async (agent, task, prompt, opts) => {
     const count = (counts.get(agent.provider) || 0) + 1;
     counts.set(agent.provider, count);
-    for (const rule of [systemRule, memberRule, projectRules]) assert.equal(occurrences(prompt, rule), 1, `${agent.provider} call ${count}`);
-    if (count === 1) return parseReport('not json');
+    const inherited = count > 1 && ['codex', 'claude'].includes(agent.provider);
+    for (const rule of [systemRule, memberRule, projectRules]) assert.equal(occurrences(prompt, rule), inherited ? 0 : 1, `${agent.provider} call ${count}`);
+    if (count === 1) { opts.onEvent('SESSION', { details: { id: `retry-${agent.provider}` } }); return parseReport('not json'); }
     if (count === 2) return { summary: 'The requested check completed successfully.', status: 'completed', verdict: 'approved', findings: [] };
     return { summary: 'Đã hoàn tất kiểm tra theo yêu cầu.', status: 'completed', verdict: 'approved', findings: [] };
   });
@@ -352,6 +357,7 @@ test('rule contract: JSON and language retries keep each rule once and audit eve
         stage: 'implement',
         prompt: calls[i].prompt,
         rules: { system: systemRule, member: memberRule, project: projectRules },
+        inheritedFrom: i > 0 && ['codex', 'claude'].includes(provider) ? digest(calls[0].prompt) : undefined,
       });
     }
   }

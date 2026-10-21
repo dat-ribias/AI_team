@@ -64,6 +64,13 @@ for (const provider of ['codex', 'claude', 'gemini', 'antigravity']) test(`revie
   assert.notEqual(result.status, 'blocked'); assert.equal(result.stage, 'verify');
   assert.equal(calls.length, 2); assert.equal(result.usage.calls, 2);
   assert.match(calls[0].prompt, new RegExp(testedRule));
+  const contexts = team.events(job.id).filter(e => e.type === 'RULE_CONTEXT');
+  const retry = contexts.at(-1).details;
+  if (['codex', 'claude'].includes(provider)) {
+    assert.equal(retry.delivery, 'session_inherited');
+    assert.equal(retry.inheritedFrom, contexts[0].details.promptHash);
+    assert.deepEqual(retry.sources, contexts[0].details.sources.map(source => ({ ...source, delivery: 'session_inherited', verified: false })));
+  } else assert.notEqual(retry.delivery, 'session_inherited');
   assert.equal(team.events(job.id).filter(e => e.type === 'WARNING' && /not JSON/.test(e.summary)).length, 1);
 });
 
@@ -86,6 +93,7 @@ test('review without a valid session retries with the full prompt and leaves unt
   }, 'codex', false);
   await team.runJob(job);
   assert.equal(prompts.length, 2); assert(!prompts[0].includes(testedRule));
+  assert.notEqual(team.events(job.id).filter(e => e.type === 'RULE_CONTEXT').at(-1).details.delivery, 'session_inherited');
   assert.notEqual(team.get(job.id).status, 'blocked');
 });
 
@@ -117,7 +125,8 @@ for (const provider of ['codex', 'claude', 'gemini', 'antigravity']) test(`revie
     assert.match(prompt, /Rewrite only reader-facing text/);
     assert.match(prompt, /Do not run commands or repeat work/);
     assert(prompt.includes(wrongLanguage));
-    if (['gemini', 'antigravity'].includes(provider)) assert.equal(readFileSync(join(task.worktree, task.promptFile), 'utf8'), prompt);
+    if (['codex', 'claude'].includes(provider)) assert(!prompt.startsWith(calls[0].prompt));
+    else { assert(prompt.startsWith(calls[0].prompt)); assert.equal(readFileSync(join(task.worktree, task.promptFile), 'utf8'), prompt); }
     return { ...completed, summary: correctLanguage, status: 'blocked', verdict: 'changes_requested' };
   }, provider);
   await team.control(job.id, 'language', { lang: 'vi' });
@@ -130,6 +139,13 @@ for (const provider of ['codex', 'claude', 'gemini', 'antigravity']) test(`revie
   assert.equal(result.reports.at(-1).summary, correctLanguage);
   assert.equal(result.reports.at(-1).verdict, 'approved');
   assert.equal(languageWarnings(team, job).length, 0);
+  const contexts = team.events(job.id).filter(e => e.type === 'RULE_CONTEXT');
+  const retry = contexts.at(-1).details;
+  if (['codex', 'claude'].includes(provider)) {
+    assert.equal(retry.delivery, 'session_inherited');
+    assert.equal(retry.inheritedFrom, contexts[0].details.promptHash);
+    assert.deepEqual(retry.sources, contexts[0].details.sources.map(source => ({ ...source, delivery: 'session_inherited', verified: false })));
+  } else assert.notEqual(retry.delivery, 'session_inherited');
 });
 
 test('a second wrong-language report is kept with exactly one language warning and no block', async t => {
