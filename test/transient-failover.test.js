@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Team } from '../src/team.js';
 import { run } from '../src/process.js';
 import { runAgent } from '../src/providers.js';
+import { msg } from '../src/i18n.js';
 
 async function fixture() {
   const path = mkdtempSync(join(tmpdir(), 'ai-team-check-'));
@@ -102,7 +103,7 @@ test('transient failover: exhausted retries temporarily replace a pinned manager
   const ready = await settle(f.team, job.id, 'ready', 15000);
   assert(f.seen.some(s => s.stage === 'plan' && f.team.agent(s.agent).provider !== 'codex'));
   assert.equal(f.seen.filter(s => s.stage === 'plan' && s.agent === 'codex-1').length, 4);
-  assert(f.team.events(job.id).some(e => e.type === 'REASSIGN' && /chuyển sang/.test(e.summary) && /503/.test(e.summary)));
+  assert(f.team.events(job.id).some(e => e.type === 'REASSIGN' && e.summary === msg('srv.team.transient_switch', { provider: 'codex', status: '503', to: e.details.to }, job.lang)));
   assert(f.team.events(job.id).some(e => e.type === 'REASSIGN' && e.details.pinned === true));
   assert.equal(ready.override.manager, 'codex-1');
   assert.equal(f.team.remaining('codex-1'), 100);
@@ -158,7 +159,7 @@ test('transient failover: builder hands over to another provider after three ret
   const handover = f.team.events(job.id).find(e => e.type === 'HANDOVER');
   assert.equal(handover.details.from, 'codex-2');
   assert.equal(handover.details.to, 'codex-4');
-  assert.match(handover.summary, /503.*chuyển sang/);
+  assert(handover.summary.endsWith(msg('srv.team.transient_switch', { provider: 'codex', status: '503', to: 'codex-4' }, job.lang)));
   assert.match(handover.details.reason, /503/);
   assert.equal(ready.tasks[0].ranBy, 'codex-4');
   assert.equal(retryEvents(f.team, job.id).length, 3);

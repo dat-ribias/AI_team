@@ -257,7 +257,7 @@ test('pause cancels process; resume retains work; new guidance invalidates ready
   assert(team.events(job.id).some(e => e.to === 'codex-4' && e.type === 'TASK_ASSIGNMENT'));
   await team.control(job.id, 'message', { message: 'New requirement' });
   assert.equal(team.get(job.id).status, 'queued'); assert.equal(team.get(job.id).reviewed, null);
-  await assert.rejects(team.merge(job.id), /chưa sẵn sàng/);
+  await assert.rejects(team.merge(job.id), { message: msg('srv.team.task_chua_san_sang_hoac_controller', {}, job.lang) });
   await settle(team, job.id, 'ready');
 });
 
