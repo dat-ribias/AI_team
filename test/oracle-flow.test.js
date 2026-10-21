@@ -6,7 +6,7 @@ import { join, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { Team, validateConfig, redact } from '../src/team.js';
+import { Team, validateConfig, redact, ORACLE_RULES } from '../src/team.js';
 import { run } from '../src/process.js';
 import { runOracle } from '../src/oracle.js';
 
@@ -27,7 +27,7 @@ async function fixture(t, oracle = {}, adapters = {}) {
   writeFileSync(join(path, 'hello.txt'), 'Hello!\n', 'utf8');
   await run(['git'], ['-C', path, 'add', '.']);
   await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial']);
-  const config = { demo: true, peerDialogue: false, planApproval: true, maxRamPercent: 100, maxCpuPercent: 100, oracle,
+  const config = { demo: true, peerDialogue: false, planApproval: true, maxRamPercent: 100, maxCpuPercent: 100, oracle, challenge: 'high',
     agents: ['lead', 'builder', 'reviewer', 'verifier'].map(id => ({ id, label: id, role: id, provider: 'mock' })),
     pipeline: { manager: 'lead', builders: ['builder'], reviewer: 'reviewer', verifier: 'verifier' },
     projects: [{ id: 'test', path, tests: [] }],
@@ -35,9 +35,9 @@ async function fixture(t, oracle = {}, adapters = {}) {
   team = new Team(config, data, { runAgent: async () => plan(), runOracle: async () => { assert.fail('unexpected Oracle call'); }, ...adapters });
   // Drive steps directly, without the scheduler or implementation processes.
   team.kick = () => {};
-  async function job(input = {}) {
+  async function job({ kindHint, ...input } = {}) {
     const saved = await team.create({ project: 'test', goal: 'Update hello', paused: true, ...input });
-    saved.status = 'running'; team.save(saved);
+    saved.status = 'running'; if (kindHint) saved.kindHint = kindHint; team.save(saved);
     team.runs.set(saved.id, { agents: new Set(), abort: new AbortController() });
     return saved;
   }
@@ -58,13 +58,13 @@ test('oracle required: automatic consultation precedes plan, redacts secrets and
       assert(prompt.includes('"oracleSkip"')); return plan();
     },
   });
-  const job = await f.job({ goal: `Update hello ${secretSamples.join('\n')}` });
+  const job = await f.job({ goal: `Update hello ${secretSamples.join('\n')}`, kindHint: 'research' });
   await f.team.step(job); await f.team.step(job);
   assert.deepEqual(order, ['oracle', 'plan']); assert.equal(job.stage, 'implement'); assert.equal(job.status, 'waiting');
   assert(job.oracle.preplan); assert.equal(job.oracle.turns[0].auto, true); assert(Number.isFinite(job.oracle.turns[0].ms));
   for (const sample of secretSamples) assert(!prompts[0].prompt.includes(sample));
   assert(!prompts[0].prompt.includes(f.team.dataDir)); assert.equal(prompts[0].followup, undefined);
-  assert.match(prompts[0].prompt, /^Second opinion before planning\. Project: test, kind: code, title:/);
+  assert(prompts[0].prompt.startsWith(ORACLE_RULES)); assert.match(prompts[0].prompt.slice(ORACLE_RULES.length), /^Second opinion before planning\. Project: test, kind: research, title:/);
   const events = f.team.events(job.id).filter(e => e.type.startsWith('ORACLE_'));
   assert.deepEqual(events.map(e => e.type), ['ORACLE_QUESTION', 'ORACLE_ANSWER']); assert.equal(events[0].details.auto, true);
   // Rework must reuse the persisted marker and existing Oracle context.
@@ -83,7 +83,7 @@ test('oracle required: failure records code and warning, permits planning and a 
       return plan();
     },
   });
-  const job = await f.job(); await f.team.step(job); await f.team.step(job);
+  const job = await f.job({ kindHint: 'research' }); await f.team.step(job); await f.team.step(job);
   assert.equal(job.stage, 'implement'); assert.equal(job.status, 'waiting'); assert.equal(job.oracle.unavailable, undefined);
   assert.equal(calls, 2); assert.equal(job.oracle.turns[1].a, 'Recovered'); assert.equal(job.oracle.turns[1].auto, undefined);
   assert(Number.isFinite(job.oracle.turns[0].ms));
@@ -94,7 +94,7 @@ test('oracle required: failure records code and warning, permits planning and a 
 
 test('oracle required: persisted preplan marker prevents duplicate requests on resume', async t => {
   const f = await fixture(t, { mode: 'required' });
-  const job = await f.job(); job.oracle = { preplan: '2026-10-19T00:00:00Z', turns: [] }; f.team.save(job);
+  const job = await f.job({ kindHint: 'research' }); job.oracle = { preplan: '2026-10-19T00:00:00Z', turns: [] }; f.team.save(job);
   await f.team.step(job); assert.equal(job.stage, 'implement'); assert.equal(job.oracle.turns.length, 0);
 });
 
@@ -119,7 +119,7 @@ test('oracle builder: research consult resumes the same builder with redacted an
   let calls = 0, asks = 0;
   const f = await fixture(t, { mode: 'auto' }, {
     runOracle: async input => {
-      asks++; assert.equal(input.prompt, redact(`Compare designs ${secretSamples.join('\n')}`));
+      asks++; assert.equal(input.prompt, ORACLE_RULES + redact(`Compare designs ${secretSamples.join('\n')}`)); assert.match(input.prompt, /NO access to their repository/);
       for (const sample of secretSamples) assert(!input.prompt.includes(sample));
       return { answer: 'Use a simple board', session: 'builder-web' };
     },
@@ -235,7 +235,7 @@ test('oracle: job mode overrides global mode and off prompts have no consult or 
         assert.equal(prompt.includes('"oracleSkip"'), override !== 'off'); return plan();
       },
     });
-    const job = await f.job({ oracleMode: override }); await f.team.step(job);
+    const job = await f.job({ oracleMode: override, kindHint: 'research' }); await f.team.step(job);
     assert.equal(calls, expected); assert.equal(f.team.get(job.id).oracleMode, override);
     for (const oracleMode of [null, true, 'invalid']) await assert.rejects(f.job({ oracleMode }), /oracleMode/);
   }
@@ -247,7 +247,7 @@ test('oracle: saves redacted skip reason only when no Lead turn exists', async t
       runOracle: async () => ({ answer: 'Opinion', session: 'one' }),
       runAgent: async () => ({ ...plan(), oracleSkip: `Simple change ${secretSamples.join('\n')} ${'x'.repeat(400)}` }),
     });
-    const job = await f.job(); await f.team.step(job);
+    const job = await f.job({ kindHint: 'research' }); await f.team.step(job);
     assert.equal(f.team.get(job.id).oracle.skipReason, job.oracle.skipReason); assert(job.oracle.skipReason.length <= 300);
     for (const sample of secretSamples) assert(!job.oracle.skipReason.includes(sample));
   }
@@ -282,7 +282,7 @@ test('oracle: connection test reports a busy account at once instead of queueing
   const gate = new Promise(resolve => { release = resolve; }), entered = new Promise(resolve => { started = resolve; });
   const order = [];
   const f = await fixture(t, { mode: 'auto', accounts: [{ id: 'web', args: [] }] }, {
-    runOracle: async input => { order.push(input.prompt); if (input.prompt === 'Question?') { started(); await gate; } return { answer: 'OK', session: 'one' }; },
+    runOracle: async input => { order.push(input.prompt.replace(ORACLE_RULES, '')); if (input.prompt.endsWith('Question?')) { started(); await gate; } return { answer: 'OK', session: 'one' }; },
   });
   const job = await f.job();
   const ask = f.team.askOracle(job, 'lead', 'Question?');
@@ -305,7 +305,7 @@ test('oracle: aborted required preplan propagates cancellation without warning o
     runOracle: async () => { started(); await gate; return { answer: 'Late', session: 'one' }; },
     runAgent: async () => assert.fail('cancelled plan ran'),
   });
-  const job = await f.job(), step = f.team.step(job);
+  const job = await f.job({ kindHint: 'research' }), step = f.team.step(job);
   const rejected = assert.rejects(step, /stop preplan/);
   try {
     await entered; f.team.runs.get(job.id).abort.abort(new Error('stop preplan')); release(); await rejected;
@@ -500,4 +500,12 @@ test('oracle HTTP: settings/state share Oracle shape, accept legacy booleans and
   response = await f.request('/api/settings', { method: 'POST', body: { oracleModel: '' } });
   assert.equal(response.result.oracle.model, '');
   assert.equal((await f.request('/api/settings', { method: 'POST', body: { oracleModel: 5 } })).status, 400);
+});
+
+test('oracle required: code jobs are not auto-consulted (ChatGPT cannot see the repo); the Lead is told to ask only general questions', async t => {
+  const prompts = [];
+  const f = await fixture(t, { mode: 'required' }, { runAgent: async (agent, context, prompt) => { prompts.push(prompt); return plan(); } });
+  const job = await f.job(); await f.team.step(job);
+  assert.equal(f.team.get(job.id).oracle?.turns?.length || 0, 0);
+  assert.match(prompts[0], /CANNOT see this repository/); assert.match(prompts[0], /Never ask it to check code/);
 });

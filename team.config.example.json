@@ -9,6 +9,8 @@
   "minRemainingPercent": 15,
   "maxReworkRounds": 3,
   "planApproval": true,
+  "challenge": "all",
+  "challengeModel": "haiku",
   "planApprovalRework": true,
   "resumeCodexTasks": false,
   "peerDialogue": true,
