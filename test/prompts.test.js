@@ -72,7 +72,7 @@ test('plan, implement and review include one system block with complete part acc
     assert(prompt.includes('Member-specific instruction marker'));
     const { promptParts, prompt: logged } = f.assignment().details;
     assert.equal(logged, prompt);
-    assert.deepEqual(promptParts.map(p => p.name), ['stage', 'system', 'project', 'memory', 'context', 'shape', 'peer', 'skills', 'custom']);
+    assert.deepEqual(promptParts.map(p => p.name), ['stage', 'system', 'project', 'memory', 'context', 'shape', 'peer', 'skills', 'custom', 'language']);
     assert.equal(promptParts.reduce((sum, p) => sum + p.chars, 0), prompt.length);
     for (const part of promptParts) {
       assert(part.chars >= 0);

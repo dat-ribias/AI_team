@@ -10,7 +10,7 @@ let current = 'vi';
 const load = lang => { try { return cache[lang] ??= JSON.parse(readFileSync(join(dir, `${lang}.json`), 'utf8')); } catch { return cache[lang] = {}; } };
 export function setLanguage(lang) { if (languages.includes(lang)) current = lang; return current; }
 export const getLanguage = () => current;
-export function msg(key, vars = {}) {
-  const text = load(current)[key] ?? load('vi')[key] ?? key;
+export function msg(key, vars = {}, lang = current) {
+  const text = load(languages.includes(lang) ? lang : current)[key] ?? load('vi')[key] ?? key;
   return text.replace(/\{(\w+)\}/g, (m, k) => k in vars ? String(vars[k]) : m);
 }

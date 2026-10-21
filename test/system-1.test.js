@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Team, jobTitle, taskTitle, validateConfig, redact, routeGoal, compressOutput, computeSlots, defaultSensitive } from '../src/team.js';
+import { Team, jobTitle, taskTitle, validateConfig, redact, routeGoal, compressOutput, computeSlots, defaultSensitive, detectJobLanguage } from '../src/team.js';
 import { testList } from '../src/accounts.js';
 import { run, childEnv } from '../src/process.js';
 import { runOracle } from '../src/oracle.js';
@@ -16,6 +16,156 @@ import { msg } from '../src/i18n.js';
 import { validatePreview, previewEnv, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from '../src/preview.js';
 
 import { fixture, settle, approvalAgent, branchReady, branchCommit, branchTip, processAlive, previewFixture, parallelTeam, overlaps } from './system-helpers.js';
+
+test('job language: detection keeps uncertain owner messages unchanged', () => {
+  for (const [text, lang] of [['Sửa lỗi báo cáo', 'vi'], ['日本語の報告を確認する', 'ja'], ['Update the report', 'en'], ['Đã sửa'.normalize('NFD'), 'vi']]) {
+    assert.equal(detectJobLanguage(text), lang);
+  }
+  assert.equal(detectJobLanguage('', 'ja'), 'ja');
+  for (const text of ['ok', 'LGTM', '79d7dca', 'src/team.js:1630', 'C:\\project\\src\\team.js',
+    'src/team.js contains changes to the report and language helpers',
+    'const language = this is a long ASCII code example with many words;',
+    'ERROR the request failed because the provider could not answer',
+    '2026-10-21 12:34:56 request completed and the report was saved']) {
+    assert.equal(detectJobLanguage(text, 'vi', true), null, text);
+  }
+  assert.equal(detectJobLanguage('日本語', 'vi', true), 'ja');
+  assert.equal(detectJobLanguage('tiếp tục', 'ja', true), 'vi');
+  assert.equal(detectJobLanguage('Please write the remaining reports in English for the project owner.', 'vi', true), 'en');
+});
+
+async function languageFixture(t, runAgent = async () => ({ summary: 'OK', status: 'completed', findings: [] })) {
+  const f = await fixture(); f.config.projects[0].tests = [];
+  const team = new Team(f.config, f.data, { runAgent }); team.closed = true;
+  t.after(async () => {
+    await team.close();
+    for (const path of [f.data, f.path]) {
+      assert(path.startsWith(join(tmpdir(), 'ai-team-')));
+      rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  });
+  const job = await team.create({ project: 'test', goal: 'Sửa lỗi báo cáo ngôn ngữ', paused: true });
+  return { team, job };
+}
+
+test('job language: create, manual override and owner steering survive stale worker saves', async t => {
+  const { team, job } = await languageFixture(t);
+  assert.equal(job.lang, 'vi');
+  for (const [goal, lang] of [['日本語で報告してください', 'ja'], ['Update the report', 'en']]) {
+    assert.equal((await team.create({ project: 'test', goal, paused: true })).lang, lang);
+  }
+  assert.equal((await team.create({ project: 'test', goal: '日本語', lang: 'vi', paused: true })).lang, 'vi');
+  await assert.rejects(team.create({ project: 'test', goal: 'Update', lang: 'xx' }), /vi.*en.*ja/);
+  await assert.rejects(team.control(job.id, 'language', { lang: 'xx' }), /vi.*en.*ja/);
+  await team.control(job.id, 'language', { lang: 'ja' });
+  team.save(job); assert.equal(team.get(job.id).lang, 'ja');
+  assert.equal(team.events(job.id).at(-1).summary, msg('srv.team.language_changed', { lang: 'ja' }, 'ja'));
+  for (const message of ['ok', 'LGTM', '79d7dca', 'src/team.js:1630']) {
+    await team.control(job.id, 'message', { message }); assert.equal(team.get(job.id).lang, 'ja');
+  }
+  const stale = team.get(job.id);
+  await team.control(job.id, 'message', { message: 'Please write the remaining reports in English for the project owner.' });
+  team.save(stale); assert.equal(team.get(job.id).lang, 'en');
+  await team.control(job.id, 'message', { message: 'Tiếp tục bằng tiếng Việt' });
+  assert.equal(team.get(job.id).lang, 'vi');
+});
+
+test('job language: every stage gets one instruction with complete prompt accounting', async t => {
+  const seen = [], { team, job } = await languageFixture(t, async (agent, task, prompt) => {
+    seen.push({ agent: agent.id, task, prompt }); return { summary: 'Đã kiểm tra', status: 'completed', findings: [] };
+  });
+  for (const [stage, id] of [['plan', 'codex-1'], ['implement', 'codex-2'], ['review', 'gemini'], ['verify', 'codex-3'],
+    ['research', 'codex-2'], ['final', 'codex-1'], ['challenge', 'gemini'], ['consult', 'codex-3'], ['assess', 'codex-3']]) {
+    await team.invoke(job, id, stage, 'Kiểm tra', undefined, [], {}, team.agent(id), new AbortController().signal);
+    const { prompt, task } = seen.at(-1);
+    assert.equal(task.lang, 'vi');
+    assert.equal(prompt.split('Write reader-facing text (summary/reason/questions/findings/checkpoint/why/title) in vi; keep code, identifiers, commits and paths unchanged.').length - 1, 1);
+    const event = team.events(job.id).filter(e => e.details?.promptParts).at(-1);
+    assert.equal(event.details.promptParts.reduce((n, p) => n + p.chars, 0), prompt.length);
+    assert(event.details.promptParts.some(p => p.name === 'language' && p.chars > 0));
+  }
+  assert.equal(seen.length, 9);
+});
+
+test('job language: one rewrite preserves agent, session and nontext report values', async t => {
+  const wrong = 'The implementation is complete and all focused checks have passed successfully.';
+  const translated = 'Đã hoàn thành triển khai và kiểm tra các trường hợp liên quan thành công.';
+  const calls = [], { team, job } = await languageFixture(t, async (agent, task, prompt, opts) => {
+    calls.push({ agent, task, prompt, opts });
+    if (calls.length === 1) {
+      opts.onEvent('SESSION', { details: { id: 'language-session' } });
+      return { summary: 'Đã xong', status: 'completed', verdict: 'approved', reason: wrong, questions: [wrong], findings: [{ id: 'F1', claim: wrong, impact: 'high', evidence: 'src/unchanged/very-long-identifier-and-file-name.js:1630' }], checkpoint: { done: wrong }, tasks: [{ title: wrong, why: wrong }] };
+    }
+    assert.equal(task.sessionId, 'language-session');
+    assert.equal(agent, calls[0].agent); assert.equal(opts.signal, calls[0].opts.signal);
+    assert.match(prompt, /Do not run commands or repeat work/);
+    for (const field of ['reason', 'questions.0', 'findings.0.claim', 'checkpoint.done', 'tasks.0.title', 'tasks.0.why']) assert(prompt.includes(field));
+    return { summary: 'Đã xong', status: 'blocked', verdict: 'changes_requested', reason: translated, questions: [translated], findings: [{ id: 'F2', claim: translated, impact: 'low', evidence: 'changed.js' }], checkpoint: { done: translated }, tasks: [{ title: translated, why: translated }] };
+  });
+  team.agent('codex-2').provider = 'codex';
+  const report = await team.invoke(job, 'codex-2', 'implement', 'Sửa lỗi', undefined, [], {}, team.agent('codex-2'), new AbortController().signal);
+  assert.equal(calls.length, 2); assert.equal(job.usage.calls, 2);
+  assert.equal(report.reason, translated); assert.equal(report.status, 'completed'); assert.equal(report.verdict, 'approved');
+  assert.equal(report.findings[0].id, 'F1'); assert.equal(report.findings[0].impact, 'high');
+  assert.equal(report.findings[0].evidence, 'src/unchanged/very-long-identifier-and-file-name.js:1630');
+  assert(!team.events(job.id).some(e => e.details?.reason === 'language'));
+});
+
+test('job language: persistent mismatches warn without blocking or more than one rewrite', async t => {
+  for (const [lang, summary] of [['vi', 'The report is complete and all relevant checks passed successfully.'], ['ja', 'The report is complete and all relevant checks passed successfully.'], ['en', 'Đã hoàn thành triển khai và kiểm tra các trường hợp liên quan thành công.']]) {
+    let calls = 0;
+    const { team, job } = await languageFixture(t, async () => { calls++; return { summary, status: 'completed', findings: [] }; });
+    job.lang = lang;
+    const report = await team.invoke(job, 'codex-2', 'implement', 'Check', undefined, [], {}, team.agent('codex-2'), new AbortController().signal);
+    assert.equal(report.summary, summary); assert.equal(calls, 2); assert.equal(job.usage.calls, 2);
+    const warnings = team.events(job.id).filter(e => e.type === 'WARNING' && e.details?.reason === 'language');
+    assert.equal(warnings.length, 1); assert.equal(warnings[0].details.lang, lang);
+  }
+});
+
+test('job language: JSON retry and language retry remain bounded when correction is invalid JSON', async t => {
+  let calls = 0;
+  const { team, job } = await languageFixture(t, async () => {
+    calls++;
+    if (calls !== 2) return parseReport('invalid JSON');
+    return { summary: 'The report is complete and all relevant checks passed successfully.', status: 'completed' };
+  });
+  const report = await team.invoke(job, 'codex-2', 'implement', 'Kiểm tra', undefined, [], {}, team.agent('codex-2'), new AbortController().signal);
+  assert.equal(report.status, 'completed'); assert.equal(calls, 3); assert.equal(job.usage.calls, 3);
+  assert.equal(team.events(job.id).filter(e => e.details?.reason === 'language').length, 1);
+});
+
+test('job language: short text and technical evidence do not request a rewrite', async t => {
+  let calls = 0;
+  const { team, job } = await languageFixture(t, async () => {
+    calls++; return { summary: 'OK', status: 'completed', findings: [{ id: 'F1', claim: 'OK', evidence: 'src/unchanged/very-long-identifier-and-file-name.js:1630' }] };
+  });
+  await team.invoke(job, 'codex-2', 'implement', 'Kiểm tra', undefined, [], {}, team.agent('codex-2'), new AbortController().signal);
+  assert.equal(calls, 1);
+});
+
+test('job language: controller controls, blockers, review errors and merge readiness use job locale', async t => {
+  const { team, job } = await languageFixture(t);
+  job.lang = 'ja'; team.save(job);
+  await team.control(job.id, 'rename', { title: 'Test' });
+  assert.equal(team.events(job.id).at(-1).summary, msg('srv.team.renamed', { 0: 'Test' }, 'ja'));
+  await assert.rejects(team.merge(job.id), { message: msg('srv.team.task_chua_san_sang_hoac_controller', {}, 'ja') });
+  team.markProviderDown('mock', Date.now() + 60000, '503');
+  team.kick = () => {}; team.closed = false;
+  await team.runJob({ ...team.get(job.id), status: 'queued', stage: 'verify' });
+  team.closed = true;
+  assert.equal(team.get(job.id).status, 'blocked');
+  assert.match(team.get(job.id).error, /[\u3040-\u30ff\u3400-\u9fff]/);
+  team.providerDowns.clear();
+  const fresh = team.get(job.id);
+  Object.assign(fresh, { status: 'running', kind: 'code', rigor: 'light', risk: 'low', tested: fresh.revision, reviewed: fresh.revision, verified: fresh.revision, skipped: ['final'] });
+  team.save(fresh);
+  await team.finish(fresh, fresh.roster);
+  const ready = team.events(job.id).findLast(e => e.type === 'READY_FOR_MERGE');
+  assert.equal(ready.summary, msg('srv.team.ready_summary', { 0: 'final' }, 'ja'));
+  team.gitStates.set(job.id, { state: 'merge_stuck', kind: 'conflict', files: ['hello.txt'], reason: 'conflict' });
+  assert.equal(team.decisions()[0].reason, msg('ui.decisions.conflict', { files: 'hello.txt' }, 'ja'));
+});
 
 test('oracle: plan consult saves redacted turns/events and follows the same session', async t => {
   const f = await fixture(), calls = [], contexts = [];
@@ -181,7 +331,7 @@ test('test failure never reaches merge; bounded repair loop; no-tests cannot pas
   f.config.projects[0].tests = [[process.execPath, '-e', 'process.exit(7)']];
   const team = new Team(f.config, f.data); t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Fail test' });
-  const blocked = await settle(team, job.id, 'blocked'); assert.equal(blocked.tested, null); assert.match(blocked.error, /giới hạn/);
+  const blocked = await settle(team, job.id, 'blocked'); assert.equal(blocked.tested, null); assert(blocked.error.startsWith(msg('srv.team.da_dat_gioi_han_vong_sua', {}, job.lang)));
   assert(team.events(job.id).some(e => e.type === 'TEST_RESULT' && e.details.code === 7));
   await assert.rejects(team.merge(job.id));
 });
@@ -203,7 +353,7 @@ test('base moved: merge refused, automatic sync re-runs the gates', async t => {
   writeFileSync(join(f.path, 'other.txt'), 'x\n');
   await run(['git'], ['-C', f.path, 'add', '.']);
   await run(['git'], ['-C', f.path, '-c', 'user.name=T', '-c', 'user.email=t@l', 'commit', '-m', 'other']);
-  await assert.rejects(team.merge(job.id), /Cập nhật theo base/);
+  await assert.rejects(team.merge(job.id), { message: msg('srv.team.da_co_commit_moi_bam_cap', { 0: job.baseBranch }, job.lang) });
   const again = await settle(team, job.id, 'ready');
   assert.equal(again.tested, again.revision);
   const base = await branchTip(f);

@@ -618,7 +618,7 @@ test('work transfer preserves binary/new/deleted files and checkpoints but impor
   await target.invoke(imported, 'codex-1', 'plan', 'Inspect imported work', undefined, [], {}, target.agent('codex-1'), new AbortController().signal);
   assert(planPrompt.includes(imported.transferFile)); assert(!planPrompt.includes('Run tests'));
   target.agentRun = async () => { writeFileSync(join(imported.worktree, 'binary.dat'), Buffer.from([0, 255, 2, 200])); return { summary: 'changed a pending file', status: 'planned' }; };
-  await assert.rejects(target.invoke(imported, 'codex-1', 'plan', 'Read only', undefined, [], {}, target.agent('codex-1'), new AbortController().signal), /chỉ đọc/);
+  await assert.rejects(target.invoke(imported, 'codex-1', 'plan', 'Read only', undefined, [], {}, target.agent('codex-1'), new AbortController().signal), { message: msg('srv.team.agent_chi_doc_da_thay_doi', {}, imported.lang) });
   writeFileSync(join(imported.worktree, 'binary.dat'), Buffer.from([0, 255, 1, 200]));
   assert.equal((await exportTransfer(target, imported.id)).work.tasks[0].checkpoint.next, 'Run tests');
   imported.tasks = [{ instruction: 'Recheck transferred issue', files: ['hello.txt'], agent: 'codex-2' }]; target.save(imported);

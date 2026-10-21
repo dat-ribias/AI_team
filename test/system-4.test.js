@@ -195,7 +195,7 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   const events = team.events(job.id);
   for (const type of ['GOAL', 'DECISION', 'TASK_ASSIGNMENT', 'TEST_RESULT', 'REVIEW_RESULT', 'READY_FOR_MERGE']) assert(events.some(e => e.type === type), type);
   writeFileSync(join(ready.worktree, 'hello.txt'), 'tamper');
-  await assert.rejects(team.merge(job.id), /Worktree/);
+  await assert.rejects(team.merge(job.id), { message: msg('srv.team.worktree_da_doi_sau_kiem_tra', {}, job.lang) });
   writeFileSync(join(ready.worktree, 'hello.txt'), 'Hello from AI Team demo!\n');
   await team.merge(job.id);
   assert.equal(team.get(job.id).status, 'merged'); assert.equal(readFileSync(join(f.path, 'hello.txt'), 'utf8').replace(/\r\n/g, '\n'), 'Hello from AI Team demo!\n');
@@ -203,9 +203,11 @@ test('real Git pipeline, exact revision approval, no implicit merge, persisted m
   assert(!(await run(['git'], ['-C', f.path, 'worktree', 'list'])).stdout.includes(f.data), 'controller worktrees removed');
   assert.equal((await run(['git'], ['-C', f.path, 'branch', '--list', 'ai-team/*'])).stdout.trim(), '');
   assert.match((await team.diff(job.id)).diff, /Hello from AI Team demo/);
-  await assert.rejects(team.merge(job.id), /chưa sẵn sàng/);
+  await assert.rejects(team.merge(job.id), { message: msg('srv.team.task_chua_san_sang_hoac_controller', {}, job.lang) });
   await team.close();
-  const reopened = new Team(f.config, f.data); assert.equal(reopened.get(job.id).status, 'merged'); assert(reopened.events(job.id).length > events.length); await reopened.close();
+  const reopened = new Team(f.config, f.data); assert.equal(reopened.get(job.id).status, 'merged');
+  const persisted = reopened.events(job.id);
+  assert(persisted.some(e => e.type === 'MERGED')); assert(persisted.some(e => e.seq === events.find(e => e.type === 'GOAL').seq)); await reopened.close();
   // close is intentionally idempotent for shutdown after a manual close.
 });
 
@@ -330,7 +332,7 @@ test('member system prompt reaches the agent; risky merge needs typed confirmati
   assert(team.events(job.id).some(e => e.to === 'codex-2' && e.details?.prompt?.includes('Luôn viết test trước.')));
   const check = await team.mergeCheck(job.id);
   assert(check.needsConfirm); assert.equal(check.risk, 'high');
-  await assert.rejects(team.merge(job.id), /Rủi ro cao/);
+  await assert.rejects(team.merge(job.id), { message: msg('srv.team.rui_ro_cao_nhap_ma_commit', { 0: check.code }, job.lang) });
   await team.merge(job.id, { confirm: check.code });
   assert.equal(team.get(job.id).status, 'merged');
 });
@@ -507,7 +509,7 @@ test('pending peer questions survive pause without duplication; invalid recipien
   reopened.agentRun = async (agent, task) => task.stage === 'consult'
     ? (writeFileSync(join(task.worktree, 'hello.txt'), 'unauthorized edit\n'), { summary: 'Bad reply', status: 'completed', stance: 'agree', answer: 'Edited the file' })
     : { summary: 'New question', status: 'waiting_for_reply', peerRequest: { to: 'codex-4', topic: 'Another issue', question: 'Examine current draft?' } };
-  await assert.rejects(reopened.call(persisted, 'codex-2', 'implement', 'Another issue', undefined, [], { task: persisted.tasks[0], taskIndex: 0 }), e => e.peerWait && /chỉ đọc/.test(e.message));
+  await assert.rejects(reopened.call(persisted, 'codex-2', 'implement', 'Another issue', undefined, [], { task: persisted.tasks[0], taskIndex: 0 }), e => e.peerWait && e.message.includes(msg('srv.team.agent_chi_doc_da_thay_doi', {}, persisted.lang)));
   assert.equal(readFileSync(join(persisted.worktree, 'hello.txt'), 'utf8'), 'saved draft\n');
   assert.equal(reopened.slotKeys().length, 0);
   assert.throws(() => validateConfig({ ...f.config, peerDialogue: 'yes' }), /boolean/);
