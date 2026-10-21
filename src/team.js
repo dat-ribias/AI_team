@@ -1864,6 +1864,12 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       if (branches[k]) {
         if (!existsSync(wt)) await git(job.worktree, ['worktree', 'add', wt, branch]);
         if (await git(wt, ['symbolic-ref', '--short', 'HEAD']) !== branch) throw new Error(msg("srv.team.agent_doi_branch_can_kiem_tra", {}, job.lang));
+        // Nhánh con cũ có thể tạo từ đầu nhánh job trước khi job được đồng bộ master: gộp đầu nhánh job mới vào trước khi làm tiếp.
+        const head = await git(job.worktree, ['rev-parse', 'HEAD']);
+        if ((await run(['git'], ['-C', wt, 'merge-base', '--is-ancestor', head, 'HEAD'], { allowFailure: true })).code !== 0) {
+          const merged = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-edit', '-m', `Merge ${job.branch} vào T${i + 1} [#${job.id}]`, head], { allowFailure: true, timeoutMs: 120_000 });
+          if (merged.code !== 0) { await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true }); throw new Error(`T${i + 1}: không gộp được ${job.branch} mới vào ${branch}, cần xử lý xung đột`); }
+        }
         task.base = await git(job.worktree, ['merge-base', branch, 'HEAD']);
         this.event(job.id, 'controller', task.ranBy, 'RESUME_WIP', `T${i + 1}: resume ${branch}`, { branch, base: task.base });
       } else {

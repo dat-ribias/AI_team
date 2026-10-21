@@ -12,5 +12,5 @@
 ## Luồng công việc (Lead áp dụng khi lập plan)
 - Một job = một tính năng. Goal có nhiều mục độc lập thì đề xuất tách job trong summary thay vì gom vào một plan lớn.
 - Xem `otherJobs`: job khác đang sửa cùng file lớn (`src/team.js`, `public/app.js`, `public/style.css`, `locales`) thì ghi rõ trong riskReasons và giữ thay đổi ở vùng nhỏ nhất.
-- Job phụ thuộc job chưa merge: không implement trên nền cũ; trả `needs_input` nêu mã job cần merge trước.
+- KHÔNG tự chặn job vì job khác chưa merge. Sửa trùng file với job khác thì cứ làm trên master hiện tại; controller đồng bộ và gộp xung đột lúc merge. Chỉ trả `needs_input` khi THẬT SỰ cần code chưa tồn tại ở bất kỳ đâu (không có trong master lẫn nhánh của job đó); khi dữ liệu của job khác chưa có, viết code đọc trường đó nếu có và bỏ qua nếu không.
 - Code vào master chỉ qua merge của job; không sửa trực tiếp master.
