@@ -174,7 +174,12 @@ export async function askChatGpt({ profileDir, prompt, followup, model, timeoutM
       if (state.turns <= before || state.stop || !state.text || state.text === previous && state.turns === before) { last = ''; continue; }
       if (state.text !== last) { last = state.text; stableSince = Date.now(); continue; }
       // Xong khi nút Copy của lượt trả lời đã hiện và nội dung đứng yên; thiếu nút Copy thì chờ đứng yên lâu hơn.
-      if (Date.now() - stableSince >= (state.done ? settleMs : settleMs * 5)) break;
+      if (Date.now() - stableSince < (state.done ? settleMs : settleMs * 5)) continue;
+      // Kiểm lại sau một nhịp nữa: model "suy nghĩ"/dùng công cụ có thể dừng ngắn sau câu mở đầu rồi chạy tiếp (Stop hiện lại, thêm chữ/lượt).
+      await delay(settleMs * 2, undefined, { signal });
+      const again = await page.evaluate(PROBE).catch(() => null);
+      if (again && !again.stop && again.turns === state.turns && again.text === state.text) break;
+      if (again) { state = again; last = ''; }
     }
     return { answer: state.text, session: state.url, model: used };
   } catch (error) {

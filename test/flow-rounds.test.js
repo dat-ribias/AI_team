@@ -81,7 +81,7 @@ test('the failing step of a past round is marked and links to the next round wit
   assert.match(rounds[1], /node fr-step failed[^>]*><title>Tests/);
   assert.equal((past.match(/fr-back/g) || []).length, 2, 'one return arrow per past round');
   // Mũi tên vòng cuối chạm đỉnh node Manager của vòng hiện tại (cùng SVG).
-  const shift = Number(html.match(/class="flow-now" transform="translate\(0,([\d.]+)\)"/)[1]), managerTop = Number(html.slice(html.indexOf('flow-now')).match(/transform="translate\(140,([\d.]+)\)"/)[1]);
+  const shift = Number(html.match(/class="flow-now" transform="translate\(0,([\d.]+)\)"/)[1]), managerTop = Number(html.slice(html.indexOf('flow-now')).match(/data-slot="manager"[^>]*transform="translate\(140,([\d.]+)\)"/)[1]);
   const end = [...past.matchAll(/class="edge fr-back"[^>]* d="[^"]* ([\d.]+) ([\d.]+)"/g)].at(-1);
   assert.equal(Number(end[1]), 226); assert.equal(Number(end[2]), shift + managerTop);
 });
@@ -97,4 +97,19 @@ test('clicking a past step opens its details: findings with evidence, test log, 
     vm.runInContext(`frOpen = ${JSON.stringify(key)}`, h.context);
     const html = h.draw(); assert.match(html, /class="fr-detail"/); assert.match(html.slice(html.indexOf('fr-detail')), expect, key);
   }
+});
+
+test('plan critique node: shows objections (clickable), or that it was skipped for non-high-risk plans', () => {
+  const base = { id: 'j', kind: 'code', status: 'running', stage: 'implement', tasks: [{ agent: 'b1' }], plans: [{ version: 1, reason: 'initial', summary: 'p1', tasks: [{ agent: 'b1' }] }], reports: [] };
+  let html = harness({ ...base }).draw();
+  assert.match(html, /class="node critic-node critic-idle[^"]*"[^>]*><title>ui\.flow\.critic\.title/); assert.match(html, /ui\.flow\.critic\.skipped/);
+  assert.doesNotMatch(html.match(/<g class="node critic-node[^>]*>/)[0], /data-fr/, 'nothing to open when skipped');
+  const job = { ...base, challenged: true, challengeResult: { by: 'rev', version: 1, serious: 1, objections: [{ id: 'F1', impact: 'high', claim: 'UI chưa được sửa', evidence: 'public/app.js:1769' }] } };
+  const h = harness(job); html = h.draw();
+  assert.match(html, /class="node critic-node\s+critic-objected\s*"\s+data-fr="critic" role="button"/); assert.match(html, /ui\.flow\.critic\.objections\{"n":1\}/);
+  vm.runInContext('frOpen = "critic"', h.context); html = h.draw();
+  assert.match(html, /class="fr-detail"[\s\S]*<b>F1<\/b> <span class="tag">high<\/span> UI chưa được sửa<div class="muted">public\/app\.js:1769/);
+  html = harness({ ...base, stage: 'challenge', challenged: true, running: [{ stage: 'challenge', agent: 'rev' }] }).draw();
+  assert.match(html, /class="node critic-node[^"]*working[^"]*"[\s\S]*?<text>ui\.flow\.critic\.title · rev<\/text><text>ui\.flow\.running<\/text>/);
+  assert.doesNotMatch(harness({ ...base, kind: 'research' }).draw(), /critic-node/);
 });

@@ -95,6 +95,30 @@ test('resumed WIP child branch picks up commits added to the job branch after it
   assert.equal(readFileSync(join(job.worktree, 't1.txt'), 'utf8'), 'done\n');
 });
 
+test('a WIP child branch that conflicts with the new job head is archived and the task restarts from the job head', async t => {
+  let calls = 0, fresh = null;
+  const { team, job, path } = await fixture(t, async (agent, task) => {
+    if (agent.id === 'codex-2') {
+      if (++calls === 1) { writeFileSync(join(task.worktree, 'shared.txt'), 'T1 version\n'); throw new Error('stop'); }
+      fresh = readFileSync(join(task.worktree, 'shared.txt'), 'utf8');
+      writeFileSync(join(task.worktree, 't1.txt'), 'redone\n');
+    } else writeFileSync(join(task.worktree, 't2.txt'), 'done\n');
+    return completed;
+  });
+  await team.runJob(job);
+  const wip = team.get(job.id).tasks[0].checkpoint.wip;
+  // Job branch gets a conflicting edit to the same file while T1 waits.
+  writeFileSync(join(job.worktree, 'shared.txt'), 'job version\n');
+  await git(job.worktree, 'add', 'shared.txt');
+  await git(job.worktree, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'conflicting');
+  const recovered = await resume(team, job.id);
+  assert.equal(fresh, 'job version\n', 'the task restarts on the current job head, without its conflicting WIP');
+  assert.equal(recovered.tasks[0].done, true); assert.equal(recovered.status === 'blocked', false, recovered.error);
+  const tag = `archive/${wip.branch.replace(/^ai-team\//, '')}-conflict-${wip.commit.slice(0, 8)}`;
+  assert.equal(await git(path, 'rev-parse', tag), wip.commit, 'the old work is kept in an archive tag');
+  assert(team.events(job.id).some(e => e.type === 'REROUTE' && e.summary.includes(tag)));
+});
+
 test('resume adds an existing WIP branch after its worktree directory was lost', async t => {
   let recover = false, sawFile = false;
   const { team, job } = await fixture(t, async (agent, task) => {

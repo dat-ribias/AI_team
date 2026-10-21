@@ -29,6 +29,12 @@ form && form.addEventListener('submit', e => {
   add('user', q);
   if (mode === 'ratelimit') { const d = document.createElement('div'); d.setAttribute('role', 'dialog'); d.innerText = 'Too many requests. You are making requests too quickly.'; document.body.append(d); return; }
   if (mode === 'hang') return;
+  if (mode === 'pause') { // như model dùng công cụ: câu mở đầu, dừng ngắn (không có nút Stop), rồi mới trả lời thật
+    const a = add('assistant', '<div class="markdown">Let me check the repository first.</div>'), md = a.querySelector('.markdown');
+    setTimeout(() => { const stop = document.createElement('button'); stop.setAttribute('data-testid', 'stop-button'); form.append(stop);
+      setTimeout(() => { md.innerText = 'Real answer'; stop.remove(); a.insertAdjacentHTML('beforeend', '<button data-testid="copy-turn-action-button">copy</button>'); }, 600); }, 700);
+    return;
+  }
   const stop = document.createElement('button'); stop.setAttribute('data-testid', 'stop-button'); stop.innerText = 'Stop'; form.append(stop);
   const a = add('assistant', '<div class="markdown"></div>'), md = a.querySelector('.markdown');
   let i = 0; const words = ('Answer to: ' + q).split(' ');
@@ -50,6 +56,7 @@ test('ChatGPT web driver: ask, follow up and classify errors against a local fak
   const second = await askChatGpt({ ...opts, baseUrl: base, followup: first.session, prompt: 'And 3+3?' });
   assert.equal(second.answer, 'Answer to: And 3+3?', 'a follow-up never returns the previous answer');
 
+  assert.equal((await askChatGpt({ ...opts, baseUrl: base + '?mode=pause', prompt: 'x' })).answer, 'Real answer', 'a short pause after a preamble is not the end of the answer');
   await assert.rejects(askChatGpt({ ...opts, baseUrl: base + '?mode=login', prompt: 'x', timeoutMs: 3000 }), /ChatGPT web: (not logged in|timeout)/);
   await assert.rejects(askChatGpt({ ...opts, baseUrl: base + '?mode=captcha', prompt: 'x' }), /ChatGPT web: captcha challenge/);
   await assert.rejects(askChatGpt({ ...opts, baseUrl: base + '?mode=ratelimit', prompt: 'x' }), /ChatGPT web: too many requests/);
