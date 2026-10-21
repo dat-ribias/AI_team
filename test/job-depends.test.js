@@ -22,7 +22,7 @@ async function fixture(t, options = {}) {
   await run(['git'], ['init', '-b', 'master', root]);
   await git(root, ['config', 'core.autocrlf', 'false']);
   await commit(root, 'hello.txt', 'initial\n');
-  team = new Team({ demo: true, backup: false, planApproval: false,
+  team = new Team({ demo: true, backup: false, planApproval: false, challenge: options.challenge ?? 'high',
     agents: ['lead', 'builder', 'reviewer', 'verifier'].map(id => ({ id, provider: 'mock' })),
     pipeline: { manager: 'lead', builders: ['builder'], reviewer: 'reviewer', verifier: 'verifier' },
     projects: [{ id: 'p', path: root, tests: [] }] }, join(temp, 'data'), {
