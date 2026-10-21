@@ -56,9 +56,11 @@ test('memory API exposes summary revision and rejects the second owner write fro
   let response = await request(`/api/memory?project=test&session=${session.id}`);
   assert.equal(response.status, 200); assert.equal(response.result.summary, ''); assert.equal(response.result.summaryRevision, 0);
 
-  response = await request('/api/memory', { method: 'POST', body: { project: 'test', session: session.id, summary: 'First owner', revision: 0 } });
+  response = await request('/api/memory', { method: 'POST', body: { project: 'test', session: session.id, summary: 'First owner', summaryRevision: 0 } });
   assert.equal(response.status, 200); assert.equal(response.result.summary, 'First owner'); assert.equal(response.result.summaryRevision, 1);
-  response = await request('/api/memory', { method: 'POST', body: { project: 'test', session: session.id, summary: 'Second owner', revision: 0 } });
+  response = await request('/api/memory', { method: 'POST', body: { project: 'test', session: session.id, summary: 'Legacy alias', revision: 1 } });
+  assert.equal(response.status, 409); assert.equal(response.result.details.code, 'SESSION_SUMMARY_CONFLICT');
+  response = await request('/api/memory', { method: 'POST', body: { project: 'test', session: session.id, summary: 'Second owner', summaryRevision: 0 } });
   assert.equal(response.status, 409); assert.equal(response.result.details.code, 'SESSION_SUMMARY_CONFLICT');
   assert.equal(team.memory('test', session.id).summary, 'First owner');
 });
@@ -69,8 +71,8 @@ test('memory API conflicts are atomic for missing revisions and project/session 
   const linked = team.createSession({ project: 'linked', name: 'Linked' });
   for (const body of [
     { project: 'test', session: session.id, summary: 'No revision', add: 'Missing-revision fact' },
-    { project: 'test', session: linked.id, summary: 'Wrong project', revision: 0, add: 'Wrong-project fact' },
-    { project: 'linked', session: session.id, summary: 'Wrong session', revision: 0, add: 'Wrong-session fact' },
+    { project: 'test', session: linked.id, summary: 'Wrong project', summaryRevision: 0, add: 'Wrong-project fact' },
+    { project: 'linked', session: session.id, summary: 'Wrong session', summaryRevision: 0, add: 'Wrong-session fact' },
   ]) {
     const response = await request('/api/memory', { method: 'POST', body });
     assert.equal(response.status, 409); assert.equal(response.result.details.code, 'SESSION_SUMMARY_CONFLICT');

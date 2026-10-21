@@ -144,25 +144,28 @@ test('owner summary writes use revisions atomically and remain isolated by proje
   const linked = team.createSession({ project: 'linked', name: 'Linked' });
   assert.equal(first.notesRevision, 0); assert.equal(team.memory('test', first.id).summaryRevision, 0);
 
-  const saved = team.editMemory({ project: 'test', session: first.id, summary: 'Owner one', revision: 0 });
+  const saved = team.editMemory({ project: 'test', session: first.id, summary: 'Owner one', summaryRevision: 0 });
   assert.equal(saved.summary, 'Owner one'); assert.equal(saved.summaryRevision, 1);
-  conflict(() => team.editMemory({ project: 'test', session: first.id, summary: 'Owner two', revision: 0, add: 'Must not be stored' }));
+  conflict(() => team.editMemory({ project: 'test', session: first.id, summary: 'Legacy alias', revision: 1, add: 'Must not be stored' }));
+  conflict(() => team.editMemory({ project: 'test', session: first.id, summary: 'Owner two', summaryRevision: 0, add: 'Must not be stored' }));
   conflict(() => team.editMemory({ project: 'test', session: first.id, summary: 'Missing revision', add: 'Also not stored' }));
-  conflict(() => team.editMemory({ project: 'test', session: linked.id, summary: 'Wrong project', revision: 0, add: 'Wrong-project fact' }));
+  conflict(() => team.editMemory({ project: 'test', session: linked.id, summary: 'Wrong project', summaryRevision: 0, add: 'Wrong-project fact' }));
   assert.deepEqual(team.memory('test').facts, []);
   assert.equal(team.memory('test', first.id).summary, 'Owner one');
 
-  let memory = team.editMemory({ project: 'test', session: first.id, summary: '', revision: 1 });
+  let memory = team.editMemory({ project: 'test', session: first.id, summary: '', summaryRevision: 1 });
   assert.equal(memory.summary, ''); assert.equal(memory.summaryRevision, 2);
-  memory = team.editMemory({ project: 'test', session: first.id, summary: 'Context notes', revision: 2 });
+  memory = team.editMemory({ project: 'test', session: first.id, summary: 'Context notes', summaryRevision: 2 });
   assert.equal(memory.summaryRevision, 3);
-  assert.equal(team.editMemory({ project: 'test', session: second.id, summary: 'Second notes', revision: 0 }).summaryRevision, 1);
-  assert.equal(team.editMemory({ project: 'linked', session: linked.id, summary: 'Linked notes', revision: 0 }).summaryRevision, 1);
+  assert.equal(team.editMemory({ project: 'test', session: second.id, summary: 'Second notes', summaryRevision: 0 }).summaryRevision, 1);
+  assert.equal(team.editMemory({ project: 'linked', session: linked.id, summary: 'Linked notes', summaryRevision: 0 }).summaryRevision, 1);
   assert.equal(team.memory('test', first.id).summary, 'Context notes');
   assert.equal(team.memory('test', second.id).summary, 'Second notes');
   assert.equal(team.memory('linked', linked.id).summary, 'Linked notes');
 
-  const context = await team.memoryContext({ id: 'context', project: 'test', goal: 'Read context', sessionId: first.id, worktree: f.path }, false, null, f.path);
+  const contextJob = { id: 'context', project: 'test', goal: 'Read context', sessionId: first.id, worktree: f.path };
+  team.db.prepare('INSERT INTO jobs(id,body) VALUES(?,?)').run(contextJob.id, JSON.stringify(contextJob));
+  const context = await team.memoryContext(contextJob, false, null, f.path);
   assert.equal(context.session, 'Context notes'); assert.equal(context.sessionRevision, 3);
   await f.restart(); await f.restart();
   assert.equal(f.team.memory('test', first.id).summaryRevision, 3);
@@ -174,14 +177,14 @@ test('final summary snapshots prevent stale overwrite while preserving facts, re
   const base = (id, status = 'ready') => ({ id, project: 'test', sessionId: session.id, kind: 'code', status, goal: id,
     worktree: f.path, base: 'HEAD', revision: 'HEAD', tasks: [] });
 
-  team.editMemory({ project: 'test', session: session.id, summary: 'Before final', revision: 0 });
+  team.editMemory({ project: 'test', session: session.id, summary: 'Before final', summaryRevision: 0 });
   await team.remember(base('clear'), { session: '' }, { project: 'test', session: session.id, revision: 1 });
   assert.equal(team.memory('test', session.id).summary, ''); assert.equal(team.memory('test', session.id).summaryRevision, 2);
   await team.remember(base('fresh'), { session: 'Fresh final' }, { project: 'test', session: session.id, revision: 2 });
   assert.equal(team.memory('test', session.id).summary, 'Fresh final'); assert.equal(team.memory('test', session.id).summaryRevision, 3);
 
   const ownerFact = team.memoryStore.add({ project: 'test', text: 'Fact to retract' });
-  team.editMemory({ project: 'test', session: session.id, summary: 'Owner edit', revision: 3 });
+  team.editMemory({ project: 'test', session: session.id, summary: 'Owner edit', summaryRevision: 3 });
   const stale = base('stale');
   await team.remember(stale, { add: ['Stale final fact'], remove: [`M${ownerFact}`], session: 'Authorization: Bearer private-value' },
     { project: 'test', session: session.id, revision: 3 });
