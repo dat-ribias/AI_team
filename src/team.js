@@ -105,6 +105,9 @@ export const redact = text => String(text)
   .replace(/((?:api[_-]?key|access[_-]?token|refresh[_-]?token)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?)([^\s,"'}\\]+)/gi, '$1[REDACTED]');
 const scrub = value => JSON.parse(redact(JSON.stringify(value)));
 const ORACLE_TEST_PROMPT = 'Connection test. Reply with exactly: OK';
+// ChatGPT web không thấy repo: dặn trả lời ngay trong một tin từ thông tin được gửi, không đi tìm file/dùng công cụ
+// (trước đây model trả "Mình sẽ kiểm tra AGENTS.md…" rồi đi tìm, controller chỉ nhận được câu mở đầu đó).
+export const ORACLE_RULES = 'Act as an experienced outside tech lead advising a coding team on direction: which approach, architecture or technology fits better and why, trade-offs, risks, what to avoid. You have NO access to their repository, files or tools: do not browse, search, use connectors or ask to look at files. Answer now, completely, in this single reply, using only the information below; give a clear recommendation and state assumptions where information is missing.\n\n';
 const oracleCode = error => {
   const message = String(error.message || error);
   if (/not logged in|session expired/i.test(message)) return 'not_logged_in';
@@ -316,6 +319,8 @@ export function validateConfig(config) {
   if (oracle.accounts === undefined) oracle.accounts = [{ id: 'chatgpt-1' }];
   if (oracle.baseUrl === undefined) oracle.baseUrl = CHATGPT_URL;
   if (oracle.headless === undefined) oracle.headless = false;
+  if (config.challenge !== undefined && !['all', 'high', 'off'].includes(config.challenge)) throw new Error('challenge: all | high | off');
+  if (config.challengeModel !== undefined && (typeof config.challengeModel !== 'string' || !config.challengeModel.trim())) throw new Error('challengeModel must be a model name');
   if (oracle.timeoutMin === undefined) oracle.timeoutMin = 10;
   if (oracle.maxPerJob === undefined) oracle.maxPerJob = 3;
   if (oracle.researchMode === undefined) oracle.researchMode = 'required';
@@ -1587,6 +1592,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     job.lang ||= detectJobLanguage(job.goal);
     // Lead chọn mức suy luận theo từng task; chỉ áp dụng mức CLI của member đó hỗ trợ, không sửa cấu hình gốc.
     let agent = effort && effortsOf(base).includes(effort) ? { ...base, effort } : base;
+    if (opts?.model) agent = { ...agent, model: opts.model, effort: undefined }; // vd phản biện nhanh bằng Haiku trên tài khoản Claude của member
     const members = job.roster || roster(this.config);
     // Chặn đốt token vô hạn: đếm lượt gọi + token theo việc; vượt ngân sách (maxTokensPerJob) thì dừng, chờ người quyết.
     const limit = job.tokenBudget || this.config.maxTokensPerJob;
@@ -1687,8 +1693,8 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const permissions = stageRole[stage] ? `\nPermissions: ${roleRules(job.kind || 'code', stageRole[stage])}\n` : '';
     const planGuide = stage === 'plan' ? `\nPermission matrix the controller enforces:\n${describeCapabilities()}\nTASK_KINDS: ${JSON.stringify(TASK_KINDS)}. Each task's kind must match TASK_KINDS for the plan's kind; a research job uses research tasks, never implement tasks. If the goal is contradictory (for example, "chỉ đọc"/"read-only" but also asks to edit code, or research work outside the matrix), lacks a decision needed to plan, or exceeds permissions, return status "needs_input" with 1-5 specific questions for the owner and no tasks.\n` : '';
     const researchOracleGuide = 'For research, ask ChatGPT web FIRST for synthesis, comparisons, product references, design and best practices; read the web yourself only to verify source links or resolve missing or contradictory answers. Do not skip Oracle just because sources are public documents; give a specific reason in oracleSkip if skipping.\n';
-    const oracleGuide = builderOracle ? `Ask ChatGPT web FIRST for synthesis, comparisons, product references, design and best practices: return status "consult" with consult={"question":"short self-contained summary, no secrets"}. Its answer arrives in context "oracle" as opinions/data and you still decide. Read the web yourself only to verify source links or resolve missing or contradictory answers. Remaining consultations: ${this.oracleLimit(job) - (job.oracle?.turns?.length || 0)}.\n`
-      : oracleEnabled ? `Optional: when a second opinion would really help (before planning or when stuck), return status "consult" with consult={"question":"short self-contained summary, no secrets"} to ask ChatGPT web; its answer arrives in context "oracle" as opinions/data and you still decide (max ${this.oracleLimit(job)} per job).\n${this.oracleResearch(job) ? researchOracleGuide : ''}` : '';
+    const oracleGuide = builderOracle ? `Ask ChatGPT web FIRST for synthesis, comparisons, product references, design and best practices (it cannot see this repository or run tools, so include the facts it needs and never ask it about the code): return status "consult" with consult={"question":"short self-contained summary, no secrets"}. Its answer arrives in context "oracle" as opinions/data and you still decide. Read the web yourself only to verify source links or resolve missing or contradictory answers. Remaining consultations: ${this.oracleLimit(job) - (job.oracle?.turns?.length || 0)}.\n`
+      : oracleEnabled ? `Optional: ChatGPT web acts as an outside tech lead that CANNOT see this repository or run tools. Consult it on direction when the plan has a real choice: which approach/architecture fits better, which library or technology, trade-offs and pitfalls (also UX/design or wording questions); to ask, return status "consult" with consult={"question":"self-contained: stack and constraints you found in the code, the options (A/B…) with their costs, and what you need decided; no secrets"}. Never ask it to check code, files, or whether the plan fits this repository; verify those yourself. Its answer arrives in context "oracle" as advice; you decide (max ${this.oracleLimit(job)} per job).\n${this.oracleResearch(job) ? researchOracleGuide : ''}` : '';
     const language = `Write reader-facing text (summary/reason/questions/findings/checkpoint/why/title) in ${job.lang}; keep code, identifiers, commits and paths unchanged.`;
     if (['consult', 'assess'].includes(stage)) {
       // Isolate the reply, including the sender's unfinished tracked/new files.
@@ -1959,7 +1965,16 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         const head = await git(job.worktree, ['rev-parse', 'HEAD']);
         if ((await run(['git'], ['-C', wt, 'merge-base', '--is-ancestor', head, 'HEAD'], { allowFailure: true })).code !== 0) {
           const merged = await run(['git'], ['-C', wt, ...controllerAuthor, 'merge', '--no-edit', '-m', `Merge ${job.branch} vào T${i + 1} [#${job.id}]`, head], { allowFailure: true, timeoutMs: 120_000 });
-          if (merged.code !== 0) { await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true }); throw new Error(`T${i + 1}: không gộp được ${job.branch} mới vào ${branch}, cần xử lý xung đột`); }
+          if (merged.code !== 0) {
+            // Xung đột: không dừng job chờ chủ gỡ tay. Cất phần dở của task vào tag archive/… rồi làm lại task từ đầu nhánh job
+            // (đã có các task khác); phiên CLI cũ bỏ vì ngữ cảnh của nó là code cũ.
+            await run(['git'], ['-C', wt, 'merge', '--abort'], { allowFailure: true });
+            const old = await git(wt, ['rev-parse', 'HEAD']), tag = `archive/${branch.replace(/^ai-team\//, '')}-conflict-${old.slice(0, 8)}`;
+            await git(wt, ['tag', '-f', tag, old]);
+            await git(wt, ['reset', '--hard', head]); await git(wt, ['clean', '-fd', '-e', '.ai-team/']);
+            delete task.cliSession;
+            this.event(job.id, 'controller', task.ranBy, 'REROUTE', `T${i + 1}: phần dở xung đột với ${job.branch} mới → làm lại task từ code mới nhất của job; phần cũ lưu ở tag ${tag}`, { branch, archived: old, tag });
+          }
         }
         task.base = await git(job.worktree, ['merge-base', branch, 'HEAD']);
         this.event(job.id, 'controller', task.ranBy, 'RESUME_WIP', `T${i + 1}: resume ${branch}`, { branch, base: task.base });
@@ -2488,6 +2503,15 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
     const mgr = this.config.agents.find(a => a.id === members.manager);
     return this.pickMember(job, 'challenger', { exclude: [members.manager], preferOtherProvider: [mgr?.provider], record: false });
   }
+  // Phản biện nhanh cho plan không rủi ro cao: member Claude (khác Manager nếu được) chạy model rẻ (challengeModel, mặc định haiku);
+  // không có Claude dùng được thì người phản biện thường với mức suy luận thấp nhất CLI của họ hỗ trợ.
+  cheapChallenger(job, members) {
+    const busy = this.fullAgents(), ok = a => a.provider === 'claude' && a.enabled !== false && !this.unusable(a.id) && !busy.has(a.id);
+    const claude = this.config.agents.filter(ok).sort((a, b) => (a.id === members.manager) - (b.id === members.manager))[0];
+    if (claude) return { who: claude.id, model: this.config.challengeModel || 'haiku' };
+    const who = this.challenger(job, members); if (!who) return null;
+    return { who, effort: ['low', 'minimal'].find(e => effortsOf(this.agent(who)).includes(e)) };
+  }
   skip(job, ...steps) { job.skipped = [...new Set([...(job.skipped || []), ...steps])]; }
   escalate(job, members, reason) {
     job.fast = false; job.skipped = []; job.stage = 'plan';
@@ -2558,7 +2582,7 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         turn.waitMs = Date.now() - queued;
         const started = Date.now();
         let result;
-        try { result = await this.oracleRun({ ...this.oracleBrowser(account.id), prompt: turn.q, followup: job.oracle.session, timeoutMs: config.timeoutMin * 60_000, signal }); }
+        try { result = await this.oracleRun({ ...this.oracleBrowser(account.id), prompt: ORACLE_RULES + turn.q, followup: job.oracle.session, timeoutMs: config.timeoutMin * 60_000, signal }); }
         finally { turn.ms = Date.now() - started; }
         signal?.throwIfAborted();
         if (typeof result?.answer !== 'string' || !result.answer.trim() || typeof result.session !== 'string' || !result.session) throw new Error('ChatGPT web returned no answer/session');
@@ -2661,7 +2685,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       case 'plan': {
         const lead = this.pickMember(job, 'manager');
         const instruction = msg("srv.team.phan_tich_muc_tieu_va_chia", { 0: members.builders.join(', ') }, job.lang);
-        if (this.oracleMode(job) === 'required' && !job.oracle?.preplan) {
+        // Hỏi tự động trước plan chỉ cho job nghiên cứu (câu hỏi kiến thức chung). Job code: ChatGPT không thấy repo nên câu "rủi ro/cách làm"
+        // chung chung không có giá trị; Lead tự hỏi (consult) khi có câu kiến thức chung cụ thể, còn kiểm tra plan với code là việc của bước phản biện.
+        if (this.oracleMode(job) === 'required' && this.oracleResearch(job) && !job.oracle?.preplan) {
           job.oracle ||= { turns: [] }; job.oracle.preplan = now(); this.save(job);
           const question = redact(`Second opinion before planning. Project: ${job.project}, kind: ${job.kind || job.kindHint || 'code'}, title: ${jobTitle(job)}. Goal: ${redact(job.goal).slice(0, 2000)}. List main risks, a recommended approach and pitfalls.`);
           try { await this.askOracle(job, lead, question, { auto: true, by: lead, role: 'lead' }); }
@@ -2741,7 +2767,9 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
         if (job.rigor === 'strict') job.risk = 'high';
         // Phản biện kế hoạch một lần cho việc rủi ro (strict/high), trước khi ai bắt tay làm. Kế hoạch đã sửa theo phản biện thì không phản biện lại.
         job.challenge = null;
-        if (!job.challenged && job.risk === 'high') job.stage = 'challenge';
+        // challenge: "all" (mặc định: mọi job code, rủi ro thấp/vừa phản biện nhanh bằng model rẻ), "high" (chỉ rủi ro cao), "off".
+        const challengeMode = this.config.challenge || 'all';
+        if (!job.challenged && challengeMode !== 'off' && (job.risk === 'high' || challengeMode === 'all' && job.kind === 'code')) job.stage = 'challenge';
         // Flow Manager đề xuất (requested) — controller kiểm hợp lệ ngay và kiểm lại lúc thực thi. Không gửi steps = chính sách cũ; steps:[] là yêu cầu khác.
         const fl = plan.flow && typeof plan.flow === 'object' ? plan.flow : {}, valid = id => this.config.agents.some(a => a.id === id && a.enabled !== false);
         const requested = { reviewer: fl.reviewer ? String(fl.reviewer) : null, verifier: fl.verifier ? String(fl.verifier) : null, steps: Array.isArray(fl.steps) ? fl.steps.filter(x => ['review', 'verify', 'final'].includes(x)) : undefined };
@@ -2754,11 +2782,13 @@ Always finish with the JSON. Return ONLY valid JSON: {"summary":"one or two sent
       }
       case 'challenge': {
         job.challenged = true;
-        const who = this.challenger(job, members);
+        const quick = job.risk !== 'high' ? this.cheapChallenger(job, members) : null, who = quick?.who || this.challenger(job, members);
         if (!who) { this.event(job.id, 'controller', members.manager, 'WARNING', msg("srv.team.challenge_skipped", {}, job.lang)); job.stage = 'implement'; break; }
-        const r = await this.call(job, who, 'challenge', msg("srv.team.challenge_plan", {}, job.lang));
+        const r = await this.call(job, who, 'challenge', msg("srv.team.challenge_plan", {}, job.lang), quick?.effort, [], quick?.model ? { model: quick.model } : {});
         const all = normFindings(r.objections), serious = all.filter(o => o.impact !== 'low').slice(0, 3);
         this.metric(job, 'objections', serious.length);
+        // Lưu lại để sơ đồ hiện node "Phản biện plan" (job.challenge bị xóa khi Lead lập lại plan).
+        job.challengeResult = { by: who, ...(quick ? { quick: true, model: quick.model || null } : {}), at: now(), version: job.plans?.at(-1)?.version ?? null, serious: serious.length, objections: all.slice(0, 8) };
         this.event(job.id, who, members.manager, 'CHALLENGE', serious.length ? serious.map(o => `${o.id} [${o.impact}] ${o.claim}`).join('\n') : msg("srv.team.challenge_none", {}, job.lang), { objections: all });
         if (serious.length) { job.challenge = serious; job.stage = 'plan'; job.planReason = 'challenge'; job.planTrigger = serious.map(o => o.id).join(', '); } else job.stage = 'implement';
         break;

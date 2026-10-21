@@ -73,7 +73,8 @@ function wireAttach(kind, input, target) {
 const statusLabel = s => t(`ui.status.${s}`);
 // Trạng thái git chỉ đúng khi được tính trên đúng status hiện tại của job; job vừa đổi status (vd running → blocked) thì dùng status mới.
 function gitOf(job) { return job.git && (job.git.status === undefined || job.git.status === job.status) ? job.git : null; }
-function jobStatusLabel(job) { const g = gitOf(job); return g ? t(`ui.gitState.${g.state}`) : statusLabel(job.status); }
+// Job vướng được đối soát git xếp vào awaiting_owner (cần chủ xử lý) nhưng chữ "Chờ chủ duyệt" dễ hiểu nhầm là chờ duyệt merge → hiện "vướng".
+function jobStatusLabel(job) { const g = gitOf(job); return g && !(job.status === 'blocked' && g.state === 'awaiting_owner') ? t(`ui.gitState.${g.state}`) : statusLabel(job.status); }
 function badge(job) { return `<span class="status ${esc(gitOf(job)?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
 
 function dependencyOptions(project, ids = [], exclude) {
@@ -999,6 +1000,11 @@ function flowRoundsHTML(job, W = 700, currentY = 0) {
 let frOpen = null;
 function frDetailHTML(job) {
   if (!frOpen) return '';
+  if (frOpen === 'critic') {
+    const c = job?.challengeResult; if (!c) return '';
+    const items = (c.objections || []).map(o => `<li><b>${esc(o.id || '')}</b>${o.impact ? ` <span class="tag">${esc(o.impact)}</span>` : ''} ${esc(o.claim || '')}${o.evidence ? `<div class="muted">${esc(o.evidence)}</div>` : ''}</li>`).join('');
+    return `<section class="fr-detail" aria-live="polite"><header><b>${esc(t('ui.flow.critic.title'))} · ${esc(names[c.by] || c.by || '—')}${c.version ? ` · plan v${esc(c.version)}` : ''}</b><button type="button" class="fr-close" aria-label="close">✕</button></header>${items ? `<ol class="fr-findings">${items}</ol><p class="muted">${esc(t(c.serious ? 'ui.flow.critic.replanned' : 'ui.flow.critic.lowOnly'))}</p>` : `<p>${esc(t('ui.flow.critic.none'))}</p>`}</section>`;
+  }
   const [k, step, id] = frOpen.split(':'), r = flowRounds(job)[Number(k)]; if (!r) return '';
   const who = x => esc(names[x] || x || '—'), finding = f => typeof f === 'string' ? `<li>${esc(f)}</li>` : `<li><b>${esc(f.id || '')}</b>${f.impact ? ` <span class="tag">${esc(f.impact)}</span>` : ''} ${esc(f.claim || f.title || '')}${f.evidence ? `<div class="muted">${esc(f.evidence)}</div>` : ''}${f.file ? `<div class="muted">${esc(f.file)}${f.line ? ':' + esc(f.line) : ''}</div>` : ''}</li>`;
   const report = x => x ? `<p>${esc(x.summary || '')}</p>${x.findings?.length ? `<ol class="fr-findings">${x.findings.map(finding).join('')}</ol>` : ''}${x.output ? `<pre>${esc(String(x.output).slice(-4000))}</pre>` : ''}` : `<p class="muted">—</p>`;
@@ -1035,11 +1041,25 @@ function drawFlow() {
   const hasTask = id => (job?.tasks || []).some(x => (x.ranBy || x.agent) === id) || (job?.oracle?.turns || []).some(x => x.role === 'builder' && x.by === id);
   const builders = graph ? [] : r.builders.filter(id => byId[id] && (!job || hasTask(id))), rowH = 68, top = graph ? 46 : 34;
   const oracle = oracleFlowState(job);
-  const H = Math.max(oracle.visible ? 240 : 140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, nodes = {};
+  // Phản biện plan (bước "challenge"): node phía trên Manager — đang chạy, kết quả (số phản đối, bấm xem), hoặc bỏ qua vì không rủi ro cao.
+  const critic = (() => {
+    if (!job || readonly) return { visible: false };
+    const run = runningOf(job).find(x => x.stage === 'challenge'), res = job.challengeResult;
+    const running = job.stage === 'challenge' && job.status === 'running' || !!run;
+    if (running) return { visible: true, running: true, who: run?.agent || job.current?.agent || null };
+    if (res) return { visible: true, who: res.by, res };
+    if (job.kind !== 'research' && job.plans?.length && !job.challenged) return { visible: true, skipped: true };
+    return { visible: false };
+  })();
+  // Hàng chính căn theo số builder; node Phản biện/ChatGPT nằm dưới Manager nên chỉ cộng thêm chiều cao phía dưới.
+  const baseH = Math.max(140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + baseH / 2, nodes = {};
+  const H = Math.max(baseH, cy - top + [0, 108, 192][(critic.visible ? 1 : 0) + (oracle.visible ? 1 : 0)] + 8);
   const place = (key, x, y, w = 172) => nodes[key] = { x, y, w };
   place('user', 10, cy, 90);
   place('manager', 140, cy, 172);
-  if (oracle.visible) place('oracle', 140, cy + 84, 172);
+  // Phản biện ngay dưới Manager (phía trên là chỗ mũi tên vòng trước đi vào); có cả ChatGPT web thì ChatGPT xuống thêm một hàng.
+  if (critic.visible) place('critic', 140, cy + 84, 172);
+  if (oracle.visible) place('oracle', 140, cy + (critic.visible ? 168 : 84), 172);
   builders.forEach((id, i) => place('b:' + id, 365, cy + (i - (builders.length - 1) / 2) * rowH, 172));
   { const seen = Array(cols).fill(0); gtasks.forEach((x, i) => { const c = level[i], k = seen[c]++; place('t:' + i, 365 + c * colW, cy + (k - (perCol[c] - 1) / 2) * rowH, 172); }); }
   // Chỉ đặt node có thật trong vòng này: job nghiên cứu không có Tests, bước Manager bỏ thì không vẽ Review/Verify.
@@ -1052,6 +1072,7 @@ function drawFlow() {
   const challenge = !readonly && (job?.stage === 'challenge' || runningOf(job).some(r => r.stage === 'challenge'));
   const runs = readonly ? [] : runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
   const active = new Set(job?.status === 'running' && runs.length ? (job.stage === 'implement' ? runs.map(r => 'manager>b:' + r.agent) : [{ plan: job.round ? 'rework' : 'user>manager', challenge: 'user>manager', test: 'b>tests', review: 'tests>reviewer', verify: 'reviewer>verifier', final: 'verifier>merge' }[job.stage]]) : []);
+  if (critic.running) live.add('critic');
   if (challenge) { live.delete('reviewer'); live.add('manager'); active.delete('tests>reviewer'); active.delete('rework'); active.add('user>manager'); }
   if (!readonly && job?.status === 'running' && job.stage === 'test' && !runs.length) { live.add('tests'); active.add('b>tests'); }
   if (!readonly && job?.status === 'ready') live.add('merge');
@@ -1111,14 +1132,19 @@ function drawFlow() {
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   if (oracle.working) live.add('oracle');
   if (oracle.visible) {
-    edges += `<path class="edge oracle used ${oracle.leadWorking ? 'active' : ''}" d="M218 ${cy + 24} L218 ${cy + 60} M234 ${cy + 60} L234 ${cy + 24}"/>`;
+    edges += critic.visible // nối vòng bên trái để không chạy xuyên node Phản biện
+      ? `<path class="edge oracle used ${oracle.leadWorking ? 'active' : ''}" d="M140 ${cy + 8} L126 ${cy + 8} L126 ${cy + 176} L140 ${cy + 176} M140 ${cy - 8} L118 ${cy - 8} L118 ${cy + 160} L140 ${cy + 160}"/>`
+      : `<path class="edge oracle used ${oracle.leadWorking ? 'active' : ''}" d="M218 ${cy + 24} L218 ${cy + 60} M234 ${cy + 60} L234 ${cy + 24}"/>`;
     for (const id of oracle.builderIds) {
       const targets = nodes['b:' + id] ? ['b:' + id] : gtasks.map((task, i) => (task.ranBy || task.agent) === id ? 't:' + i : null).filter(Boolean);
       for (const target of targets) edges += edge('oracle', target, 'oracle used' + (oracle.pendingBuilders.includes(id) ? ' active' : ''));
     }
   }
   const oracleSvg = oracle.visible ? box('oracle', t('ui.oracle.title'), oracle.subtitle).replace('class="node ', `class="node oracle-node ${oracle.idle ? 'oracle-idle' : ''} ${oracle.failed ? 'oracle-error' : ''} `).replace('transform=', 'data-oracle role="button" tabindex="0" transform=') : '';
-  const nodesSvg = oracleSvg + box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', mgId), challenge ? t('ui.results.challenge', { name: names[runs.find(x => x.stage === 'challenge')?.agent] || names[job?.current?.agent] || '—' }) : skipped('plan') ? t('ui.flow.fastPath') : sub(mgId), mgId || null, 'manager')
+  const criticSvg = critic.visible ? `<path class="edge used critic-edge ${critic.running ? 'active' : ''}" d="M218 ${cy + 24} L218 ${cy + 60} M234 ${cy + 60} L234 ${cy + 24}"/>` + box('critic', t('ui.flow.critic.title') + (critic.who ? ' · ' + (byId[critic.who]?.label || critic.who) : ''),
+    critic.running ? t('ui.flow.running') : critic.skipped ? t('ui.flow.critic.skipped') : (critic.res.model ? critic.res.model + ' · ' : '') + (critic.res.serious ? t('ui.flow.critic.objections', { n: critic.res.serious }) : t('ui.flow.critic.none')), critic.who)
+    .replace('class="node ', `class="node critic-node ${critic.skipped ? 'critic-idle' : ''} ${critic.res?.serious ? 'critic-objected' : ''} ${frOpen === 'critic' ? 'selected' : ''} `).replace('transform=', `${critic.res ? 'data-fr="critic" role="button" tabindex="0" ' : ''}transform=`) : '';
+  const nodesSvg = criticSvg + oracleSvg + box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', mgId), challenge ? t('ui.results.challenge', { name: names[runs.find(x => x.stage === 'challenge')?.agent] || names[job?.current?.agent] || '—' }) : skipped('plan') ? t('ui.flow.fastPath') : sub(mgId), mgId || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
     + gtasks.map((x, i) => { const who = x.ranBy || x.agent, wait = depsOf(x, i).filter(d => gtasks[d] && !gtasks[d].done).map(d => 'T' + (d + 1)); return box('t:' + i, `T${i + 1} · ${x.kind === 'review' ? 'Review ' + depsOf(x, i).map(d => 'T' + (d + 1)).join(',') : x.auto ? t('ui.flow.fix') : 'Build'} · ${byId[who]?.label || '—'}`,
       readonly ? cut(x.instruction, 40) : (x.pinned && !x.done ? '📌 ' + t('ui.flow.pinned') + ' · ' : '') + (x.done ? (x.kind === 'review' ? '✓ ' + (x.note || x.verdict || '') : '✓') + (x.attempts ? ' · ' + t('ui.flow.attempts', { n: x.attempts }) : '') : live.has('t:' + i) ? t('ui.flow.running') : wait.length ? '⏳ ' + t('ui.flow.waitFor', { list: wait.join(', ') }) : x.attempts ? t('ui.flow.attempts', { n: x.attempts }) : cut(x.instruction, 40)), who || null, x.kind === 'review' ? 'reviewer' : 'builder', i); }).join('')
@@ -1332,9 +1358,10 @@ async function drawResults() {
   const html = `<section class="result-section"><h3>${esc(t('ui.results.request'))}</h3><p class="muted">${esc(session?.name || '—')} · ${esc(job.project)}</p><p class="result-goal">${esc(jobTitle(job))}</p>${tokenJobLink(job)}<details><summary>${esc(t('ui.results.full'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details></section>
     <section class="result-section"><h3>${esc(t('ui.results.changed'))}</h3>${source('ai')}${final ? stale(final.revision) : ''}<p>${esc(summary || '—')}</p><p><b>${esc(stats)}</b></p>${changes?.files?.length ? `<details><summary>${esc(t('ui.results.files'))}</summary><ul>${changes.files.map(f => `<li><code>${esc(f.path)}</code> +${esc(f.added ?? '—')} / −${esc(f.removed ?? '—')}</li>`).join('')}</ul></details>` : ''}<button type="button" id="results-diff">${esc(t('ui.common.viewDiff'))}</button></section>${docsHTML}
     <section class="result-section"><h3>${esc(t('ui.results.proof'))}</h3>${preview?.status === 'failed' || preview?.screenshots === false ? `<div class="error-box">${source('controller')} ${stale(preview.revision)}<p>${esc(preview.error || t(preview.screenshots === false ? 'ui.results.noChrome' : 'ui.results.previewFailed'))}</p>${other.filter(x => x.item.stage === 'preview' && x.item.revision === preview.revision && x.file.path.endsWith('preview.log')).map(x => evidenceLink(id, x.path, t('ui.evidence.openLog'))).join(' ')}</div>` : ''}
-    <div class="result-images">${images.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!images.length ? `<p class="muted">${esc(t('ui.results.noImages'))}</p>` : ''}
-    ${checks.map(c => `<div>${stale(c.revision)}<code>${esc(c.revision || '—')}</code>${controllerTestHTML(id, c)}</div>`).join('')}${reports.map(r => `<div>${stale(r.revision)}${aiCheckHTML({ ...r, findings: (r.findings || []).filter(f => !['resolved', 'closed'].includes(f.status) && f.resolved !== true) })}</div>`).join('')}
-    <ul class="evidence-files">${other.map(x => `<li>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)} ${evidenceLink(id, x.path, x.file.path)}</li>`).join('')}</ul>
+    <div class="result-images">${shownImages.map(x => `<figure>${source(x.item.agent === 'controller' ? 'controller' : 'ai')}${stale(x.item.revision)}<figcaption>${esc(x.route)} · ${esc(t('ui.results.' + x.viewport))} · ${esc(t('ui.results.' + x.phase))}</figcaption><a href="${esc(evidenceURL(id, x.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, x.path))}" alt="${esc(x.route + ' · ' + t('ui.results.' + x.phase) + ' · ' + t('ui.results.' + x.viewport))}"></a></figure>`).join('')}</div>${!shownImages.length ? `<p class="muted">${esc(t(images.length ? 'ui.results.noCurrentImages' : 'ui.results.noImages'))}</p>` : ''}
+    ${checks.filter(c => c.revision === job.revision).map(c => `<div><code>${esc(c.revision || '—')}</code>${controllerTestHTML(id, c)}</div>`).join('')}${reports.map(r => `<div>${stale(r.revision)}${aiCheckHTML({ ...r, findings: (r.findings || []).filter(f => !['resolved', 'closed'].includes(f.status) && f.resolved !== true) })}</div>`).join('')}
+    <ul class="evidence-files">${other.filter(x => x.item.revision === job.revision).map(x => `<li>${source(x.item.agent === 'controller' ? 'controller' : 'ai')} ${evidenceLink(id, x.path, x.file.path)}</li>`).join('')}</ul>
+    ${(() => { const n = images.length - shownImages.length + checks.filter(c => c.revision !== job.revision).length + other.filter(x => x.item.revision !== job.revision).length; return n ? `<p class="muted">${esc(t('ui.results.olderHidden', { n }))}</p>` : ''; })()}
     ${job.acceptance ? `<p>${source('user')}${stale(job.acceptance.revision)} ${esc(clock(job.acceptance.at))}</p>` : ''}</section>
     <section class="result-section"><h3>${esc(t('ui.results.decision'))}</h3><ul class="result-levels">${level('technical', technical)}${level('verified', verified)}${level('accepted', job.acceptance?.revision === job.revision)}</ul>${warning ? `<p class="error-box">${esc(warning)}</p>` : ''}${acceptance.required && !acceptance.ok ? `<p class="error-box">${esc(t('ui.results.acceptRequired'))}</p>` : ''}<div class="controls">${running ? (preview.routes?.length ? preview.routes : [{ name: t('ui.results.openPreview'), path: '/' }]).map((r, i) => `<button type="button" data-result-route="${i}">${esc(t('ui.results.openPreview'))} · ${esc(r.name)}</button>`).join('') + `<button type="button" data-result-control="preview-stop">${esc(t('ui.results.stopPreview'))}</button>` : configured ? `<button type="button" data-result-control="preview-start" ${job.status === 'ready' ? '' : 'disabled'}>${esc(t('ui.results.restartPreview'))}</button>` : ''}<button type="button" data-result-control="accept" ${job.status === 'ready' ? '' : 'disabled'}>${esc(t('ui.results.accept'))}</button><button type="button" id="results-feedback" ${['merged', 'cancelled'].includes(job.status) ? 'disabled' : ''}>${esc(t('ui.results.feedback'))}</button>${job.kind !== 'research' ? `<button type="button" id="results-merge" class="primary" ${job.status !== 'ready' || acceptance.required && !acceptance.ok ? 'disabled' : ''}>${esc(t('ui.results.merge'))}</button>` : ''}</div></section>`;
   if (html !== resultsHTML) { $('results-panel').innerHTML = html; resultsHTML = html; }
@@ -1369,7 +1396,28 @@ async function drawEvidence() {
   for (const report of job.reports || []) if (['review', 'verify'].includes(report.stage)) group(report.revision, report.at).reports.push(report);
   for (const item of data.items || []) group(item.revision, item.at).items.push(item);
   for (const check of data.checkResults || []) group(check.revision, check.at).checks.push(check);
-  $('evidence-panel').innerHTML = [...groups.values()].sort((a, b) => b.at - a.at || b.order - a.order).map(g => `<section class="evidence-revision"><h3>${esc(t('ui.evidence.revision'))} <code>${esc(g.revision)}</code></h3>${g.checks.map(c => controllerTestHTML(id, c)).join('')}${g.reports.map(aiCheckHTML).join('')}${g.items.map(item => `<div class="evidence-record"><p class="muted">${esc(item.stage)} · ${esc(names[item.agent] || item.agent)} · ${esc(clock(item.at))}</p><div class="evidence-images">${(item.files || []).filter(f => f.type === 'image').map(f => `<a href="${esc(evidenceURL(id, item.dir + '/' + f.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, item.dir + '/' + f.path))}" alt="${esc(f.path)}"><span>${esc(f.path)}</span></a>`).join('')}</div><ul class="evidence-files">${(item.files || []).filter(f => f.type !== 'image').map(f => `<li>${evidenceLink(id, item.dir + '/' + f.path, f.path)} <small class="muted">${esc(f.type)} · ${esc(f.bytes)} B</small></li>`).join('')}</ul></div>`).join('')}</section>`).join('') || `<p class="muted">${esc(t('ui.evidence.empty'))}</p>`;
+  $('evidence-panel').innerHTML = evidencePanelHTML(id, job, [...groups.values()].sort((a, b) => b.at - a.at || b.order - a.order));
+}
+// Chỉ kết quả của commit hiện tại là "đúng nhất": hiện trước với nhãn Mới nhất; trong commit đó file trùng tên chỉ giữ bản mới nhất
+// (chạy lại nhiều lần). Các commit cũ (code đã đổi sau đó) gom vào một mục thu gọn.
+function evidencePanelHTML(id, job, groups) {
+  if (!groups.length) return `<p class="muted">${esc(t('ui.evidence.empty'))}</p>`;
+  const record = (item, files) => `<div class="evidence-record"><p class="muted">${esc(item.stage)} · ${esc(names[item.agent] || item.agent)} · ${esc(clock(item.at))}</p><div class="evidence-images">${files.filter(f => f.type === 'image').map(f => `<a href="${esc(evidenceURL(id, item.dir + '/' + f.path))}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(evidenceURL(id, item.dir + '/' + f.path))}" alt="${esc(f.path)}"><span>${esc(f.path)}</span></a>`).join('')}</div><ul class="evidence-files">${files.filter(f => f.type !== 'image').map(f => `<li>${evidenceLink(id, item.dir + '/' + f.path, f.path)} <small class="muted">${esc(f.type)} · ${esc(f.bytes)} B</small></li>`).join('')}</ul></div>`;
+  const section = (g, current) => {
+    // Mới nhất trước; tên file đã gặp ở bản mới hơn thì bỏ (chỉ trong commit hiện tại).
+    const seen = new Set(), items = [...g.items].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+    let hidden = 0;
+    const body = items.map(item => {
+      const files = current ? (item.files || []).filter(f => { const k = String(f.path).split('/').pop(); if (seen.has(k)) { hidden++; return false; } seen.add(k); return true; }) : item.files || [];
+      return files.length ? record(item, files) : '';
+    }).join('');
+    const checks = current ? g.checks.filter((c, i, all) => all.findLastIndex(x => JSON.stringify(x.command) === JSON.stringify(c.command)) === i) : g.checks;
+    const reports = current ? ['review', 'verify'].map(stage => g.reports.filter(r => r.stage === stage).at(-1)).filter(Boolean) : g.reports;
+    return `<section class="evidence-revision ${current ? 'evidence-current' : 'evidence-old'}"><h3>${current ? `<span class="tag evidence-latest">${esc(t('ui.evidence.latest'))}</span> ` : ''}${esc(t('ui.evidence.revision'))} <code>${esc(String(g.revision).slice(0, 12))}</code> <small class="muted">${esc(g.at ? clock(new Date(g.at).toISOString()) : '')}</small></h3>${checks.map(c => controllerTestHTML(id, c)).join('')}${reports.map(aiCheckHTML).join('')}${body}${hidden ? `<p class="muted">${esc(t('ui.evidence.hiddenDuplicates', { n: hidden }))}</p>` : ''}</section>`;
+  };
+  const current = groups.find(g => g.revision === job.revision), old = groups.filter(g => g !== current);
+  return (current ? section(current, true) : `<p class="error-box">${esc(t('ui.evidence.noCurrent', { revision: String(job.revision || '—').slice(0, 8) }))}</p>`)
+    + (old.length ? `<details class="evidence-older"><summary>${esc(t('ui.evidence.older', { n: old.length }))}</summary>${old.map(g => section(g, false)).join('')}</details>` : '');
 }
 let baseBranchesRequest = 0;
 async function loadBaseBranches() {

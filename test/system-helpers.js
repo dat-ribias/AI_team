@@ -25,7 +25,8 @@ export async function fixture() {
   writeFileSync(join(path, 'hello.txt'), 'Hello!\n');
   await run(['git'], ['-C', path, 'add', '.']);
   await run(['git'], ['-C', path, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'initial']);
-  const config = { demo: true, planApproval: false, maxRamPercent: 100, maxCpuPercent: 100,
+  // challenge: 'high' giữ luồng cũ cho các test chức năng khác; phản biện mọi job có test riêng (test/challenge.test.js).
+  const config = { demo: true, planApproval: false, maxRamPercent: 100, maxCpuPercent: 100, challenge: 'high',
     agents: ['codex-1', 'codex-2', 'codex-3', 'codex-4', 'gemini'].map(id => ({ id, label: id, role: id, provider: 'mock' })),
     pipeline: { manager: 'codex-1', builders: ['codex-2', 'codex-4'], reviewer: 'gemini', verifier: 'codex-3' },
     projects: [{ id: 'test', path, tests: [[process.execPath, '-e', "require('node:assert/strict').equal(require('node:fs').readFileSync('hello.txt','utf8'),'Hello from AI Team demo!\\n')"]] }],
