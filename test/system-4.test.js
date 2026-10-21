@@ -20,8 +20,8 @@ import { fixture, settle, approvalAgent, branchReady, branchCommit, branchTip, p
 test('oracle: config defaults and invalid account/settings types', async () => {
   const f = await fixture(), config = validateConfig(f.config);
   assert.equal(config.oracle.enabled, false); assert.equal(config.oracle.timeoutMin, 10); assert.equal(config.oracle.maxPerJob, 3);
-  assert(Array.isArray(config.oracle.command)); assert.equal(config.oracle.accounts.length, 1);
-  for (const oracle of [null, [], { enabled: 'yes' }, { command: 'oracle' }, { command: [] }, { accounts: [] },
+  assert.equal(config.oracle.baseUrl, 'https://chatgpt.com/'); assert.equal(config.oracle.headless, false); assert.equal(config.oracle.accounts.length, 1);
+  for (const oracle of [null, [], { enabled: 'yes' }, { baseUrl: 'chatgpt.com' }, { headless: 'no' }, { accounts: [] },
     { accounts: [{ id: 'one', args: [] }, { id: 'two', args: [] }, { id: 'three', args: [] }] },
     { accounts: [{ id: 'one', args: [] }, { id: 'one', args: [] }] }, { accounts: [{ id: 'one', args: 'profile' }] },
     { timeoutMin: 0 }, { timeoutMin: Infinity }, { maxPerJob: 1.5 }, { maxPerJob: 0 }]) {

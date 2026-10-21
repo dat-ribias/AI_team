@@ -148,6 +148,7 @@ export function classify(job, inventory) {
     return { state: remaining.length ? 'cancelled_unmerged' : 'cancelled_clean', reason: remaining.join('; ') || 'không còn code chưa vào nhánh chính' };
   }
   if (job.kind === 'research' || status === 'done') return { state: 'done', reason: 'done' };
+  if (status === 'waiting' && job.blockedReason?.kind === 'depends') return { state: 'working', reason: 'depends' };
   return { state: 'working', reason: status || 'working' };
 }
 

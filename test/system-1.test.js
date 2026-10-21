@@ -191,7 +191,7 @@ test('oracle: plan consult saves redacted turns/events and follows the same sess
   assert(waiting.oracle.turns.every(turn => turn.q.includes('[REDACTED]') && turn.q.length <= 4000 && turn.at && turn.account === 'web-1'));
   const events = team.events(job.id).filter(e => /^ORACLE_/.test(e.type));
   assert.deepEqual(events.map(e => e.type), ['ORACLE_QUESTION', 'ORACLE_ANSWER', 'ORACLE_QUESTION', 'ORACLE_ANSWER']);
-  assert.deepEqual(events[0].details, { question: waiting.oracle.turns[0].q }); assert.deepEqual(events[1].details, { answer: 'Opinion 1' });
+  assert.deepEqual(events[0].details, { question: waiting.oracle.turns[0].q, by: 'codex-1' }); assert.deepEqual(events[1].details, { answer: 'Opinion 1', by: 'codex-1' });
   assert.equal(events[0].from, 'codex-1'); assert.equal(events[0].to, 'chatgpt'); assert.equal(events[1].from, 'chatgpt'); assert.equal(events[1].to, 'codex-1');
   assert(events.every(e => e.summary.length <= 200));
 });

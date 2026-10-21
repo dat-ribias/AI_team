@@ -17,20 +17,6 @@ import { validatePreview, previewEnv, startServer, waitReady, freePort, stopTree
 
 import { fixture, settle, approvalAgent, branchReady, branchCommit, branchTip, processAlive, previewFixture, parallelTeam, overlaps } from './system-helpers.js';
 
-test('oracle: browser CLI argv, answer file and session are separate from logs', async () => {
-  const prompt = 'Question with "quotes", & and Unicode: 日本語', args = ['--browser-manual-login', '--browser-manual-login-profile-dir', 'profile with spaces'];
-  const script = `const fs = require('node:fs'), assert = require('node:assert/strict'), a = process.argv.slice(1);
-    assert.deepEqual(a.slice(0, 2), ['--engine', 'browser']);
-    assert.deepEqual(a.slice(2, 5), ${JSON.stringify(args)});
-    assert.equal(a[a.indexOf('-p') + 1], ${JSON.stringify(prompt)});
-    assert.equal(a[a.indexOf('--followup') + 1], 'parent-session');
-    assert.equal(process.env.ORACLE_NO_DETACH, '1');
-    assert(a.includes('--wait')); assert.equal(a[a.indexOf('--browser-archive') + 1], 'never');
-    fs.writeFileSync(a[a.indexOf('--write-output') + 1], 'Answer only: 日本語', 'utf8');
-    console.log('Session: child-session'); console.log('Preamble and timing logs');`;
-  assert.deepEqual(await runOracle({ command: [process.execPath, '-e', script, '--'], args, prompt, followup: 'parent-session', timeoutMs: 5000 }), { answer: 'Answer only: 日本語', session: 'child-session' });
-});
-
 test('plan approval: assignment updates the gated hash, survives stale saves and uses the pinned member', async t => {
   const f = await fixture(), calls = [], team = new Team(f.config, f.data, { runAgent: async (...args) => { calls.push([args[1].stage, args[0].id]); return approvalAgent(...args); } }); t.after(() => team.close());
   const job = await team.create({ project: 'test', goal: 'Update hello', planApproval: true });

@@ -7,6 +7,8 @@ const source = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'ut
 const start = source.indexOf('function drawFlow() {');
 assert.ok(start >= 0);
 const flowSource = source.slice(start, source.indexOf('\n}', start) + 2);
+const fn = name => { const i = source.indexOf(`function ${name}(`); return source.slice(i, source.indexOf('\n}', i) + 2); };
+const helpers = ['oracleFlowState', 'flowRounds', 'flowRoundsHTML'].map(fn).join('\n') + '\nlet flowOlderOpen = false;';
 
 function harness(job, version = null) {
   const nodes = new Map();
@@ -24,6 +26,7 @@ function harness(job, version = null) {
     svgText: ({ text, x, y, cls }) => `<text x="${x}" y="${y}" class="${cls}">${text}</text>`,
   });
   vm.runInContext(source.match(/^const esc = .*;$/m)[0], context);
+  vm.runInContext(helpers, context);
   vm.runInContext(flowSource, context);
   return { get, context, draw() { vm.runInContext('drawFlow()', context); return get('flow').innerHTML; } };
 }

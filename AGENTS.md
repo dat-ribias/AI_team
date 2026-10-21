@@ -8,6 +8,7 @@
 - Với `locales/*.json`, chỉ THÊM key, không sắp xếp lại; thêm NGAY SAU key cùng tiền tố (ví dụ `ui.jobs.*` cạnh `ui.jobs.*`), KHÔNG thêm vào cuối file vì mọi job cùng chèn ở cuối nên luôn xung đột khi merge. Kiểm tra `JSON.parse` và mojibake (`Ã`, `á»`, `\uFFFD`) sau khi sửa.
 - Nhiều job cùng sửa `src/team.js`, `public/app.js`, `locales`; không format lại hoặc di chuyển code ngoài vùng được giao.
 - Công việc UI phải có ảnh desktop và mobile.
+- Việc tham khảo/so sánh/tổng hợp kiến thức chung (sản phẩm, thiết kế, best practice) hỏi ChatGPT web trước; agent chỉ tự đọc web để kiểm chứng nguồn hoặc phần còn thiếu.
 
 ## Luồng công việc (Lead áp dụng khi lập plan)
 - Một job = một tính năng. Goal có nhiều mục độc lập thì đề xuất tách job trong summary thay vì gom vào một plan lớn.

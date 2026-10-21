@@ -17,25 +17,12 @@ import { validatePreview, previewEnv, startServer, waitReady, freePort, stopTree
 
 import { fixture, settle, approvalAgent, branchReady, branchCommit, branchTip, processAlive, previewFixture, parallelTeam, overlaps } from './system-helpers.js';
 
-test('oracle: CLI errors, rate limit, captcha, login, timeout and cancellation fail briefly', async () => {
-  for (const [script, message] of [
-    ['process.exit(2)', /exit 2/],
-    ["console.log('Too many requests')", /Too many requests/],
-    ["console.log('captcha')", /captcha/],
-    ["console.log('Please log in')", /not logged in/],
-    ["console.log('Session: timeout-session'); setTimeout(() => {}, 10000)", /timeout/],
-    ["console.log('Session: no-answer')", /no answer output/],
-  ]) await assert.rejects(runOracle({ command: [process.execPath, '-e', script, '--'], prompt: 'question', timeoutMs: script.includes('setTimeout') ? 300 : 5000 }), message);
-  const abort = new AbortController(); abort.abort(new Error('cancel oracle'));
-  await assert.rejects(runOracle({ command: [process.execPath, '-e', 'setTimeout(() => {}, 10000)', '--'], prompt: 'question', signal: abort.signal }), /cancel oracle/);
-});
-
 test('oracle: separate accounts run concurrently and a cancelled waiter retains the active lock', async t => {
   const f = await fixture(); f.config.oracle = { enabled: true, accounts: [{ id: 'one', args: ['one'] }, { id: 'two', args: ['two'] }] };
   let release, started = 0;
   const gate = new Promise(resolve => { release = resolve; });
   const team = new Team(f.config, f.data, { runOracle: async input => {
-    started++; await gate; return { answer: 'opinion', session: input.args[0] };
+    started++; await gate; return { answer: 'opinion', session: input.account };
   } }); t.after(async () => { release(); await team.close(); });
   const jobs = [];
   for (const goal of ['First', 'Second', 'Waiter', 'Next']) {
@@ -347,6 +334,11 @@ test('lead can pick research (no merge, ends with a conclusion) or a light code 
   assert.equal(done.revision, done.base); // không sửa code
   assert(team.events(research.id).some(e => e.type === 'CONCLUSION'));
   await assert.rejects(team.merge(research.id));
+  // Chỉ dẫn mới vào job nghiên cứu đã có kết luận: nghiên cứu tiếp thay vì bị bỏ qua.
+  await team.control(research.id, 'message', { message: 'Đào sâu phương án 2' });
+  assert.equal(team.get(research.id).status, 'queued');
+  const again = await settle(team, research.id, 'done');
+  assert.equal(team.events(research.id).filter(e => e.type === 'CONCLUSION').length, 2); assert(again.conclusion?.conclusion);
   const light = await team.create({ project: 'test', goal: 'light: Update hello' });
   const ready = await settle(team, light.id, 'ready');
   assert.equal(ready.rigor, 'light'); assert.equal(ready.verified, null);

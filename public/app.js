@@ -76,9 +76,57 @@ function gitOf(job) { return job.git && (job.git.status === undefined || job.git
 function jobStatusLabel(job) { const g = gitOf(job); return g ? t(`ui.gitState.${g.state}`) : statusLabel(job.status); }
 function badge(job) { return `<span class="status ${esc(gitOf(job)?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
 
+function dependencyOptions(project, ids = [], exclude) {
+  return state.jobs.filter(j => j.project === project && j.id !== exclude && (exclude && ids.includes(j.id) || ['queued', 'running', 'waiting', 'paused', 'blocked', 'ready', 'merging'].includes(j.status))).map(j => `<option value="${esc(j.id)}" ${ids.includes(j.id) ? 'selected' : ''}>#${esc(j.id)} · ${esc(jobTitle(j))}</option>`).join('');
+}
+function loadDependencies() {
+  const ids = [...$('depends-on').selectedOptions].map(option => option.value);
+  $('depends-on').innerHTML = dependencyOptions($('project').value, ids);
+}
+function dependencyHTML(job) {
+  const chips = (job.depends || []).map(dep => `<span class="depends-chip ${dep.met ? 'met' : ''}">${dep.met ? '✓' : '⏳'} #${esc(dep.id)} ${esc(dep.title)} · ${esc(t('ui.depends.reason.' + (dep.met ? 'met' : dep.reason || 'not_merged')))}</span>`).join('');
+  const waiting = job.blockedReason?.kind === 'depends' ? `<span class="depends-wait">${esc(t('ui.job.dependsWaiting', { ids: (job.blockedReason.ids || []).map(id => '#' + id).join(', '), branch: job.baseBranch }))}</span>` : '';
+  const queue = job.mergeQueue ? `<span class="depends-chip">${esc(t('ui.merge.queuePosition', { n: job.mergeQueue.position }))} · ${esc(job.mergeQueue.branch)}</span>${job.mergeQueue.wait === 'acceptance' ? `<span class="depends-wait">${esc(t('ui.merge.waitAcceptance'))}</span>` : ''}` : '';
+  return chips || waiting || queue ? `<span class="depends-summary" aria-label="${esc(t('ui.job.depends'))}">${chips}${waiting}${queue}</span>` : '';
+}
+function planRelatedHTML(job) {
+  const related = (job.relatedJobs || []).map((item, i) => `<fieldset class="plan-related-item"><legend>#${esc(item.id)} · ${esc(jobTitle(state.jobs.find(j => j.id === item.id) || { title: item.id }))}</legend><p>${esc(item.reason)} · ${esc(t(item.mode === 'sequential' ? 'ui.plan.relatedSequential' : 'ui.plan.relatedParallel'))}</p>${['sequential', 'parallel'].map(mode => `<label><input type="radio" name="related-${i}" data-related="${esc(item.id)}" value="${mode}"> ${esc(t(mode === 'sequential' ? 'ui.plan.relatedSequential' : 'ui.plan.relatedParallel'))}</label>`).join('')}</fieldset>`).join('');
+  const overlap = (job.planOverlap || []).map(item => `<p class="plan-overlap">${esc(t('ui.plan.overlap', { id: item.id, files: (item.files || []).join(', ') }))}</p>`).join('');
+  return `${related ? `<section class="plan-related"><h3>${esc(t('ui.plan.related'))}</h3>${related}</section>` : ''}${overlap}`;
+}
+function selectedRelated() {
+  return Object.fromEntries([...$('inspector').querySelectorAll('[data-related]:checked')].map(input => [input.dataset.related, input.value]));
+}
+async function editDependencies(job) {
+  const d = document.createElement('dialog');
+  d.className = 'depends-dialog';
+  const ids = (job.depends || []).map(dep => dep.id);
+  d.innerHTML = `<form><h2>${esc(t('ui.job.dependsEdit'))}</h2><label for="edit-depends">${esc(t('ui.task.dependsOn'))}</label><select id="edit-depends" multiple size="6" aria-describedby="edit-depends-hint">${dependencyOptions(job.project, ids, job.id)}${ids.filter(id => !state.jobs.some(j => j.id === id)).map(id => `<option value="${esc(id)}" selected>#${esc(id)}</option>`).join('')}</select><p id="edit-depends-hint" class="muted">${esc(t('ui.task.dependsHint'))}</p><div class="controls"><button type="button" data-close>${esc(t('ui.common.close'))}</button><button class="primary" type="submit">${esc(t('ui.common.ok'))}</button></div></form>`;
+  document.body.append(d); d.addEventListener('close', () => d.remove());
+  d.querySelector('[data-close]').onclick = () => d.close();
+  d.querySelector('form').onsubmit = e => { e.preventDefault(); attempt(async () => {
+    const button = d.querySelector('[type="submit"]'); button.disabled = true;
+    try { await api(`jobs/${job.id}/control`, { action: 'set-depends', ids: [...d.querySelector('select').selectedOptions].map(option => option.value) }); d.close(); await refresh(); } finally { button.disabled = false; }
+  }); };
+  d.showModal();
+}
+function wireDependencies(job) {
+  if ($('depends-edit')) $('depends-edit').onclick = () => editDependencies(job);
+  $('inspector').querySelectorAll('[data-depends-action]').forEach(button => button.onclick = () => attempt(async () => {
+    button.disabled = true;
+    try {
+      if (!await ask(button.textContent + '?', { danger: button.dataset.dependsAction === 'cancel' })) return;
+      const action = button.dataset.dependsAction;
+      await api(`jobs/${job.id}/control`, action === 'set-depends' ? { action, ids: (job.depends || []).filter(dep => !['cancelled', 'deleted'].includes(dep.reason)).map(dep => dep.id) } : { action });
+      await refresh();
+    } finally { button.disabled = false; }
+  }));
+}
+
 let decisionNewIds = new Set(), reconcilePending;
 function decisionId(item) { return item.kind === 'orphans' ? 'orphans' : item.jobId; }
 function decisionReason(item) {
+  if (item.kind === 'depends_broken') return t('ui.decisions.depends_broken', { ids: (item.deps || []).map(id => '#' + id).join(', ') });
   if (item.kind === 'orphans') return t('ui.decisions.orphans', { n: item.count });
   if (['base_moved', 'conflict', 'tests_failed', 'cancelled_unmerged'].includes(item.kind || item.state)) return t(`ui.decisions.${item.kind || item.state}`, { files: (item.files || []).join(', ') });
   return item.reason || t(`ui.gitState.${item.state}`);
@@ -526,6 +574,7 @@ $('close-cleanup').onclick = () => $('cleanup-dialog').close();
 
 function drawState() {
   $('oracle-mode').value = state.oracle?.mode || 'off';
+  $('oracle-research-mode').value = state.oracle?.researchMode || 'required';
   $('oracle-mode').title = t('ui.settings.oracleHint') + (!state.oracle?.accounts ? ' ' + t('ui.settings.oracleUnavailable') : '');
   names = { controller: 'Controller', user: t('ui.who.user'), team: t('ui.who.team'), ...Object.fromEntries(state.agents.map(a => [a.id, a.label])) };
   $('stale').hidden = !state.stale;
@@ -572,7 +621,38 @@ function drawState() {
   drawInspector(); drawQuota(); drawLogin();
 }
 
-let jobsFilter = 'all', jobsSearchQuery = '', jobsProject = '';
+let jobsSearchQuery = '', jobsProject = '', jobsMine = false, jobsDoneAll = false, jobsView = store.get('jobsView') === 'list' ? 'list' : 'board';
+const LANES = ['needs', 'active', 'waiting', 'returned', 'done'], LANE_ICON = { needs: '⚑', active: '▶', waiting: '⏳', returned: '↺', done: '✓' };
+// Xếp mỗi job vào đúng 1 cột của board theo dữ liệu thật; thứ tự ưu tiên: kết thúc > cần chủ > hàng merge > vòng sửa > đang chạy > đang đợi.
+function jobLane(j) {
+  const g = gitOf(j), max = state.limits?.rounds ?? 3;
+  if (j.status === 'merged') return { lane: 'done', reason: t('ui.board.reason.merged') };
+  if (j.status === 'done') return { lane: 'done', reason: t('ui.board.reason.concluded') };
+  if (j.status === 'cancelled') return { lane: 'done', reason: t('ui.board.reason.cancelled') };
+  if (g?.state === 'merge_stuck' || j.status === 'ready' && j.mergeFailure) return { lane: 'needs', reason: t('ui.board.reason.mergeStuck', { why: j.mergeFailure?.kind || g?.reason || '' }), action: 'error' };
+  if (j.status === 'waiting' && j.planGate) return { lane: 'needs', reason: t('ui.board.reason.plan', { v: j.planGate.version }), action: 'plan' };
+  if (j.status === 'waiting' && j.questions?.length) return { lane: 'needs', reason: t('ui.board.reason.questions', { n: j.questions.length }), action: 'answer' };
+  if (j.status === 'waiting' && j.blockedReason?.kind === 'depends') return { lane: 'waiting', reason: t('ui.board.reason.depends', { ids: (j.blockedReason.ids || []).map(x => '#' + x.slice(0, 8)).join(', ') }) };
+  if (j.status === 'waiting' && j.peerWait) return { lane: 'active', reason: t('ui.board.reason.peer') };
+  if (j.status === 'ready') return { lane: 'needs', reason: t(j.mergeQueue ? 'ui.board.reason.queued' : 'ui.board.reason.ready', { n: j.mergeQueue?.position }), action: j.mergeQueue ? null : 'merge' };
+  if (j.status === 'blocked') return { lane: 'needs', reason: t('ui.board.reason.blocked', { why: cut(j.error || j.reason || '', 90) }), action: 'error' };
+  if (j.round > 0 && ['running', 'queued', 'paused', 'waiting', 'merging'].includes(j.status)) return { lane: 'returned', reason: t('ui.board.reason.round', { n: j.round, max }) + (j.planTrigger ? ' · ' + cut(j.planTrigger, 70) : '') };
+  if (['running', 'merging'].includes(j.status)) return { lane: 'active', reason: jobWorker(j) || statusLabel(j.status) };
+  if (j.status === 'paused') return { lane: 'waiting', reason: t('ui.board.reason.paused') };
+  return { lane: 'waiting', reason: t('ui.board.reason.queuedRun') };
+}
+const jobAvatar = id => { const n = names[id] || id || '?'; return `<span class="av chat-avatar ${hueClass(id)}" title="${esc(n)}">${esc(String(n).slice(0, 1).toUpperCase())}</span>`; };
+function jobCardHTML(j, info, showProject) {
+  const people = [...new Set([...runningOf(j).map(r => r.agent), ...(j.tasks || []).map(x => x.ranBy || x.agent)].filter(Boolean))].slice(0, 4);
+  const done = (j.tasks || []).filter(x => x.done).length, total = (j.tasks || []).length;
+  const action = info.action ? `<button type="button" class="jcard-action ${info.lane === 'needs' ? 'primary' : ''}" data-job-open="${esc(j.id)}">${esc(t('ui.board.action.' + info.action))}</button>` : '';
+  return `<article class="jcard lane-${info.lane} ${j.id === selected ? 'selected' : ''} ${runningOf(j).length ? 'working' : ''}" data-job-select="${esc(j.id)}" tabindex="0" role="button" aria-label="${esc(jobTitle(j))}">
+    <div class="jcard-title">${esc(jobTitle(j))}</div>
+    <div class="jcard-meta"><span>#${esc(j.id.slice(0, 8))}</span>${showProject ? `<span>${esc(j.project)}</span>` : ''}<span class="chip">${esc(t(j.kind === 'research' ? 'ui.board.kind.research' : 'ui.board.kind.code'))}</span>${j.risk === 'high' ? `<span class="chip risk">${esc(t('ui.board.risk'))}</span>` : ''}${j.mergeQueue ? `<span class="chip">${esc(t('ui.merge.queuePosition', { n: j.mergeQueue.position }))}</span>` : ''}</div>
+    <div class="jcard-reason">${esc(info.reason)}</div>
+    <div class="jcard-foot"><span class="avs">${people.map(jobAvatar).join('')}</span>${total ? `<span class="muted">${esc(t('ui.jobs.tasks', { done, total }))}</span>` : ''}<time class="muted">${esc(clock(j.updatedAt || j.createdAt))}</time>${action}${deletable(j) && info.lane === 'done' ? `<button type="button" class="danger-ghost jcard-del" data-job-delete="${esc(j.id)}" aria-label="${esc(t('ui.inspector.delete'))}">×</button>` : ''}</div>
+  </article>`;
+}
 
 // Thứ tự merge của dự án: job code chưa vào nhánh gốc, job được nhắc mã (#id) trong goal/lý do/tin nhắn của job khác phải merge trước, còn lại theo giờ tạo.
 // ponytail: phụ thuộc đoán từ việc nhắc mã job; thay bằng phụ thuộc khai báo khi e778ed40 xong.
@@ -594,12 +674,13 @@ function drawJobsList() {
   const showList = sessionJobs.slice(0, maxSidebar);
   const hasMore = sessionJobs.length > maxSidebar;
 
-  $('job-list').innerHTML = (showList.length ? showList.map(j => `
+  const needs = sessionJobs.filter(j => jobLane(j).lane === 'needs').length;
+  $('job-list').innerHTML = (needs ? `<button type="button" class="needs-you" id="needs-you">⚑ ${esc(t('ui.board.needsYou', { n: needs }))}</button>` : '') + (showList.length ? showList.map(j => `
     <button class="job-button ${j.id === selected ? 'selected' : ''} ${runningOf(j).length ? 'working' : ''} ${j.status === 'blocked' ? 'blocked' : ''}" data-job="${esc(j.id)}" title="${esc(jobTitle(j))}">
       ${order.has(j.id) ? `<span class="merge-queue-n ${j.status === 'ready' && !queue[order.get(j.id)].waits.length ? 'merge-next' : ''}" title="${esc(t('ui.mergeQueue.title'))}">${order.get(j.id) + 1}</span>` : `<span class="job-dot-status ${j.status}"></span>`}
       <div class="job-button-content">
         <strong>${esc(jobTitle(j))}</strong>
-        <small>${badge(j)}<span class="job-list-meta"> · ${esc([order.has(j.id) && queue[order.get(j.id)].waits.length ? t('ui.mergeQueue.waits', { ids: queue[order.get(j.id)].waits.map(x => '#' + x.slice(0, 8)).join(', ') }) : '', state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
+        <small>${badge(j)}${dependencyHTML(j)}<span class="job-list-meta"> · ${esc([order.has(j.id) && queue[order.get(j.id)].waits.length ? t('ui.mergeQueue.waits', { ids: queue[order.get(j.id)].waits.map(x => '#' + x.slice(0, 8)).join(', ') }) : '', state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
       </div>
     </button>
   `).join('') : `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`)
@@ -611,12 +692,14 @@ function drawJobsList() {
   document.querySelectorAll('[data-away]').forEach(b => b.onclick = () => gotoJob(b.dataset.away));
   document.querySelectorAll('[data-job]').forEach(b => b.onclick = () => { if ($('jobs-dialog')?.open) $('jobs-dialog').close(); gotoJob(b.dataset.job); }); // chuyển luôn sang phiên của việc
 
+  if ($('needs-you')) $('needs-you').onclick = () => openJobsDialog(true);
   const moreBtn = $('sidebar-more-jobs');
   if (moreBtn) moreBtn.onclick = () => openJobsDialog();
 }
 
-function openJobsDialog() {
+function openJobsDialog(mine = false) {
   jobsProject = curProject; // mặc định chỉ hiện job của dự án đang mở
+  jobsMine = mine; jobsDoneAll = false;
   $('jobs-dialog').showModal();
   drawJobsDialog();
 }
@@ -628,74 +711,28 @@ function drawJobsDialog() {
   const allJobs = (state.jobs || []).filter(j => !jobsProject || j.project === jobsProject);
   const q = (jobsSearchQuery || '').trim().toLowerCase();
 
-  const counts = {
-    all: allJobs.length,
-    running: allJobs.filter(j => ['running', 'queued'].includes(j.status)).length,
-    ready: allJobs.filter(j => j.status === 'ready').length,
-    done: allJobs.filter(j => ['done', 'merged'].includes(j.status)).length,
-    cancelled: allJobs.filter(j => ['cancelled', 'blocked', 'failed'].includes(j.status)).length,
-  };
-
-  if ($('count-all')) $('count-all').textContent = counts.all;
-  if ($('count-running')) $('count-running').textContent = counts.running;
-  if ($('count-ready')) $('count-ready').textContent = counts.ready;
-  if ($('count-done')) $('count-done').textContent = counts.done;
-  if ($('count-cancelled')) $('count-cancelled').textContent = counts.cancelled;
-  if ($('jobs-dialog-sub')) $('jobs-dialog-sub').textContent = t('ui.metric.jobsNote', { running: counts.running, ready: counts.ready });
-
   // Gõ mã job (hex) mà có job trùng mã thì chỉ hiện job đó, không lẫn các job có nhắc mã ấy trong mục tiêu.
   const idHits = /^#?[0-9a-f]{4,}$/.test(q) ? allJobs.filter(j => j.id.startsWith(q.replace('#', ''))) : [];
-  const filtered = idHits.length ? idHits : allJobs.filter(j => {
-    if (jobsFilter === 'running' && !['running', 'queued'].includes(j.status)) return false;
-    if (jobsFilter === 'ready' && j.status !== 'ready') return false;
-    if (jobsFilter === 'done' && !['done', 'merged'].includes(j.status)) return false;
-    if (jobsFilter === 'cancelled' && !['cancelled', 'blocked', 'failed'].includes(j.status)) return false;
-    if (q) {
-      const matchTitle = jobTitle(j).toLowerCase().includes(q);
-      const matchGoal = (j.goal || '').toLowerCase().includes(q);
-      const matchId = (j.id || '').toLowerCase().includes(q);
-      const matchBranch = (j.branch || '').toLowerCase().includes(q);
-      const matchProject = (j.project || '').toLowerCase().includes(q);
-      const matchAgent = (names[j.current?.agent] || j.current?.agent || '').toLowerCase().includes(q);
-      if (!matchTitle && !matchGoal && !matchId && !matchBranch && !matchProject && !matchAgent) return false;
-    }
-    return true;
-  });
-
+  const matches = j => !q || [jobTitle(j), j.goal, j.id, j.branch, j.project, ...runningOf(j).map(r => names[r.agent] || r.agent), names[j.current?.agent]].some(v => String(v || '').toLowerCase().includes(q));
+  const cards = (idHits.length ? idHits : allJobs.filter(matches)).map(j => ({ j, info: jobLane(j) })).filter(x => !jobsMine || x.info.lane === 'needs');
+  const by = Object.fromEntries(LANES.map(l => [l, cards.filter(x => x.info.lane === l)]));
+  const needs = allJobs.filter(j => jobLane(j).lane === 'needs').length;
+  if ($('jobs-dialog-sub')) $('jobs-dialog-sub').textContent = t('ui.board.sub', { needs, active: allJobs.filter(j => jobLane(j).lane === 'active').length, total: allJobs.length });
+  document.querySelectorAll('[data-jobs-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.jobsView === jobsView)));
+  if ($('jobs-mine')) $('jobs-mine').checked = jobsMine;
   const listEl = $('jobs-dialog-list');
   if (!listEl) return;
-  if (!filtered.length) {
-    listEl.innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t('ui.jobs.noMatch'))}</b></div>`;
-    return;
-  }
-
-  const openGoals = new Set([...listEl.querySelectorAll('details[open]')].map(d => d.dataset.jobGoal));
-  listEl.innerHTML = filtered.map(j => {
-    const isSelected = j.id === selected;
-    const session = state.sessions.find(x => x.id === j.sessionId)?.name;
-    const tasksDone = j.taskIndex ?? 0;
-    const tasksTotal = j.tasks?.length ?? 0;
-    return `
-      <div class="job-card ${isSelected ? 'selected' : ''}" data-job-select="${esc(j.id)}">
-        <div class="job-card-head">
-          <strong class="job-card-title" title="${esc(jobTitle(j))}">${esc(jobTitle(j))}</strong>
-          ${badge(j)}
-          <time class="muted">${esc(clock(j.updatedAt || j.createdAt))}</time>
-        </div>
-        <div class="job-card-row">
-          <div class="job-card-meta" title="${esc([j.project, session, jobWorker(j)].filter(Boolean).join(' · '))}">
-            ${esc([j.project, session, jobWorker(j), '#' + j.id.slice(0, 8), t('ui.jobs.tasks', { done: tasksDone, total: tasksTotal })].filter(Boolean).join(' · '))}
-          </div>
-          <details data-job-goal="${esc(j.id)}" ${openGoals.has(j.id) ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(j.goal)}</p></details>
-          <div class="job-card-actions">
-            ${deletable(j) ? `<button type="button" class="danger-ghost" data-job-delete="${esc(j.id)}">${esc(t('ui.inspector.delete'))}</button>` : ''}
-            <button type="button" class="${isSelected ? 'primary-ghost' : 'primary'}" data-job-open="${esc(j.id)}">${esc(t(isSelected ? 'ui.jobs.selected' : 'ui.jobs.select'))}</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
-
+  listEl.classList.toggle('board', jobsView === 'board');
+  if (!cards.length) { listEl.innerHTML = `<div class="empty"><span class="empty-icon">⌁</span><b>${esc(t(jobsMine ? 'ui.board.nothingForYou' : 'ui.jobs.noMatch'))}</b></div>`; return; }
+  const showProject = !jobsProject, limit = l => l === 'done' && !jobsDoneAll ? 8 : Infinity;
+  const body = l => by[l].slice(0, limit(l)).map(x => jobCardHTML(x.j, x.info, showProject)).join('') + (by[l].length > limit(l) ? `<button type="button" class="board-more" data-jobs-more>${esc(t('ui.board.more', { n: by[l].length - limit(l) }))}</button>` : '') || `<p class="muted board-empty">${esc(t('ui.board.empty'))}</p>`;
+  const head = l => `<span class="lane-icon" aria-hidden="true">${LANE_ICON[l]}</span>${esc(t('ui.board.lane.' + l))}<span class="board-col-count">${by[l].length}</span>`;
+  const lanes = LANES.filter(l => !jobsMine || l === 'needs');
+  listEl.innerHTML = jobsView === 'board'
+    ? `<div class="jobs-board">${lanes.map(l => `<section class="board-col lane-${l}" aria-label="${esc(t('ui.board.lane.' + l))}"><h3 class="board-col-head">${head(l)}</h3><div class="board-col-body">${body(l)}</div></section>`).join('')}</div>`
+    : lanes.filter(l => by[l].length).map(l => `<details class="jobs-group lane-${l}" ${l === 'done' ? '' : 'open'}><summary>${head(l)}</summary><div class="jobs-group-body">${body(l)}</div></details>`).join('');
+  listEl.querySelectorAll('[data-jobs-more]').forEach(b => b.onclick = e => { e.stopPropagation(); jobsDoneAll = true; drawJobsDialog(); });
+  listEl.querySelectorAll('[data-job-select]').forEach(el => el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
   listEl.querySelectorAll('details').forEach(el => el.onclick = e => e.stopPropagation());
   listEl.querySelectorAll('[data-job-delete]').forEach(el => el.onclick = e => { e.stopPropagation(); attempt(async () => {
     if (!await ask(t('ui.inspector.confirmDelete'), { ok: t('ui.inspector.delete'), danger: true })) return;
@@ -831,18 +868,22 @@ async function saveSlot() {
 // Sơ đồ dựng lại từ roster + plan của task đang chọn: thêm member hay Manager đổi người là tự vẽ lại.
 function oracleFlowState(job) {
   const turns = job?.oracle?.turns || [], last = turns.at(-1);
+  const builderIds = [...new Set(turns.filter(turn => turn.role === 'builder').map(turn => turn.by).filter(Boolean))];
+  const pending = turn => !!turn && turn.a === undefined && !turn.error && !turn.code && job?.status === 'running';
   const idle = !turns.length && ['ready', 'done', 'merged', 'cancelled', 'failed'].includes(job?.status);
   const failed = turns.filter(x => x.error || x.code).length, ok = turns.filter(x => x.a !== undefined && !x.error && !x.code).length;
   return {
-    visible: !!job && (!!job.oracle || (job.oracleMode || state.oracle?.mode || 'off') !== 'off'),
-    working: !!last && last.a === undefined && !last.error && !last.code && job.status === 'running' && job.stage === 'plan',
+    visible: !!job && (turns.length > 0 || pending(last)), // chỉ vẽ khi thật sự có hỏi; Lead không hỏi thì ghi chú ở tiêu đề vòng
+    working: pending(last),
+    leadWorking: last?.role !== 'builder' && pending(last),
+    builderIds, pendingBuilders: builderIds.filter(id => pending(turns.filter(turn => turn.role === 'builder' && turn.by === id).at(-1))),
     idle, failed,
     subtitle: idle ? t('ui.oracle.notAsked') + (job.oracle?.skipReason ? ' · ' + job.oracle.skipReason : '') : t('ui.oracle.turnCount', { n: turns.length, ok, failed }),
   };
 }
 function oracleSeconds(ms) { return ms == null ? '—' : t('ui.oracle.seconds', { n: tokenNumber(ms / 1000) }); }
 function oracleError(result) {
-  const code = ['not_logged_in', 'timeout', 'captcha', 'rate_limited', 'disabled', 'error'].includes(result.code) ? result.code : 'error';
+  const code = ['not_logged_in', 'timeout', 'captcha', 'rate_limited', 'disabled', 'browser_missing', 'error'].includes(result.code) ? result.code : 'error';
   return t('ui.oracle.error.' + code) + (result.error ? ' · ' + result.error : '');
 }
 function openOracle(job) {
@@ -853,8 +894,9 @@ function openOracle(job) {
 let oracleTestBusy = false;
 function openOracleTest() {
   if (!oracleTestBusy) {
-    $('oracle-test-results').innerHTML = (state.oracle?.accountIds || []).map(id => `<article class="oracle-test-row"><h3>${esc(id)}</h3><button type="button" data-oracle-test="${esc(id)}">${esc(t('ui.oracle.test'))}</button><div data-oracle-result="${esc(id)}" role="status"></div></article>`).join('') || `<p>${esc(t('ui.settings.oracleUnavailable'))}</p>`;
+    $('oracle-test-results').innerHTML = (state.oracle?.accountIds || []).map(id => `<article class="oracle-test-row"><h3>${esc(id)}</h3><button type="button" data-oracle-login="${esc(id)}">${esc(t('ui.oracle.login'))}</button><button type="button" data-oracle-test="${esc(id)}">${esc(t('ui.oracle.test'))}</button><div data-oracle-result="${esc(id)}" role="status"></div></article>`).join('') || `<p>${esc(t('ui.settings.oracleUnavailable'))}</p>`;
     $('oracle-test-results').querySelectorAll('[data-oracle-test]').forEach(button => button.onclick = () => testOracleAccounts([button.dataset.oracleTest]));
+    $('oracle-test-results').querySelectorAll('[data-oracle-login]').forEach(button => button.onclick = () => attempt(async () => { button.disabled = true; try { await api('oracle/login', { account: button.dataset.oracleLogin }); const out = $('oracle-test-results').querySelector(`[data-oracle-result="${CSS.escape(button.dataset.oracleLogin)}"]`); if (out) out.textContent = t('ui.oracle.loginOpened'); } finally { button.disabled = false; } }));
     $('oracle-test-all').disabled = !state.oracle?.accountIds?.length;
   }
   $('oracle-test-dialog').showModal();
@@ -881,9 +923,10 @@ async function testOracleAccounts(accounts) {
   } finally { oracleTestBusy = false; buttons.forEach(button => button.disabled = false); }
 }
 function oracleStatsHTML(report) {
-  const keys = ['asks', 'ok', 'failed', 'avgMs', 'auto'], value = (row, key) => key === 'avgMs' ? oracleSeconds(row[key]) : tokenNumber(row[key]);
-  const table = (kind, rows) => `<section><h4>${esc(t('ui.oracle.' + kind))}</h4><div class="token-table-wrap"><table><thead><tr><th scope="col">${esc(t('ui.token.name'))}</th>${keys.map(key => `<th scope="col">${esc(t('ui.oracle.' + key))}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${kind === 'byJob' ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(row.title || row.key)}</a>` : esc(row.key)}</th>${keys.map(key => `<td>${esc(value(row, key))}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="6">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
-  return `<section class="panel oracle-stats"><h3>${esc(t('ui.oracle.title'))}</h3><div class="token-totals">${keys.map(key => `<div class="metric"><span>${esc(t('ui.oracle.' + key))}</span><strong>${esc(value(report.totals, key))}</strong></div>`).join('')}</div>${['byDay', 'byJob', 'byProject'].map(kind => table(kind, report[kind] || [])).join('')}</section>`;
+  const keys = ['asks', 'ok', 'failed', 'avgMs', 'auto', 'lead', 'builder'], value = (row, key) => key === 'avgMs' ? oracleSeconds(row[key]) : tokenNumber(row[key]);
+  const table = (kind, rows) => `<section><h4>${esc(t('ui.oracle.' + kind))}</h4><div class="token-table-wrap"><table><thead><tr><th scope="col">${esc(t('ui.token.name'))}</th>${keys.map(key => `<th scope="col">${esc(t('ui.oracle.' + key))}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${kind === 'byJob' ? `<a href="#token" data-token-job="${esc(row.key)}">${esc(row.title || row.key)}</a>` : esc(row.key)}</th>${keys.map(key => `<td>${esc(value(row, key))}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${keys.length + 1}">${esc(t('ui.token.empty'))}</td></tr>`}</tbody></table></div></section>`;
+  const savings = report.savings ? `<section class="oracle-savings"><h4>${esc(t('ui.oracle.savings'))}</h4><div class="token-totals">${['calls', 'tokens'].map(key => `<div class="metric"><span>${esc(t('ui.oracle.savings.' + key))}</span><strong>${esc(tokenNumber(report.savings[key]))}</strong></div>`).join('')}</div><p class="muted">${esc(t('ui.oracle.savings.formula', { n: tokenNumber(report.savings.tokensPerCall) }))}</p></section>` : '';
+  return `<section class="panel oracle-stats"><h3>${esc(t('ui.oracle.title'))}</h3><div class="token-totals">${keys.map(key => `<div class="metric"><span>${esc(t('ui.oracle.' + key))}</span><strong>${esc(value(report.totals, key))}</strong></div>`).join('')}</div>${savings}${['byDay', 'byJob', 'byProject'].map(kind => table(kind, report[kind] || [])).join('')}</section>`;
 }
 async function drawOracleStats(query, request) {
   try {
@@ -893,6 +936,32 @@ async function drawOracleStats(query, request) {
     if (request === tokenRequest) $('oracle-stats').innerHTML = `<p class="muted oracle-stats-error">${esc(t('ui.oracle.statsError'))}: ${esc(error.message)}</p>`;
   }
 }
+// Các vòng ĐÃ QUA của job (vòng hiện tại do drawFlow vẽ). Mỗi plan (trừ phản biện) mở một vòng; báo cáo của vòng
+// nằm giữa báo cáo plan của nó và của plan kế tiếp. Lý do quay lại lấy từ plan kế tiếp (rework/feedback/escalate).
+// ponytail: vòng sửa xung đột merge không tạo plan nên chưa có hàng riêng; thêm khi cần.
+function flowRounds(job) {
+  const plans = (job?.plans || []).filter(p => p.reason !== 'challenge'), reports = job?.reports || [];
+  const at = plan => reports.findIndex(x => x.stage === 'plan' && x.summary === plan.summary);
+  return plans.slice(0, -1).map((plan, k) => {
+    const next = plans[k + 1], from = at(plan), to = at(next);
+    const part = reports.slice(from < 0 ? 0 : from + 1, to < 0 ? reports.length : to);
+    const builders = [];
+    (plan.tasks || []).forEach((x, i) => { if (x.kind === 'review') return; const id = x.agent, b = builders.find(y => y.id === id) || (builders.push({ id, tasks: [] }), builders.at(-1)); b.tasks.push(i + 1); });
+    const step = stage => { const list = part.filter(x => x.stage === stage); if (!list.length) return null; const last = list.at(-1); return { agent: last.agent, ok: stage === 'test' ? !/^Test failed/i.test(last.summary || '') : last.verdict !== 'changes_requested', findings: last.findings?.length || 0 }; };
+    const cause = next.reason === 'rework' ? (/test failed/i.test(next.trigger || '') ? 'test' : step('verify')?.ok === false ? 'verify' : 'review') : next.reason;
+    return { n: k + 1, version: plan.version, builders, tests: step('test'), review: step('review'), verify: step('verify'), cause, trigger: next.trigger || '' };
+  });
+}
+function flowRoundsHTML(job) {
+  const rounds = flowRounds(job); if (!rounds.length) return '';
+  const who = id => esc(names[id] || id || '—');
+  const node = (label, cls = '') => `<span class="fr-node ${cls}">${label}</span>`;
+  const check = (name, s, failed) => s ? node(`${esc(name)}${s.agent ? ' · ' + who(s.agent) : ''} ${s.ok ? '✓' : '✗'}${s.findings ? ' ' + esc(t('ui.flow.findings', { n: s.findings })) : ''}`, failed ? 'failed' : 'done') : '';
+  const row = r => `<div class="flow-round past"><b class="fr-title">${esc(t('ui.flow.round', { n: r.n }))}</b>${node(esc('Manager'), 'done')}${r.builders.map(b => node(`${who(b.id)} · ${b.tasks.map(n => 'T' + n).join(',')}`, 'done')).join('')}${check('Tests', r.tests, r.cause === 'test')}${check('Review', r.review, r.cause === 'review')}${check('Verify', r.verify, r.cause === 'verify')}<span class="fr-cause">↳ ${esc(t('ui.flow.cause.' + r.cause))}${r.trigger && r.cause !== 'test' ? ' · ' + esc(cut(r.trigger, 80)) : ''}</span></div>`;
+  const old = rounds.slice(0, -1), last = rounds.at(-1);
+  return `<div class="flow-rounds">${old.length ? `<details class="flow-older" ${flowOlderOpen ? 'open' : ''}><summary>${esc(t('ui.flow.olderRounds', { n: old.length }))}</summary>${old.map(row).join('')}</details>` : ''}${row(last)}<b class="fr-title fr-current">${esc(t('ui.flow.round', { n: rounds.length + 1 }))} · ${esc(t('ui.flow.roundCurrent'))}</b></div>`;
+}
+let flowOlderOpen = false;
 function drawFlow() {
   const current = state.jobs.find(j => j.id === selected), plans = current?.plans || [], latest = plans.at(-1);
   if (planView.job !== selected) planView = { job: selected, version: null };
@@ -917,19 +986,22 @@ function drawFlow() {
   gtasks.forEach((x, i) => lv(i));
   const cols = graph ? Math.max(...level) + 1 : 1, colW = 190, shift = (cols - 1) * colW;
   const perCol = Array.from({ length: cols }, (_, c) => level.filter(l => l === c).length);
-  const builders = graph ? [] : r.builders.filter(id => byId[id]), rowH = 68, top = graph ? 46 : 34;
+  const hasTask = id => (job?.tasks || []).some(x => (x.ranBy || x.agent) === id) || (job?.oracle?.turns || []).some(x => x.role === 'builder' && x.by === id);
+  const builders = graph ? [] : r.builders.filter(id => byId[id] && (!job || hasTask(id))), rowH = 68, top = graph ? 46 : 34;
   const oracle = oracleFlowState(job);
-  const H = Math.max(oracle.visible ? 240 : 140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, W = 1260 + shift, nodes = {};
+  const H = Math.max(oracle.visible ? 240 : 140, (graph ? Math.max(...perCol) : builders.length) * rowH + 20), cy = top + H / 2, nodes = {};
   const place = (key, x, y, w = 172) => nodes[key] = { x, y, w };
   place('user', 10, cy, 90);
   place('manager', 140, cy, 172);
   if (oracle.visible) place('oracle', 140, cy + 84, 172);
   builders.forEach((id, i) => place('b:' + id, 365, cy + (i - (builders.length - 1) / 2) * rowH, 172));
   { const seen = Array(cols).fill(0); gtasks.forEach((x, i) => { const c = level[i], k = seen[c]++; place('t:' + i, 365 + c * colW, cy + (k - (perCol[c] - 1) / 2) * rowH, 172); }); }
-  place('tests', 585 + shift, cy, 96);
-  place('reviewer', 730 + shift, cy, 172);
-  place('verifier', 945 + shift, cy, 172);
-  place('merge', 1155 + shift, cy, 92);
+  // Chỉ đặt node có thật trong vòng này: job nghiên cứu không có Tests, bước Manager bỏ thì không vẽ Review/Verify.
+  const research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step) || ['review', 'verify', 'final'].includes(step) && !!job?.flow?.requested?.steps && !job.flow.requested.steps.includes(step) && !job.flow.overrides?.some(o => o.step === step); // Manager đã bỏ (chưa bị ép lại)
+  const chain = [['tests', 96, !research], ['reviewer', 172, !job || !skipped('review')], ['verifier', 172, !job || !skipped('verify')], ['merge', 92, true]].filter(x => x[2]);
+  let cx = builders.length || graph ? 585 + shift : 365;
+  for (const [key, w] of chain) { place(key, cx, cy, w); cx += w + 45; }
+  const first = chain[0][0], Wfit = cx - 35;
   const tasksOf = id => (job?.tasks || []).map((x, i) => ({ ...x, n: i + 1 })).filter(x => (x.ranBy || x.agent) === id);
   const challenge = !readonly && (job?.stage === 'challenge' || runningOf(job).some(r => r.stage === 'challenge'));
   const runs = readonly ? [] : runningOf(job), live = new Set(runs.map(x => graph && x.task != null ? 't:' + x.task : nodeOfRun(x)));
@@ -952,6 +1024,7 @@ function drawFlow() {
     if (substitute) subtitle += ' · ' + t('ui.flow.substitute', { from: names[substitute.from] || substitute.from });
     if (readonly) slot = null;
     const n = nodes[key], a = agentId && byId[agentId];
+    if (!n) return '';
     const h = a ? agentHealth(a) : null;
     const cls = [
       substitute && 'substitute',
@@ -970,29 +1043,34 @@ function drawFlow() {
     const subEl = svgText({ text: subtitle, x: 10, y: 37, cls: 's', maxW: subW, baseSize: 10.5, minSize: 7.8 });
     return `<g class="node ${cls}" ${slot ? `data-slot="${slot}" ${a ? `data-agent="${esc(agentId)}"` : ''} ${task != null ? `data-task="${task}"` : ''} role="button" tabindex="0"` : ''} transform="translate(${n.x},${n.y - 24})"><title>${esc(tip)}${substitute ? '\n' + esc(`${names[substitute.from] || substitute.from} → ${names[substitute.to] || substitute.to}`) : ''}</title><rect width="${n.w}" height="48" rx="8"/><rect class="ring" width="${n.w}" height="48" rx="8" pathLength="100"/>${healthDot}${titleEl}${subEl}</g>`;
   };
-  const rv = nodes.reviewer, mg = nodes.manager, research = job?.kind === 'research', skipped = step => !!job?.skipped?.includes(step) || ['review', 'verify', 'final'].includes(step) && !!job?.flow?.requested?.steps && !job.flow.requested.steps.includes(step) && !job.flow.overrides?.some(o => o.step === step); // Manager đã bỏ (chưa bị ép lại)
   let edges = edge('user', 'manager', 'used');
   // Đồ thị: manager → task gốc, task → task phụ thuộc, task cuối (không ai phụ thuộc) → tests.
   gtasks.forEach((x, i) => {
     const deps = depsOf(x, i).filter(d => gtasks[d]), on = live.has('t:' + i) ? ' active' : '';
     if (!deps.length) edges += edge('manager', 't:' + i, 'used' + on);
     for (const d of deps) edges += edge('t:' + d, 't:' + i, 'used' + on);
-    if (!gtasks.some((y, j) => depsOf(y, j).includes(i))) edges += edge('t:' + i, 'tests', 'used');
+    if (!gtasks.some((y, j) => depsOf(y, j).includes(i))) edges += edge('t:' + i, first, 'used');
   });
   for (const id of builders) {
     const tasks = tasksOf(id), used = !job || tasks.length > 0;
     edges += edge('manager', 'b:' + id, used ? 'used' : 'idle', tasks.map(x => `T${x.n}·k${x.difficulty ?? '?'}${x.done ? '✓' : ''}`).join(' '));
-    edges += edge('b:' + id, 'tests', used ? 'used' : 'idle');
+    edges += edge('b:' + id, first, used ? 'used' : 'idle');
   }
-  edges += edge('tests', 'reviewer', challenge ? 'idle' : 'used') + edge('reviewer', 'verifier', challenge ? 'idle' : 'used') + edge('verifier', 'merge', 'used');
-  edges += `<path class="edge rework ${job?.round && !challenge ? 'used' : ''} ${active.has('rework') ? 'active' : ''}" d="M${rv.x + rv.w / 2} ${rv.y - 24} C${rv.x + rv.w / 2} 4 ${mg.x + mg.w / 2} 4 ${mg.x + mg.w / 2} ${mg.y - 24}"/><text class="edge-label" x="${(rv.x + mg.x + mg.w) / 2}" y="14" text-anchor="middle">${esc(job?.round ? t('ui.flow.reworkRound', { n: job.round, max: state.limits?.rounds ?? 3 }) : t('ui.flow.rework'))}</text>`;
+  if (!builders.length && !graph) edges += edge('manager', first, 'idle');
+  chain.slice(1).forEach(([key], i) => { edges += edge(chain[i][0], key, challenge && key !== 'merge' ? 'idle' : 'used'); });
   // Người review/verify thực tế của job: đã chạy → Manager chọn (flow) → mặc định đội. Bước bị controller ép thêm ghi "bị ép".
   const mgId = (!readonly && job?.substitutes?.manager?.to) || r.manager;
   const rvId = (!readonly && job?.substitutes?.reviewer?.to) || job?.checkers?.reviewer || job?.override?.reviewer || job?.flow?.reviewer || r.reviewer, vfId = (!readonly && job?.substitutes?.verifier?.to) || job?.checkers?.verifier || job?.override?.verifier || job?.flow?.verifier || r.verifier;
   const forced = step => { const o = job?.flow?.overrides?.find(x => x.step === step); return o ? t('ui.flow.forced', { why: o.reasons.join('; ') }) : ''; };
   const named = (role, id) => `${role} · ${byId[id]?.label || '—'}`;
   if (oracle.working) live.add('oracle');
-  if (oracle.visible) edges += `<path class="edge oracle used ${oracle.working ? 'active' : ''}" d="M218 ${cy + 24} L218 ${cy + 60} M234 ${cy + 60} L234 ${cy + 24}"/>`;
+  if (oracle.visible) {
+    edges += `<path class="edge oracle used ${oracle.leadWorking ? 'active' : ''}" d="M218 ${cy + 24} L218 ${cy + 60} M234 ${cy + 60} L234 ${cy + 24}"/>`;
+    for (const id of oracle.builderIds) {
+      const targets = nodes['b:' + id] ? ['b:' + id] : gtasks.map((task, i) => (task.ranBy || task.agent) === id ? 't:' + i : null).filter(Boolean);
+      for (const target of targets) edges += edge('oracle', target, 'oracle used' + (oracle.pendingBuilders.includes(id) ? ' active' : ''));
+    }
+  }
   const oracleSvg = oracle.visible ? box('oracle', t('ui.oracle.title'), oracle.subtitle).replace('class="node ', `class="node oracle-node ${oracle.idle ? 'oracle-idle' : ''} ${oracle.failed ? 'oracle-error' : ''} `).replace('transform=', 'data-oracle role="button" tabindex="0" transform=') : '';
   const nodesSvg = oracleSvg + box('user', t('ui.who.user'), t('ui.flow.goal')) + box('manager', named('Manager', mgId), challenge ? t('ui.results.challenge', { name: names[runs.find(x => x.stage === 'challenge')?.agent] || names[job?.current?.agent] || '—' }) : skipped('plan') ? t('ui.flow.fastPath') : sub(mgId), mgId || null, 'manager')
     + builders.map(id => box('b:' + id, named('Builder', id), sub(id), id, 'builder')).join('')
@@ -1003,7 +1081,11 @@ function drawFlow() {
   // Mỗi cột là một đợt: task cùng cột chạy song song, cột sau chờ cột trước theo mũi tên.
   const waves = graph ? perCol.map((n, c) => `<text class="edge-label wave" x="${365 + c * colW + 86}" y="${top + 4}" text-anchor="middle">${esc(t(n > 1 ? 'ui.flow.waveParallel' : 'ui.flow.wave', { n: c + 1 }))}</text>`).join('') : '';
   const planTasks = plan && !graph ? `<ul class="task-list plan-tasks">${job.tasks.map((x, i) => `<li>${taskDetailHTML(job, x, i)}</li>`).join('')}</ul>` : '';
-  $('flow').innerHTML = history + planTasks + (builders.length || r.manager || graph ? `<svg class="flow ${oracle.visible ? 'oracle-flow' : ''}" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
+  const skipNote = ['review', 'verify'].filter(x => job && skipped(x));
+  const notes = [skipNote.length ? t('ui.flow.skippedSteps', { list: skipNote.join(', ') }) : '', job && !oracle.visible && job.oracle?.skipReason ? t('ui.oracle.notAsked') + ' · ' + job.oracle.skipReason : ''].filter(Boolean);
+  const W = Math.max(Wfit, 700);
+  $('flow').innerHTML = history + planTasks + (readonly ? '' : flowRoundsHTML(job)) + (notes.length ? `<p class="muted flow-notes">${notes.map(esc).join(' · ')}</p>` : '') + (job || builders.length || r.manager || graph ? `<svg class="flow ${oracle.visible ? 'oracle-flow' : ''}" viewBox="0 0 ${W} ${top + H + 6}" role="img" aria-label="${esc(t('ui.flow.aria'))}">${waves}${edges}${nodesSvg}</svg>` : `<p class="muted">${esc(t('ui.flow.empty'))}</p>`);
+  $('flow').querySelectorAll('.flow-older').forEach(d => d.ontoggle = () => { flowOlderOpen = d.open; });
   document.querySelectorAll('[data-plan-version]').forEach(b => b.onclick = () => { const version = Number(b.dataset.planVersion); planView.version = version === latest.version ? null : version; drawState(); });
   // CSP cấm style="" trong markup; đặt qua CSSOM để vòng sáng không giật lại từ đầu mỗi lần vẽ lại.
   const phase = `-${(Date.now() % 2000) / 1000}s`; $('flow').querySelectorAll('rect.ring').forEach(x => { x.style.animationDelay = phase; });
@@ -1056,7 +1138,8 @@ function drawInspector() {
     return `<div class="progress-box"><span class="dot green"></span><div>${lines.join('')}<span class="muted">${esc(eta)}</span>${job.waiting || state.resources.waitingReason ? `<br><span class="muted">${esc(job.waiting || state.resources.waitingReason)}</span>` : ''}</div></div>`;
   })();
   const attachments = job.attachments?.length ? `<p class="muted">📎 ${job.attachments.map(a => esc(a.split('/').pop())).join(', ')}</p>` : '';
-  const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b><button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
+  const relatedSelection = selectedRelated(), relatedGate = $('inspector').querySelector('[data-plan-gate]')?.dataset.planGate;
+  const waiting = job.status === 'waiting' ? job.planGate ? `<div class="questions plan-gate" data-plan-gate="${esc(job.id + ':' + job.planGate.hash)}"><b>${esc(t('ui.plan.waiting', { v: job.planGate.version }))}</b>${planRelatedHTML(job)}<button type="button" class="primary" id="approve-plan">${esc(t('ui.plan.approve'))}</button><p id="plan-feedback-hint" class="muted">${esc(t('ui.plan.feedbackHint'))}</p><textarea id="answer" rows="4" aria-labelledby="plan-feedback-hint" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary-ghost" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : `<div class="questions"><b>${esc(t('ui.question.title'))}</b><ol>${(job.questions || []).map(q => `<li>${esc(q)}</li>`).join('')}</ol><textarea id="answer" rows="4" placeholder="${esc(t('ui.question.placeholder'))}"></textarea><button class="primary" id="send-answer">${esc(t('ui.question.send'))}</button></div>` : '';
   const reworkOpen = $('inspector').querySelector('[data-rework-digest]')?.open;
   const digest = job.reworkDigest;
   const rework = digest ? `<details class="rework-digest" data-rework-digest ${reworkOpen ? 'open' : ''}><summary>${esc(t('ui.rework.title'))} · ${esc(t('ui.rework.summary', { rounds: digest.round, open: digest.open.length, scope: digest.scopeAdds }))}</summary><ol class="rework-rounds">${digest.rounds.map(round => `<li><p>${esc(t('ui.rework.round', { n: round.n, who: names[round.agent] || round.agent, verdict: round.verdict }))} · ${esc(round.stage)}</p><ul>${round.findings.map(finding => `<li><b>${esc(finding.id)}</b> ${esc(finding.claim)} <span class="tag ${finding.origin === 'owner' ? 'rework-owner' : ''}">${esc(t(finding.origin === 'owner' ? 'ui.rework.owner' : finding.origin === 'builder' ? 'ui.rework.builder' : 'ui.rework.unknown'))}</span>${finding.open ? ` <span class="tag rework-open">${esc(t('ui.rework.open'))}</span>` : ''}</li>`).join('')}</ul></li>`).join('')}</ol>${job.handoff ? `<p class="muted">${esc(t('ui.rework.handedOff'))}</p>` : ['blocked', 'waiting'].includes(job.status) ? `<div class="controls"><button type="button" class="primary" data-rework-extra>${esc(t('ui.rework.extraRound'))}</button><button type="button" data-rework-handoff>${esc(t('ui.rework.handoff'))}</button></div>` : ''}</details>` : '';
@@ -1069,7 +1152,10 @@ function drawInspector() {
   const steps = research ? [['Plan', job.tasks.length], [t('ui.kind.research'), job.taskIndex >= job.tasks.length && job.tasks.length], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], [t('ui.flow.conclusion'), job.status === 'done']]
     : [['Plan', job.tasks.length], ['Code', job.revision !== job.base], ['Tests', job.tested === job.revision], ['Review', job.reviewed === job.revision || job.skipped?.includes('review')], ['Verify', job.verified === job.revision || job.skipped?.includes('verify')], ['Merge', job.status === 'merged']];
   const c = job.conclusion, conclusion = c ? `<div class="conclusion"><b>${esc(t('ui.inspector.conclusion'))}</b>${c.confidence ? ` <span class="tag">${esc(t('ui.inspector.confidence', { n: c.confidence }))}</span>` : ''}<p>${esc(c.conclusion)}</p>${c.sources?.length ? `<details><summary>${esc(t('ui.inspector.sources'))} (${c.sources.length})</summary><ul>${c.sources.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}${c.openQuestions?.length ? `<details><summary>${esc(t('ui.inspector.open'))} (${c.openQuestions.length})</summary><ul>${c.openQuestions.map(s => `<li>${esc(s)}</li>`).join('')}</ul></details>` : ''}</div>` : '';
-  $('inspector').innerHTML = `<h2 class="job-title" data-rename tabindex="0" role="button" title="${esc(t('ui.jobs.renameHint'))}">${esc(jobTitle(job))}</h2><details data-inspector-goal ${goalOpen ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details>${badge(job)}${tokenJobLink(job)}${quotaWait}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}${rework}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  const dependencyControls = `${!['done', 'merged', 'cancelled'].includes(job.status) ? `<button type="button" id="depends-edit">${esc(t('ui.job.dependsEdit'))}</button>` : ''}${job.mergeQueue ? `<button type="button" data-depends-action="merge-dequeue">${esc(t('ui.merge.dequeue'))}</button>` : ''}${!['done', 'merged', 'cancelled'].includes(job.status) && (job.depends || []).some(dep => ['cancelled', 'deleted'].includes(dep.reason)) ? `<div class="depends-broken">${[['set-depends', 'ui.depends.drop'], ['cancel', 'ui.depends.cancelJob'], ['depends-wait', 'ui.depends.keepWaiting']].map(([action, key]) => `<button type="button" data-depends-action="${action}">${esc(t(key))}</button>`).join('')}</div>` : ''}`;
+  $('inspector').innerHTML = `<h2 class="job-title" data-rename tabindex="0" role="button" title="${esc(t('ui.jobs.renameHint'))}">${esc(jobTitle(job))}</h2><details data-inspector-goal ${goalOpen ? 'open' : ''}><summary>${esc(t('ui.jobs.showGoal'))}</summary><p class="task-instruction">${esc(job.goal)}</p></details>${badge(job)}${dependencyHTML(job)}${dependencyControls}${tokenJobLink(job)}${quotaWait}${progress}${attachments}${waiting}${conclusion}<dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>${tasks}${risk}<div class="pipeline">${steps.map(([label, done]) => { const sk = job.skipped?.includes(String(label).toLowerCase()); return `<span class="step ${done ? 'done' : ''} ${sk ? 'skipped' : ''}">${sk ? '–' : done ? '✓' : '○'} ${label}${sk ? ' · ' + esc(t('ui.flow.skipped')) : ''}</span>`; }).join('')}</div>${job.error ? `<p class="error-box">${esc(job.error)}</p>` : ''}${rework}<div class="controls"><button data-action="${stopped ? 'resume' : 'pause'}" ${finished ? 'disabled' : ''}>${esc(t(stopped ? 'ui.inspector.resume' : 'ui.inspector.pause'))}</button><button data-action="cancel" ${finished ? 'disabled' : ''}>${esc(t('ui.inspector.cancel'))}</button>${deletable(job) ? `<button data-action="delete">${esc(t('ui.inspector.delete'))}</button>` : ''}<button id="view-diff">${esc(t('ui.common.viewDiff'))}</button><button id="export-job" title="${esc(t('ui.mem.exportTitle'))}">${esc(t('ui.mem.export'))}</button><button data-action="review" ${idle ? '' : 'disabled'}>${esc(t('ui.inspector.rereview'))}</button>${research ? '' : `<button data-action="sync" ${idle ? '' : 'disabled'} title="${esc(t('ui.inspector.syncTitle', { branch: job.baseBranch }))}">${esc(t('ui.inspector.sync'))}</button>`}<select id="reassign" aria-label="${esc(t('ui.inspector.reassign'))}" ${!stopped ? 'disabled' : ''}><option value="">${esc(t('ui.inspector.reassign'))}…</option>${(job.roster || state.roster).builders.map(id => `<option value="${esc(id)}">${esc(names[id] || id)}</option>`).join('')}</select></div>${research ? '' : `<button id="merge" class="primary merge-button" ${job.status !== 'ready' ? 'disabled' : ''}>${esc(t('ui.inspector.merge', { branch: job.baseBranch }))}</button>`}<p class="muted">${esc(t('ui.inspector.note'))}</p>`;
+  wireDependencies(job);
+  if (relatedGate === job.id + ':' + job.planGate?.hash) $('inspector').querySelectorAll('[data-related]').forEach(input => { input.checked = relatedSelection[input.dataset.related] === input.value; });
   if ($('quota-replace')) $('quota-replace').onclick = () => openSlot(br.role, br.agent, br.task ?? undefined, job.id);
   const heading = $('inspector').querySelector('[data-rename]');
   const rename = () => {
@@ -1127,7 +1213,7 @@ function drawInspector() {
   });
   if ($('merge')) $('merge').onclick = () => attempt(openMerge);
   if ($('send-answer')) $('send-answer').onclick = () => attempt(async () => { const v = $('answer').value.trim(); if (!v) return; await api(`jobs/${selected}/control`, { action: 'message', message: v }); await refresh(); });
-  if ($('approve-plan')) $('approve-plan').onclick = () => attempt(async () => { const gate = state.jobs.find(j => j.id === selected)?.planGate; if (!gate) return; await api(`jobs/${selected}/control`, { action: 'approve-plan', version: gate.version, hash: gate.hash }); await refresh(); });
+  if ($('approve-plan')) $('approve-plan').onclick = () => attempt(async () => { const gate = state.jobs.find(j => j.id === selected)?.planGate; if (!gate) return; await api(`jobs/${selected}/control`, { action: 'approve-plan', version: gate.version, hash: gate.hash, related: selectedRelated() }); await refresh(); });
 }
 async function showDiff() { const result = await api(`jobs/${selected}/diff`); $('diff-content').textContent = result.diff || t('ui.diff.empty'); if (result.status) $('diff-content').textContent += '\n\nWorking tree:\n' + result.status; $('diff-dialog').showModal(); }
 const evidenceURL = (id, path) => '/api/jobs/' + encodeURIComponent(id) + '/evidence-file?path=' + encodeURIComponent(path);
@@ -1620,8 +1706,8 @@ async function refresh() {
     drawState(); drawDecisions(); syncTab(); drawTimeline();
   } finally { rendering = false; if (again) { again = false; refresh(); } }
 }
-const openTask = () => { if (state.projects.some(p => p.id === curProject)) $('project').value = curProject; $('task-dialog').showModal(); attempt(loadBaseBranches); }; // mặc định giao việc cho dự án đang mở
-$('project').onchange = () => attempt(loadBaseBranches);
+const openTask = () => { if (state.projects.some(p => p.id === curProject)) $('project').value = curProject; loadDependencies(); $('task-dialog').showModal(); attempt(loadBaseBranches); }; // mặc định giao việc cho dự án đang mở
+$('project').onchange = () => { loadDependencies(); attempt(loadBaseBranches); };
 ['new-task', 'create-top'].forEach(id => $(id).onclick = openTask);
 $('close-dialog').onclick = () => $('task-dialog').close(); $('close-diff').onclick = () => $('diff-dialog').close();
 if ($('open-jobs-btn')) $('open-jobs-btn').onclick = openJobsDialog;
@@ -1629,15 +1715,10 @@ if ($('close-jobs')) $('close-jobs').onclick = () => $('jobs-dialog').close();
 if ($('jobs-dialog-new')) $('jobs-dialog-new').onclick = () => { $('jobs-dialog').close(); openTask(); };
 if ($('jobs-search')) $('jobs-search').oninput = e => { jobsSearchQuery = e.target.value; drawJobsDialog(); };
 if ($('jobs-project')) $('jobs-project').onchange = e => { jobsProject = e.target.value; drawJobsDialog(); };
-document.querySelectorAll('[data-job-filter]').forEach(b => {
-  b.onclick = () => {
-    jobsFilter = b.dataset.jobFilter;
-    document.querySelectorAll('[data-job-filter]').forEach(x => x.classList.toggle('active', x === b));
-    drawJobsDialog();
-  };
-});
+document.querySelectorAll('[data-jobs-view]').forEach(b => b.onclick = () => { jobsView = b.dataset.jobsView; store.set('jobsView', jobsView); drawJobsDialog(); });
+if ($('jobs-mine')) $('jobs-mine').onchange = e => { jobsMine = e.target.checked; drawJobsDialog(); };
 $('compare-modes').onchange = () => { $('token-budget').required = $('call-budget').required = $('compare-modes').checked; };
-$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, goal: $('goal').value, title: $('task-title').value.trim() || undefined, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, oracleMode: $('job-oracle-mode').value || undefined, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; curProject = job.project; curSession = job.sessionId || ''; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; $('task-title').value = ''; pending.goal = []; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
+$('task-form').onsubmit = e => { e.preventDefault(); attempt(async () => { $('submit-task').disabled = true; try { const comparing = $('compare-modes').checked, input = { project: $('project').value, baseBranch: $('base-branch').value || undefined, dependsOn: [...$('depends-on').selectedOptions].map(option => option.value), goal: $('goal').value, title: $('task-title').value.trim() || undefined, files: pending.goal, mode: $('task-mode').value, dialogueMode: $('dialogue-mode').value, planApproval: $('plan-approval').checked, oracleMode: $('job-oracle-mode').value || undefined, tokenBudget: $('token-budget').value ? Number($('token-budget').value) : undefined, callBudget: $('call-budget').value ? Number($('call-budget').value) : undefined, sessionId: $('project').value === curProject ? curSession : undefined }, result = await api(comparing ? 'comparisons' : 'jobs', input), job = comparing ? result.jobs[0] : result; curProject = job.project; curSession = job.sessionId || ''; selected = job.id; events = []; $('task-dialog').close(); $('goal').value = ''; $('task-title').value = ''; pending.goal = []; $('depends-on').selectedIndex = -1; drawAttach('goal'); await refresh(); } finally { $('submit-task').disabled = false; } }); };
 let scoreTarget, obligationTarget;
 $('close-claim-score').onclick = () => $('claim-score-dialog').close();
 $('close-obligation').onclick = () => $('obligation-dialog').close();
@@ -1875,7 +1956,7 @@ $('pick-folder').onclick = () => attempt(async () => { $('pick-folder').disabled
 $('project-form').onsubmit = e => {
   e.preventDefault(); attempt(async () => {
     const r = await api('projects', { path: $('project-path').value, id: $('project-id').value, tests: $('project-tests').value, init: $('project-init').checked, network: $('project-network').checked, readDirs: $('project-readdirs').value });
-    $('project-dialog').close(); $('project-form').reset(); await refresh(); $('project').value = r.id;
+    $('project-dialog').close(); $('project-form').reset(); await refresh(); $('project').value = r.id; loadDependencies(); await loadBaseBranches();
   });
 };
 wireAttach('goal', $('goal-files'), $('goal')); wireAttach('message', $('message-files'), $('message'));
@@ -1931,7 +2012,9 @@ $('merge-go').onclick = () => attempt(async () => {
     const result = await api(`jobs/${encodeURIComponent(id)}/merge`, { confirm: $('merge-confirm').value.trim(), target: mergeTarget(), ...(approval ? { approveMerge: approval } : {}) });
     await refresh();
     const job = state?.jobs?.find(j => j.id === id);
-    if (job?.pendingMerge || result?.pendingMerge || result?.job?.pendingMerge) await refreshMergeCheck();
+    const queue = result?.job?.mergeQueue || result?.mergeQueue || job?.mergeQueue;
+    if (queue) { $('merge-dialog').close(); notice(t('ui.merge.queued', { n: queue.position })); }
+    else if (job?.pendingMerge || result?.pendingMerge || result?.job?.pendingMerge) await refreshMergeCheck();
     else if (job?.status === 'ready' || result?.job?.status === 'ready' || result?.status === 'ready') throw new Error(t('ui.merge.notStarted'));
     else $('merge-dialog').close();
   } catch (e) {
@@ -1950,6 +2033,17 @@ $('oracle-mode').onchange = async () => {
     const result = await api('settings', { oracle: select.value });
     state.oracle = result.oracle;
     select.value = state.oracle.mode;
+    drawFlow();
+  } catch (e) { notice(e.message); select.value = previous; }
+  finally { select.disabled = false; }
+};
+$('oracle-research-mode').onchange = async () => {
+  const select = $('oracle-research-mode'), previous = state?.oracle?.researchMode || 'required';
+  select.disabled = true;
+  try {
+    const result = await api('settings', { oracleResearch: select.value });
+    state.oracle = result.oracle;
+    select.value = state.oracle.researchMode || 'required';
     drawFlow();
   } catch (e) { notice(e.message); select.value = previous; }
   finally { select.disabled = false; }

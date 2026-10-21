@@ -14,9 +14,13 @@
   "peerDialogue": true,
   "oracle": {
     "enabled": false,
-    "accounts": [{ "id": "chatgpt-1", "args": ["--browser-manual-login", "--browser-manual-login-profile-dir", "C:\\Users\\<USER>\\.oracle\\chatgpt-1"] }],
+    "accounts": [{ "id": "chatgpt-1" }],
+    "baseUrl": "https://chatgpt.com/",
+    "headless": false,
     "timeoutMin": 10,
-    "maxPerJob": 3
+    "maxPerJob": 3,
+    "researchMode": "required",
+    "maxPerResearchJob": 8
   },
   "codexWindowsSandbox": "unelevated",
   "agents": [
