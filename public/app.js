@@ -638,8 +638,10 @@ function jobLane(j) {
   if (j.status === 'waiting' && j.peerWait) return { lane: 'active', reason: t('ui.board.reason.peer') };
   if (j.status === 'ready') return { lane: 'needs', reason: t(j.mergeQueue ? 'ui.board.reason.queued' : 'ui.board.reason.ready', { n: j.mergeQueue?.position }), action: j.mergeQueue ? null : 'merge' };
   if (j.status === 'blocked') return { lane: 'needs', reason: t('ui.board.reason.blocked', { why: cut(j.error || j.reason || '', 90) }), action: 'error' };
-  if (j.round > 0 && ['running', 'queued', 'paused', 'waiting', 'merging'].includes(j.status)) return { lane: 'returned', reason: t('ui.board.reason.round', { n: j.round, max }) + (j.planTrigger ? ' · ' + cut(j.planTrigger, 70) : '') };
-  if (['running', 'merging'].includes(j.status)) return { lane: 'active', reason: jobWorker(j) || statusLabel(j.status) };
+  // Đang chạy (kể cả vòng sửa) → cột Đang làm như ở thanh bên, kèm "Vòng sửa n/max"; "Bị trả lại" chỉ cho việc bị trả về mà chưa chạy lại.
+  const round = j.round > 0 ? t('ui.board.reason.round', { n: j.round, max }) : '';
+  if (['running', 'merging'].includes(j.status)) return { lane: 'active', reason: [jobWorker(j) || statusLabel(j.status), round].filter(Boolean).join(' · ') };
+  if (j.round > 0 && ['queued', 'paused', 'waiting'].includes(j.status)) return { lane: 'returned', reason: round + (j.planTrigger ? ' · ' + cut(j.planTrigger, 70) : '') };
   if (j.status === 'paused') return { lane: 'waiting', reason: t('ui.board.reason.paused') };
   return { lane: 'waiting', reason: t('ui.board.reason.queuedRun') };
 }
