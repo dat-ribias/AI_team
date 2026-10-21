@@ -56,6 +56,88 @@ test('plan approval: feedback creates a new version; snapshots keep the latest 2
   assert.equal(team.get(job.id).plans.at(-1).version, 23, 'a concurrent assignment cannot overwrite a new version when history is full');
 });
 
+test('session summary: two finals issued from one snapshot cannot overwrite each other', { timeout: 180000 }, async t => {
+  const f = await fixture();
+  f.config.resources = { reserveGB: 0, ramPerAgentGB: 0.01, maxAgents: 8, hardStopRamPercent: 100 };
+  for (const agent of f.config.agents) agent.maxJobs = 2;
+  const finals = []; let bothEntered;
+  const barrier = new Promise(resolve => { bothEntered = resolve; });
+  const team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    const report = await runAgent(agent, task, prompt, opts);
+    if (task.stage !== 'final') return report;
+    let release; const waiting = new Promise(resolve => { release = resolve; });
+    finals.push({ id: task.id, prompt, revision: task.revision, release });
+    if (finals.length === 2) bothEntered();
+    await waiting;
+    return { ...report, memory: { add: [`Fact from ${task.id}`], session: `Summary from ${task.id}` } };
+  } });
+  t.after(async () => { for (const final of finals) final.release(); await team.close(); });
+  team.start();
+  const session = team.createSession({ project: 'test', name: 'Two finals' });
+  const first = await team.create({ project: 'test', goal: 'First concurrent final', mode: 'full', sessionId: session.id });
+  const second = await team.create({ project: 'test', goal: 'Second concurrent final', mode: 'full', sessionId: session.id });
+  await barrier;
+  assert.equal(finals.length, 2);
+  for (const final of finals) assert.match(final.prompt, /"sessionRevision":\s*0/);
+
+  const winner = finals[0], loser = finals[1];
+  winner.release(); await settle(team, winner.id, 'ready', 60000);
+  loser.release(); await settle(team, loser.id, 'ready', 60000);
+  const memory = team.memory('test', session.id);
+  assert.equal(memory.summary, `Summary from ${winner.id}`); assert.equal(memory.summaryRevision, 1);
+  assert.deepEqual(new Set(memory.facts.map(row => row.text)), new Set([`Fact from ${first.id}`, `Fact from ${second.id}`]));
+  assert.equal(memory.log.length, 2);
+  for (const final of finals) {
+    const ready = team.get(final.id), report = ready.reports.findLast(row => row.stage === 'final');
+    assert.equal(ready.status, 'ready'); assert.equal(ready.revision, final.revision);
+    assert.deepEqual(report.sessionSummarySnapshot, { project: 'test', session: session.id, revision: 0 });
+  }
+  const conflicts = team.events(loser.id).filter(event => event.type === 'SESSION_SUMMARY_CONFLICT');
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].details.source, `job:${loser.id}/final`);
+  assert.equal(conflicts[0].details.proposedSummary, `Summary from ${loser.id}`);
+});
+
+test('session summary: an owner edit during final wins without dropping final knowledge', { timeout: 180000 }, async t => {
+  const f = await fixture(); let entered, release, finalRevision;
+  const finalEntered = new Promise(resolve => { entered = resolve; });
+  const finalRelease = new Promise(resolve => { release = resolve; });
+  let team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
+    const report = await runAgent(agent, task, prompt, opts);
+    if (task.stage !== 'final') return report;
+    finalRevision = task.revision; entered(prompt); await finalRelease;
+    return { ...report, memory: { add: ['Fact kept after conflict'], remove: [`M${oldFact}`], session: 'Authorization: Bearer private-value' } };
+  } });
+  t.after(async () => { release(); await team.close(); });
+  team.start();
+  const session = team.createSession({ project: 'test', name: 'Owner race' });
+  const oldFact = team.memoryStore.add({ project: 'test', text: 'Retracted by stale final' });
+  const job = await team.create({ project: 'test', goal: 'Owner edits during final', mode: 'full', sessionId: session.id });
+  const prompt = await finalEntered;
+  assert.match(prompt, /"sessionRevision":\s*0/);
+  const owner = team.editMemory({ project: 'test', session: session.id, summary: 'Owner summary', revision: 0 });
+  assert.equal(owner.summaryRevision, 1);
+  release(); const ready = await settle(team, job.id, 'ready', 60000);
+  assert.equal(ready.revision, finalRevision); assert.equal(ready.status, 'ready');
+  const memory = team.memory('test', session.id, true);
+  assert.equal(memory.summary, 'Owner summary'); assert.equal(memory.summaryRevision, 1); assert.equal(memory.log.length, 1);
+  assert(memory.facts.some(row => row.text === 'Fact kept after conflict' && row.status === 'active'));
+  const retracted = memory.facts.find(row => row.id === oldFact);
+  assert(retracted && memory.facts.some(row => row.kind === 'retraction' && row.text === retracted.uid && row.status === 'active'));
+  const event = team.events(job.id).find(row => row.type === 'SESSION_SUMMARY_CONFLICT');
+  assert.equal(event.details.source, `job:${job.id}/final`);
+  assert.equal(event.details.proposedSummary, 'Authorization: [REDACTED]');
+  const report = ready.reports.findLast(row => row.stage === 'final'), serialized = JSON.stringify(report);
+  assert.deepEqual(report.sessionSummarySnapshot, { project: 'test', session: session.id, revision: 0 });
+  assert(serialized.includes(`job:${job.id}/final`)); assert(serialized.includes('Authorization: [REDACTED]'));
+  assert(!serialized.includes('private-value'));
+
+  await team.close(); team = new Team(f.config, f.data); team.closed = true;
+  const persisted = team.get(job.id).reports.findLast(row => row.stage === 'final');
+  assert.deepEqual(persisted.sessionSummarySnapshot, { project: 'test', session: session.id, revision: 0 });
+  assert.equal(team.memory('test', session.id).summary, 'Owner summary');
+});
+
 test('controller archives implement and verify evidence under the checkpoint revision', async t => {
   const f = await fixture(); f.config.projects[0].evidence = ['.ai-team/custom'];
   const stages = [], team = new Team(f.config, f.data, { runAgent: async (agent, task, prompt, opts) => {
