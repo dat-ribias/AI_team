@@ -14,7 +14,7 @@ function functionSource(name) {
   const lineEnd = source.indexOf('\n', start), first = source.slice(start, lineEnd).trimEnd();
   return first.endsWith('}') ? first : source.slice(start, source.indexOf('\n}', start) + 2);
 }
-const functions = ['gitOf', 'jobStatusLabel', 'badge', 'decisionId', 'decisionReason', 'drawDecisions', 'reconcileAndRefresh', 'deleteJob', 'drawOrphans', 'openOrphans', 'deleteOrphans'];
+const functions = ['gitOf', 'gitLabel', 'jobStatusLabel', 'badge', 'decisionId', 'decisionReason', 'drawDecisions', 'reconcileAndRefresh', 'deleteJob', 'drawOrphans', 'openOrphans', 'deleteOrphans'];
 const code = functions.map(name => `${['reconcileAndRefresh', 'deleteJob', 'openOrphans', 'deleteOrphans'].includes(name) ? 'async ' : ''}${functionSource(name)}`).join('\n');
 function harness() {
   const nodes = new Map(), storage = new Map(), calls = [], asks = [], notices = [];
@@ -44,6 +44,8 @@ test('git labels replace legacy status; missing git retains fallback', () => {
   const h = harness();
   assert.match(h.run(`badge({ status: 'cancelled', git: { state: 'in_master' } })`), /Đã vào master/);
   assert.match(h.run(`badge({ status: 'ready' })`), /legacy:ready/);
+  // "working" từ đối soát git không đè trạng thái thật (đang chờ phụ thuộc/quota, tạm dừng).
+  assert.match(h.run(`badge({ status: 'waiting', git: { state: 'working' } })`), /class="status waiting">legacy:waiting/);
   for (const state of ['working', 'awaiting_owner', 'in_master', 'merge_stuck', 'cancelled_unmerged', 'cancelled_clean', 'done']) assert.ok(locale[`ui.gitState.${state}`]);
   assert.match(source, /jobStatusLabel\(j\).*runningOf\(j\)/);
   assert.match(functionSource('sessionSummary'), /jobStatusLabel\(job\)/);

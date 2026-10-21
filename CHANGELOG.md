@@ -1,5 +1,6 @@
 # Lịch sử thay đổi
 
+- 2026-10-21 · Nhãn trạng thái đúng thực tế · Trạng thái "working" của đối soát git không còn đè trạng thái thật (đang chờ phụ thuộc/quota, tạm dừng, xếp hàng). Thanh bên dùng chip phụ thuộc gọn (⏳ #mã) thay vì chip đầy đủ làm vỡ layout.
 - 2026-10-21 · Board khớp thanh bên · Job đang chạy vòng sửa nằm ở cột Đang làm (ghi "Vòng sửa n/3") thay vì Bị trả lại; Bị trả lại chỉ còn job bị trả về mà chưa chạy lại (xếp hàng/tạm dừng).
 - 2026-10-21 · Hồ sơ kiểm tra chỉ hiện kết quả mới nhất · Commit hiện tại hiện đầu tiên với nhãn **Mới nhất**; trong commit đó ảnh/file trùng tên chỉ giữ bản mới nhất, mỗi lệnh test chỉ lần chạy cuối, review/verify chỉ bản cuối. Các commit cũ (code đã đổi sau đó) gom vào mục thu gọn. Tab Kết quả chỉ hiện ảnh/test/file của commit hiện tại, ghi số kết quả cũ đã ẩn.
 - 2026-10-21 · Phản biện plan cho mọi job code, ChatGPT chỉ tư vấn chung · `challenge` mặc định `all`: plan rủi ro thấp/vừa được phản biện nhanh bằng Claude `challengeModel` (mặc định haiku), rủi ro cao giữ người phản biện mạnh; `challenge: "high"` về như cũ. Bỏ câu hỏi ChatGPT tự động trước plan cho job code (ChatGPT không thấy repo); hướng dẫn Lead/builder chỉ hỏi ChatGPT câu kiến thức chung, đủ ý.

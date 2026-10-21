@@ -73,7 +73,8 @@ test('dependency and merge queue chips include reasons, base branch and acceptan
   assert.doesNotMatch(markup, /<title>|<master>|style=/);
   assert.equal(h.run('dependencyHTML({})'), '');
   assert.match(h.run(`decisionReason({kind:'depends_broken',deps:['a']})`), /#a/);
-  assert.match(source, /\$\{badge\(j\)\}\$\{dependencyHTML\(j\)\}/);
+  // Thanh bên hẹp dùng chip gọn (chỉ mã job còn chờ); inspector giữ chip đầy đủ.
+  assert.match(source, /\$\{badge\(j\)\}\$\{dependencyMini\(j\)\}/); assert.match(source, /\$\{badge\(job\)\}\$\{dependencyHTML\(job\)\}/);
 });
 
 test('broken dependency controls confirm in-page and drop only broken ids', async () => {
