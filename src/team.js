@@ -629,7 +629,7 @@ export class Team extends EventEmitter {
       }
       for (const text of (Array.isArray(mem.add) ? mem.add : []).slice(0, 5)) this.memoryStore.add({ ...provenance, text: String(text).slice(0, 300) });
       if (scope === 'project') this.memoryStore.promote(job);
-      if (typeof mem.session === 'string' && mem.session.trim()) {
+      if (typeof mem.session === 'string') {
         const proposedSummary = redact(mem.session.trim()).slice(0, 1500);
         const valid = job.sessionId && snapshot?.project === job.project && snapshot?.session === job.sessionId && Number.isSafeInteger(snapshot?.revision) && snapshot.revision >= 0;
         const updated = valid && this.db.prepare('UPDATE sessions SET notes=?, notesRevision=notesRevision+1 WHERE project=? AND id=? AND notesRevision=?').run(proposedSummary, job.project, job.sessionId, snapshot.revision).changes;
@@ -648,7 +648,7 @@ export class Team extends EventEmitter {
   editMemory({ project, session, add, remove, stale, revision, summary, summaryRevision }) {
     this.project(project);
     if (summary !== undefined) {
-      if (typeof summary !== 'string' || !session || !Number.isSafeInteger(summaryRevision) || summaryRevision < 0 || !this.db.prepare('UPDATE sessions SET notes=?, notesRevision=notesRevision+1 WHERE project=? AND id=? AND notesRevision=?').run(redact(summary).slice(0, 1500), project, session, summaryRevision).changes) throw Object.assign(new Error(sessionSummaryConflict), { code: 409, details: { code: 'SESSION_SUMMARY_CONFLICT' } });
+      if (typeof summary !== 'string' || typeof session !== 'string' || !session || !Number.isSafeInteger(summaryRevision) || summaryRevision < 0 || !this.db.prepare('UPDATE sessions SET notes=?, notesRevision=notesRevision+1 WHERE project=? AND id=? AND notesRevision=?').run(redact(summary).slice(0, 1500), project, session, summaryRevision).changes) throw Object.assign(new Error(sessionSummaryConflict), { code: 409, details: { code: 'SESSION_SUMMARY_CONFLICT' } });
     }
     if (add) this.memoryStore.add({ project, text: String(add).slice(0, 300) });
     if (remove != null) this.memoryStore.retire(project, remove, revision);
