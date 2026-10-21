@@ -231,6 +231,76 @@ export function claudeToolArgs(task, checks = [], web = false, writes = task.sta
   return args;
 }
 
+// Cùng quyết định cho argv và mô tả cấu hình; không quan sát hay bảo đảm sandbox của tiến trình.
+export function permissionProfile(agent, task, platform = process.platform) {
+  const checks = (task.checks || []).map(c => c.join(' '));
+  const writes = task.stage === 'research' && capabilitiesFor(task.kind, 'builder').write.length > 0;
+  const web = task.network === true || task.kind === 'research' && task.researchWeb !== false;
+  const args = [], windowsArgs = [], webArgs = [];
+  const metadata = {
+    provider: agent.provider, platform, basis: 'adapter-configuration', runtimeObserved: false,
+    inputs: { stage: task.stage ?? null, kind: task.kind ?? null, checks: checks.length, writes, network: task.network === true, demoServer: Boolean(task.demoServer), web, additionalWriteDirs: task.addDirs?.length || 0 },
+    sandbox: { mode: 'not-specified', filesystem: 'provider-settings', network: 'provider-settings' },
+    approval: { mode: 'provider-settings' }, settings: {}, providerSettingsRequired: true,
+    // Prompt và kiểm tra Git theo stage không cô lập hệ điều hành.
+    enforcement: { prompt: 'task-instructions', postCheck: 'caller-dependent', outsideWorktreeProtectedByPostCheck: false, networkProtectedByPostCheck: false },
+  };
+  if (agent.provider === 'codex') {
+    const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated';
+    const noSandbox = platform === 'win32' && winSandbox === 'none';
+    const sandbox = sandboxArgs(task, checks, writes, noSandbox);
+    args.push('-c', 'approval_policy="never"', ...sandbox);
+    webArgs.push('-c', `features.web_search=${web}`);
+    if (platform === 'win32' && !['off', 'none'].includes(winSandbox)) windowsArgs.push('-c', `windows.sandbox="${winSandbox}"`);
+    metadata.settings.windowsSandbox = { value: winSandbox, source: agent.windowsSandbox ? 'agent' : task.codexWindowsSandbox ? 'task' : 'default', applicable: platform === 'win32' };
+    metadata.sandbox = { mode: sandbox[1], filesystem: noSandbox ? 'unrestricted' : 'cli-sandbox', network: noSandbox ? 'unrestricted' : sandbox[1] === 'workspace-write' ? task.network === true || Boolean(task.demoServer) ? 'enabled' : 'disabled' : 'sandbox-default' };
+    metadata.approval.mode = 'never';
+    metadata.providerSettingsRequired = false;
+  } else if (agent.provider === 'claude') {
+    args.push(...claudeToolArgs(task, checks, web, writes));
+    if (!web) webArgs.push('--disallowedTools', 'WebFetch,WebSearch');
+    metadata.approval.mode = args[1];
+  } else if (agent.provider === 'gemini') {
+    args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
+    metadata.approval.mode = args[1];
+  } else if (agent.provider === 'antigravity') {
+    const autoApprove = agent.autoApprove ?? task.agyAutoApprove;
+    if (autoApprove) args.push('--dangerously-skip-permissions');
+    metadata.settings.autoApprove = { value: Boolean(autoApprove), source: agent.autoApprove != null ? 'agent' : task.agyAutoApprove != null ? 'task' : 'default', applicable: true };
+    metadata.approval.mode = autoApprove ? 'skip-permissions' : 'provider-settings';
+  } else {
+    metadata.sandbox = { mode: 'not-applicable', filesystem: 'not-applicable', network: 'not-applicable' };
+    metadata.approval.mode = 'not-applicable';
+    metadata.providerSettingsRequired = false;
+  }
+  metadata.cliFlags = [...args, ...webArgs, ...windowsArgs];
+  return { args, windowsArgs, webArgs, metadata };
+}
+
+export function memberProtection(agent, config, platform = process.platform) {
+  const context = (task, globalSettings, dependsOn = []) => {
+    const value = { applicable: true, globalSettings, dependsOn, ...permissionProfile(agent, task, platform).metadata };
+    value.enforcement.postCheck = 'not-applied';
+    return value;
+  };
+  // Job là baseline plan, không phải quyền của lượt đang chạy. Stage/check/network có thể đổi kết quả.
+  const job = context({ stage: 'plan', kind: 'code', checks: [], network: false, researchWeb: config.researchWeb !== false,
+    codexWindowsSandbox: config.codexWindowsSandbox, agyAutoApprove: config.agyAutoApprove === true },
+  ['codexWindowsSandbox', 'agyAutoApprove'], ['stage', 'kind', 'checks', 'network', 'demoServer', 'researchWeb', 'addDirs', 'readDirs', 'mcp']);
+  job.scope = 'task-baseline';
+  job.enforcement.postCheck = 'controller-stage-dependent';
+  for (const [name, setting] of Object.entries(job.settings)) if (setting.source === 'task') setting.source = name === 'autoApprove' && config.agyAutoApprove == null ? 'default' : 'global';
+  const proposal = () => {
+    const value = context({ stage: 'plan', kind: 'research', checks: [], network: false, researchWeb: false, codexWindowsSandbox: config.codexWindowsSandbox }, ['codexWindowsSandbox'], ['readDirs', 'mcp']);
+    if (value.settings.windowsSandbox?.source === 'task') value.settings.windowsSandbox.source = 'global';
+    return value;
+  };
+  const intakeApplies = agent.provider === 'claude' || agent.provider === 'gemini' || agent.provider === 'antigravity' && /gemini/i.test(agent.model || '');
+  const intake = intakeApplies ? context({ stage: 'intake', kind: 'code', checks: [] }, [], agent.provider === 'claude' ? [] : ['mcp']) : { applicable: false, reason: 'provider-not-selected' };
+  return { scope: 'member-configuration', platform, basis: 'adapter-configuration', runtimeObserved: false,
+    contexts: { job, accessProposal: proposal(), previewProposal: proposal(), intake } };
+}
+
 export async function runAgent(agent, task, prompt, { signal, onEvent }) {
   signal?.throwIfAborted();
   if (agent.provider === 'mock') {
@@ -255,25 +325,19 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     return report;
   }
   let final = '', failed = '', policyBlocked = false;
-  // Tìm kiếm/đọc web: chỉ khi project bật network, hoặc việc nghiên cứu (tắt bằng "researchWeb": false).
-  const web = task.network === true || task.kind === 'research' && task.researchWeb !== false;
+  const permissions = permissionProfile(agent, task);
   const args = [];
-  // Lệnh check reviewer/verifier được phép chạy (= lệnh tests của project), dạng chuỗi.
-  const checks = (task.checks || []).map(c => c.join(' '));
-  const role = task.stage === 'research' ? 'builder' : null;
-  const writes = task.stage === 'research' && capabilitiesFor(task.kind, role).write.length > 0;
   if (agent.provider === 'codex') {
     if (!existsSync(join(agent.home, 'auth.json'))) throw new Error(msg("srv.providers.chua_dang_nhap", { 0: agent.id }));
     // "none" (Windows): bỏ sandbox của Codex → không còn cửa sổ UAC codex-windows-sandbox-setup, đổi lại Codex có toàn quyền của user
     // (đọc/ghi mọi nơi, có mạng). Chỉ còn ràng buộc bằng prompt + kiểm tra worktree của controller. Bật bằng "codexWindowsSandbox": "none".
-    const winSandbox = agent.windowsSandbox || task.codexWindowsSandbox || 'unelevated', noSandbox = process.platform === 'win32' && winSandbox === 'none';
-    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', '-c', 'approval_policy="never"', ...sandboxArgs(task, checks, writes, noSandbox), '-C', task.worktree);
+    args.push('exec', ...(task.attachments || []).filter(f => /\.(png|jpe?g|gif|webp)$/i.test(f)).flatMap(f => ['-i', join(task.worktree, f)]), '--json', '--color', 'never', '-c', 'cli_auth_credentials_store="file"', ...permissions.args, '-C', task.worktree);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('-c', `model_reasoning_effort="${agent.effort}"`);
     // Sandbox Codex: chỉ ghi trong worktree; mạng tắt trừ khi project bật "network": true.
-    args.push('-c', `features.web_search=${web}`);
+    args.push(...permissions.webArgs);
     // Windows: không bật sandbox thì Codex (approval=never) từ chối mọi lệnh, kể cả lệnh chỉ đọc. "unelevated" không cần quyền admin.
-    if (process.platform === 'win32' && !['off', 'none'].includes(winSandbox)) args.push('-c', `windows.sandbox="${winSandbox}"`);
+    args.push(...permissions.windowsArgs);
     // MCP bật riêng cho member này (TOML inline qua -c).
     const toml = v => typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map(toml).join(',')}]` : `{${Object.entries(v).map(([k, x]) => `${JSON.stringify(k)}=${toml(x)}`).join(',')}}`;
     // Repo liên kết được cấp quyền sửa: thêm làm thư mục ghi được của sandbox.
@@ -282,14 +346,14 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     if (task.sessionId) args.push('resume', task.sessionId);
     args.push('-');
   } else if (agent.provider === 'claude') {
-    args.push('-p', '--output-format', 'stream-json', '--verbose', ...claudeToolArgs(task, checks, web, writes));
+    args.push('-p', '--output-format', 'stream-json', '--verbose', ...permissions.args);
     if (task.sessionId) args.push('--resume', task.sessionId);
     if (agent.model) args.push('--model', agent.model);
     if (agent.effort) args.push('--effort', agent.effort);
     for (const d of task.addDirs || []) args.push('--add-dir', d); // repo liên kết được cấp quyền sửa (acceptEdits áp dụng cả ở đây)
     // MCP bật riêng cho member này; tên công cụ dạng mcp__<server> được cho phép không cần hỏi.
     if (agent.mcp && Object.keys(agent.mcp).length) args.push('--mcp-config', JSON.stringify({ mcpServers: agent.mcp }), '--strict-mcp-config', '--allowedTools', ...Object.keys(agent.mcp).map(n => `mcp__${n}`));
-    if (!web) args.push('--disallowedTools', 'WebFetch,WebSearch');
+    args.push(...permissions.webArgs);
     // Thư mục tham khảo: chỉ cho Read/Glob/Grep (không dùng --add-dir vì nó cho cả quyền sửa); cấm sửa và cấm đọc file bí mật.
     const refs = (task.readDirs || []).map(claudePath);
     if (refs.length) args.push('--allowedTools', ...refs.map(d => `Read(${d}/**)`), '--disallowedTools', ...refs.flatMap(d => [`Edit(${d}/**)`, `Write(${d}/**)`, ...SECRET_FILES.map(f => `Read(${d}/**/${f})`)]));
@@ -297,11 +361,10 @@ export async function runAgent(agent, task, prompt, { signal, onEvent }) {
     args.push('-p', task.promptFile ? `Read the file ${task.promptFile} in the current directory and follow its instructions exactly. Your final answer must be only the JSON it asks for.` : prompt, '--output-format', 'stream-json');
     if (agent.model) args.push('--model', agent.model);
     if (agent.provider === 'gemini' && task.addDirs?.length) args.push('--include-directories', task.addDirs.join(','));
-    if (agent.provider === 'gemini') args.push('--approval-mode', task.stage === 'implement' ? 'auto_edit' : checks.length ? 'default' : 'plan', ...(checks.length ? ['--allowed-tools', ...checks.map(c => `run_shell_command(${c})`)] : []));
     // Antigravity (agy) không có cờ quyền theo lượt: lệnh check phải được cho phép trong ~/.gemini/antigravity-cli/settings.json (permissions.allow).
     // Lệnh ngoài allow-list bị từ chối = phiên headless kết thúc không có report. "agyAutoApprove": true bỏ hỏi quyền (toàn quyền như Codex "none");
     // controller vẫn kiểm tra worktree sau mỗi lượt và mọi thay đổi vẫn qua review/verify + bạn duyệt merge.
-    if (agent.provider === 'antigravity' && (agent.autoApprove ?? task.agyAutoApprove)) args.push('--dangerously-skip-permissions');
+    args.push(...permissions.args);
   }
   // Slot ≥ 2 của cùng tài khoản Codex: SQLite riêng (CODEX_SQLITE_HOME), giữ chung đăng nhập. sqlite_home trong config.toml sẽ ghi đè biến này.
   const slot = task.slot > 1 && agent.provider === 'codex' ? task.slot : 1, slotAgent = slot > 1 ? { ...agent, sqliteHome: join(agent.home, `sqlite-${slot}`), lockKey: `${agent.home}#${slot}` } : agent;
