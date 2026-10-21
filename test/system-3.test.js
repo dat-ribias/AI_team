@@ -81,7 +81,14 @@ test('session summary: two finals issued from one snapshot cannot overwrite each
   for (const final of finals) assert.match(final.prompt, /"sessionRevision":\s*0/);
 
   const winner = finals[0], loser = finals[1];
-  winner.release(); await settle(team, winner.id, 'ready', 60000);
+  winner.release();
+  const deadline = Date.now() + 60000;
+  while (team.get(winner.id).status !== 'ready' && Date.now() < deadline) {
+    const job = team.get(winner.id);
+    if (job.status === 'blocked') assert.fail(job.error);
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.equal(team.get(winner.id).status, 'ready', 'the first final completes while the second final is held');
   loser.release(); await settle(team, loser.id, 'ready', 60000);
   const memory = team.memory('test', session.id);
   assert.equal(memory.summary, `Summary from ${winner.id}`); assert.equal(memory.summaryRevision, 1);
@@ -115,7 +122,7 @@ test('session summary: an owner edit during final wins without dropping final kn
   const job = await team.create({ project: 'test', goal: 'Owner edits during final', mode: 'full', sessionId: session.id });
   const prompt = await finalEntered;
   assert.match(prompt, /"sessionRevision":\s*0/);
-  const owner = team.editMemory({ project: 'test', session: session.id, summary: 'Owner summary', revision: 0 });
+  const owner = team.editMemory({ project: 'test', session: session.id, summary: 'Owner summary', summaryRevision: 0 });
   assert.equal(owner.summaryRevision, 1);
   release(); const ready = await settle(team, job.id, 'ready', 60000);
   assert.equal(ready.revision, finalRevision); assert.equal(ready.status, 'ready');
