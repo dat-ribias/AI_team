@@ -74,8 +74,10 @@ const statusLabel = s => t(`ui.status.${s}`);
 // Trạng thái git chỉ đúng khi được tính trên đúng status hiện tại của job; job vừa đổi status (vd running → blocked) thì dùng status mới.
 function gitOf(job) { return job.git && (job.git.status === undefined || job.git.status === job.status) ? job.git : null; }
 // Job vướng được đối soát git xếp vào awaiting_owner (cần chủ xử lý) nhưng chữ "Chờ chủ duyệt" dễ hiểu nhầm là chờ duyệt merge → hiện "vướng".
-function jobStatusLabel(job) { const g = gitOf(job); return g && !(job.status === 'blocked' && g.state === 'awaiting_owner') ? t(`ui.gitState.${g.state}`) : statusLabel(job.status); }
-function badge(job) { return `<span class="status ${esc(gitOf(job)?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
+// Đối soát git trả "working" cho mọi job chưa xong → không dùng nhãn đó (đè mất trạng thái thật: chờ phụ thuộc, chờ quota, tạm dừng…).
+function gitLabel(job) { const g = gitOf(job); return g && g.state !== 'working' && !(job.status === 'blocked' && g.state === 'awaiting_owner') ? g : null; }
+function jobStatusLabel(job) { const g = gitLabel(job); return g ? t(`ui.gitState.${g.state}`) : statusLabel(job.status); }
+function badge(job) { return `<span class="status ${esc(gitLabel(job)?.state || job.status)}">${esc(jobStatusLabel(job))}</span>`; }
 
 function dependencyOptions(project, ids = [], exclude) {
   return state.jobs.filter(j => j.project === project && j.id !== exclude && (exclude && ids.includes(j.id) || ['queued', 'running', 'waiting', 'paused', 'blocked', 'ready', 'merging'].includes(j.status))).map(j => `<option value="${esc(j.id)}" ${ids.includes(j.id) ? 'selected' : ''}>#${esc(j.id)} · ${esc(jobTitle(j))}</option>`).join('');
@@ -84,6 +86,8 @@ function loadDependencies() {
   const ids = [...$('depends-on').selectedOptions].map(option => option.value);
   $('depends-on').innerHTML = dependencyOptions($('project').value, ids);
 }
+// Thanh bên hẹp: chỉ mã job còn chờ (đủ chi tiết ở inspector).
+function dependencyMini(job) { const open = (job.depends || []).filter(d => !d.met); return open.length ? `<span class="depends-mini" title="${esc(open.map(d => `#${d.id} ${d.title}`).join('\n'))}">⏳ ${open.map(d => '#' + esc(String(d.id).slice(0, 8))).join(' ')}</span>` : ''; }
 function dependencyHTML(job) {
   const chips = (job.depends || []).map(dep => `<span class="depends-chip ${dep.met ? 'met' : ''}">${dep.met ? '✓' : '⏳'} #${esc(dep.id)} ${esc(dep.title)} · ${esc(t('ui.depends.reason.' + (dep.met ? 'met' : dep.reason || 'not_merged')))}</span>`).join('');
   const waiting = job.blockedReason?.kind === 'depends' ? `<span class="depends-wait">${esc(t('ui.job.dependsWaiting', { ids: (job.blockedReason.ids || []).map(id => '#' + id).join(', '), branch: job.baseBranch }))}</span>` : '';
@@ -638,8 +642,10 @@ function jobLane(j) {
   if (j.status === 'waiting' && j.peerWait) return { lane: 'active', reason: t('ui.board.reason.peer') };
   if (j.status === 'ready') return { lane: 'needs', reason: t(j.mergeQueue ? 'ui.board.reason.queued' : 'ui.board.reason.ready', { n: j.mergeQueue?.position }), action: j.mergeQueue ? null : 'merge' };
   if (j.status === 'blocked') return { lane: 'needs', reason: t('ui.board.reason.blocked', { why: cut(j.error || j.reason || '', 90) }), action: 'error' };
-  if (j.round > 0 && ['running', 'queued', 'paused', 'waiting', 'merging'].includes(j.status)) return { lane: 'returned', reason: t('ui.board.reason.round', { n: j.round, max }) + (j.planTrigger ? ' · ' + cut(j.planTrigger, 70) : '') };
-  if (['running', 'merging'].includes(j.status)) return { lane: 'active', reason: jobWorker(j) || statusLabel(j.status) };
+  // Đang chạy (kể cả vòng sửa) → cột Đang làm như ở thanh bên, kèm "Vòng sửa n/max"; "Bị trả lại" chỉ cho việc bị trả về mà chưa chạy lại.
+  const round = j.round > 0 ? t('ui.board.reason.round', { n: j.round, max }) : '';
+  if (['running', 'merging'].includes(j.status)) return { lane: 'active', reason: [jobWorker(j) || statusLabel(j.status), round].filter(Boolean).join(' · ') };
+  if (j.round > 0 && ['queued', 'paused', 'waiting'].includes(j.status)) return { lane: 'returned', reason: round + (j.planTrigger ? ' · ' + cut(j.planTrigger, 70) : '') };
   if (j.status === 'paused') return { lane: 'waiting', reason: t('ui.board.reason.paused') };
   return { lane: 'waiting', reason: t('ui.board.reason.queuedRun') };
 }
@@ -682,7 +688,7 @@ function drawJobsList() {
       ${order.has(j.id) ? `<span class="merge-queue-n ${j.status === 'ready' && !queue[order.get(j.id)].waits.length ? 'merge-next' : ''}" title="${esc(t('ui.mergeQueue.title'))}">${order.get(j.id) + 1}</span>` : `<span class="job-dot-status ${j.status}"></span>`}
       <div class="job-button-content">
         <strong>${esc(jobTitle(j))}</strong>
-        <small>${badge(j)}${dependencyHTML(j)}<span class="job-list-meta"> · ${esc([order.has(j.id) && queue[order.get(j.id)].waits.length ? t('ui.mergeQueue.waits', { ids: queue[order.get(j.id)].waits.map(x => '#' + x.slice(0, 8)).join(', ') }) : '', state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
+        <small>${badge(j)}${dependencyMini(j)}<span class="job-list-meta"> · ${esc([order.has(j.id) && queue[order.get(j.id)].waits.length ? t('ui.mergeQueue.waits', { ids: queue[order.get(j.id)].waits.map(x => '#' + x.slice(0, 8)).join(', ') }) : '', state.sessions.find(x => x.id === j.sessionId)?.name, jobWorker(j), clock(j.updatedAt || j.createdAt)].filter(Boolean).join(' · '))}</span></small>
       </div>
     </button>
   `).join('') : `<p class="muted">${esc(t('ui.nav.noJobs'))}</p>`)
