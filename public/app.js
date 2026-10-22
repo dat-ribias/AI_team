@@ -1855,8 +1855,8 @@ function drawSecurity() {
     return `<td class="${on ? 'ok' : 'no'}"><button class="cap-toggle" data-cap="${col}:${k}" aria-pressed="${on}" title="${esc(t('ui.sec.toggle'))}">${on ? '✓' : '✗'}</button></td>`;
   };
   const head = cols.map(c => `<th>${esc(c === 'controller' ? 'Controller' : c === 'you' ? t('ui.who.user') : roleLabel(c))}</th>`).join('');
-  const howKeys = { read: 'ui.sec.how.readExpected', outside: 'ui.sec.how.outsideExpected', network: 'ui.sec.how.networkExpected', push: 'ui.sec.how.pushExpected' };
-  $('security-matrix').innerHTML = `<h3>${esc(t('ui.sec.rolesTitle'))}</h3><p class="muted">${esc(t('ui.sec.rolesIntroExpected'))}</p>
+  const howKeys = { read: 'ui.sec.how.readScopeExpected', outside: 'ui.sec.how.outsideWriteExpected', network: 'ui.sec.how.networkPolicyExpected', push: 'ui.sec.how.pushPolicyExpected' };
+  $('security-matrix').innerHTML = `<h3>${esc(t('ui.sec.rolesTitle'))}</h3><p class="muted">${esc(t('ui.sec.rolesIntroPolicyExpected'))}</p>
     <table class="sec-table"><thead><tr><th>${esc(t('ui.sec.capability'))}</th>${head}<th>${esc(t('ui.sec.how'))}</th></tr></thead><tbody>${rows.map(([k, v]) => `<tr><th>${esc(t('ui.sec.row.' + k))}</th>${v.split(' ').map((x, i) => cell(k, x, cols[i])).join('')}<td class="how">${esc(t(howKeys[k] || 'ui.sec.how.' + k))}</td></tr>`).join('')}</tbody></table>
     <div class="access-bar"><button id="caps-save" class="primary" ${capsDraft ? '' : 'disabled'}>${esc(t('ui.access.save'))}</button><button id="caps-undo" ${capsDraft ? '' : 'disabled'}>${esc(t('ui.access.undo'))}</button>
     <span class="muted">✓ ${esc(t('ui.sec.legendYes'))} · ~ ${esc(t('ui.sec.legendPart'))} · ✗ ${esc(t('ui.sec.legendNo'))} · ${esc(t('ui.sec.legendToggle'))}</span></div>`;
@@ -1866,7 +1866,7 @@ function drawSecurity() {
   });
   $('caps-undo').onclick = () => { capsDraft = null; drawSecurity(); };
   $('caps-save').onclick = () => attempt(async () => { await api('role-caps', capsDraft); capsDraft = null; await refresh(); drawSecurity(); notice(t('ui.access.saved')); });
-  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOffExpected'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4Expected'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3Expected'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
+  $('security-notes').innerHTML = `<h3>${esc(t('ui.sec.projects'))}</h3><ul>${state.projects.map(p => `<li><b>${esc(p.id)}</b> · ${esc(p.path)} · ${esc(t(p.network ? 'ui.sec.networkOn' : 'ui.sec.networkOffExpected'))}${p.readDirs.length ? ' · ' + esc(t('ui.sec.readDirs')) + ': ' + esc(p.readDirs.join(', ')) : ''}</li>`).join('') || `<li>${esc(t('ui.task.noProject'))}</li>`}</ul><h3>${esc(t('ui.sec.dataTitle'))}</h3><ul>${['data1', 'data2', 'data3', 'data4ScopeExpected'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul><h3>${esc(t('ui.sec.adviceTitle'))}</h3><ul>${['advice1', 'advice2', 'advice3PolicyExpected'].map(k => `<li>${esc(t('ui.sec.' + k))}</li>`).join('')}</ul>`;
 }
 // Quyền theo dự án hoặc theo phiên, riêng từng AI: thư mục trong repo (Xem / Sửa / Sửa + Xóa), thư mục ngoài repo (chỉ đọc), repo sửa cùng, Internet, chạy lệnh.
 let acc = null; const repoDirs = {};
@@ -1888,7 +1888,7 @@ function accessProtection(members) {
       ${value.dependsOn?.length ? `<p class="muted">${label('StageDependent')}: <code>${esc(value.dependsOn.join(', '))}</code></p>` : ''}
       <p class="muted">${label('Controller')}: <code>${esc(value.enforcement?.postCheck || t('ui.access.protectionUnknown'))}</code></p>`;
   };
-  return `<section class="access-protection"><h3>${label('Title')}</h3><p class="muted">${label('Scope')}</p>
+  return `<section class="access-protection"><h3>${label('Title')}</h3><p class="muted">${label('Intro')}</p><p class="muted">${label('Scope')}</p>
     <p class="muted">${label('Controller')}. ${label('Limits')}</p>
     <div class="access-protection-members">${members.map(a => {
       const protection = a.protection, contexts = protection?.contexts || {};
@@ -1915,7 +1915,7 @@ function drawAccess(reset = false) {
   const others = projects.filter(p => p.id !== acc.project && !acc.folders.some(f => f.path === p.path));
   const sessions = state.sessions.filter(s => s.project === acc.project), pr = acc.proposal, why = w => w ? `<br><small class="muted">${esc(w)}</small>` : '';
   const head = (icon, title, hint) => `<tr class="sec-head"><th colspan="${span}">${icon} ${esc(t(title))} <small class="muted">${esc(t(hint))}</small></th></tr>`;
-  $('project-access').innerHTML = `<h3>${esc(t('ui.access.title'))}</h3><p class="muted">${esc(t('ui.access.protectionIntro'))}</p>
+  $('project-access').innerHTML = `<h3>${esc(t('ui.access.title'))}</h3><p class="muted">${esc(t('ui.access.introExpected'))}</p>
     ${accessProtection(members)}
     <div class="access-bar"><select id="acc-project">${projects.map(p => `<option value="${esc(p.id)}" ${p.id === acc.project ? 'selected' : ''}>${esc(p.id)}</option>`).join('')}</select>
       <select id="acc-scope"><option value="">${esc(t('ui.access.scopeProject'))}</option>${sessions.map(s => `<option value="${esc(s.id)}" ${s.id === acc.scope ? 'selected' : ''}>${esc(t('ui.access.scopeSession', { 0: s.name }))}${s.access ? ' ★' : ''}</option>`).join('')}</select>

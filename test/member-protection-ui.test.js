@@ -64,22 +64,38 @@ function securityHarness(agents, t) {
 }
 
 for (const lang of ['vi', 'en', 'ja']) {
-  test(`security uses corrected intro and descriptions in ${lang} with network off and unrestricted members`, () => {
+  test(`security uses corrected descriptions and permission guidance in ${lang} with sandboxed and unrestricted members`, () => {
     const messages = JSON.parse(fs.readFileSync(new URL(`../locales/${lang}.json`, import.meta.url), 'utf8'));
     const used = [], t = key => { used.push(key); assert.equal(typeof messages[key], 'string', key); return messages[key]; };
     const escape = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
     const introKey = index.match(/<p\b[^>]*data-i18n="([^"]+)"[^>]*><\/p><div class="access-box" id="project-access">/)[1];
     assert.equal(introKey, 'ui.sec.introExpected');
     const intro = t(introKey);
-    const agents = [member('codex', 'codex', { codexWindowsSandbox: 'none' }), member('agy', 'antigravity', { agyAutoApprove: true })];
+    const agents = [
+      member('codex', 'codex', { codexWindowsSandbox: 'none' }),
+      member('windows', 'codex', { codexWindowsSandbox: 'unelevated' }),
+      member('linux', 'codex', {}, {}, 'linux'),
+      member('agy', 'antigravity', { agyAutoApprove: true }),
+    ];
     const security = securityHarness(agents, t), before = JSON.stringify(security.state);
     const html = security.render();
-    const replaced = ['ui.sec.intro', 'ui.sec.how.read', 'ui.sec.how.outside', 'ui.sec.how.network', 'ui.sec.how.push', 'ui.sec.networkOff', 'ui.sec.rolesIntro', 'ui.sec.locked', 'ui.sec.data4', 'ui.sec.advice3'];
-    for (const key of replaced) {
-      const corrected = key + 'Expected';
+    const replacements = {
+      'ui.sec.intro': 'ui.sec.introExpected',
+      'ui.sec.how.read': 'ui.sec.how.readScopeExpected',
+      'ui.sec.how.outside': 'ui.sec.how.outsideWriteExpected',
+      'ui.sec.how.network': 'ui.sec.how.networkPolicyExpected',
+      'ui.sec.how.push': 'ui.sec.how.pushPolicyExpected',
+      'ui.sec.networkOff': 'ui.sec.networkOffExpected',
+      'ui.sec.rolesIntro': 'ui.sec.rolesIntroPolicyExpected',
+      'ui.sec.locked': 'ui.sec.lockedExpected',
+      'ui.sec.data4': 'ui.sec.data4ScopeExpected',
+      'ui.sec.advice3': 'ui.sec.advice3PolicyExpected',
+    };
+    for (const [key, corrected] of Object.entries(replacements)) {
       assert.ok(used.includes(corrected), corrected);
       assert.ok((key === 'ui.sec.intro' ? intro : html).includes(key === 'ui.sec.intro' ? messages[corrected] : escape(messages[corrected])), corrected);
       assert.ok(!used.includes(key), key);
+      if (key + 'Expected' !== corrected) assert.ok(!used.includes(key + 'Expected'), key + 'Expected');
       assert.ok(!(intro + html).includes(escape(messages[key])), key);
       assert.doesNotMatch(messages[corrected], /Ã|á»|\uFFFD/, corrected);
       assert.doesNotMatch(messages[corrected], /\?/, corrected);
@@ -94,8 +110,39 @@ for (const lang of ['vi', 'en', 'ja']) {
     assert.equal(JSON.stringify(security.state), before);
     assert.equal(security.render(), html);
     const accessHtml = harness(agents, t).render();
+    const protectionStart = accessHtml.indexOf('<section class="access-protection">');
+    const protectionEnd = accessHtml.indexOf('</section>', protectionStart);
+    const guidance = escape(messages['ui.access.introExpected']);
+    const protectionIntro = escape(messages['ui.access.protectionIntro']);
+    assert.ok(used.includes('ui.access.introExpected'));
+    assert.ok(!used.includes('ui.access.intro'));
+    assert.ok(accessHtml.indexOf(guidance) > 0 && accessHtml.indexOf(guidance) < protectionStart);
+    assert.ok(accessHtml.indexOf(protectionIntro) > protectionStart && accessHtml.indexOf(protectionIntro) < protectionEnd);
+    assert.equal(accessHtml.split(protectionIntro).length - 1, 1);
+    const guidanceTerms = {
+      vi: ['dự án', 'phiên', '★', 'Xem / Sửa / Sửa + Xóa', 'chỉ đọc dự kiến', 'Leader đề xuất', 'xem lại rồi Lưu', 'Git trong phạm vi theo dõi'],
+      en: ['project', 'session', '★', 'View / Edit / Edit + Delete', 'intended read-only scope', 'Leader proposes', 'review, then Save', 'Git changes within its tracked scope'],
+      ja: ['プロジェクト', 'セッション', '★', '閲覧 / 編集 / 編集+削除', '想定する読み取り専用範囲', 'リーダーが提案', '確認してから保存', '追跡範囲内の Git'],
+    };
+    for (const text of guidanceTerms[lang]) assert.ok(guidance.includes(escape(text)), text);
+    const readTerms = {
+      vi: ['Quyền đọc có thể vượt worktree tùy CLI, kể cả khi sandbox bật', 'chủ yếu giới hạn ghi và mạng', 'danger-full-access bỏ các giới hạn sandbox', 'CLI khác có cơ chế riêng'],
+      en: ['Read access may extend beyond the worktree depending on the CLI, even with sandboxing enabled', 'primarily restricts writes and network access', 'danger-full-access removes those sandbox restrictions', 'Other CLIs have their own mechanisms'],
+      ja: ['サンドボックスが有効でもワークツリー外に及ぶ場合', '主に書き込みと通信を制限', 'danger-full-access はこれらのサンドボックス制限を解除', '他の CLI は独自の仕組み'],
+    };
+    for (const text of readTerms[lang]) assert.ok(html.includes(escape(text)), text);
+    const fullWarning = { vi: 'hoàn tác mọi tác động', en: 'cannot undo every effect', ja: 'すべての影響' }[lang];
+    const page = escape(intro) + accessHtml + html;
+    assert.equal(page.split(fullWarning).length - 1, 2, 'full warning appears only in screen intro and protection limits');
+    for (const key of ['ui.sec.introExpected', 'ui.access.protectionLimits']) assert.equal(page.split(escape(messages[key])).length - 1, 1, key);
+    assert.ok(accessHtml.includes(escape(messages['ui.access.protectionCli'])));
+    assert.ok(accessHtml.includes(escape(messages['ui.access.protectionController'])));
     assert.ok(accessHtml.includes(escape(messages['ui.access.protectionUnrestricted'])));
+    assert.ok(accessHtml.includes(escape(messages['ui.access.protectionSandboxed'])));
     assert.ok(accessHtml.includes('--sandbox danger-full-access'));
+    assert.ok(accessHtml.includes('--sandbox read-only'));
+    assert.ok(accessHtml.includes('windowsSandbox=unelevated (global, applicable=true)'));
+    assert.ok(accessHtml.includes('windowsSandbox=unelevated (default, applicable=false)'));
     assert.ok(accessHtml.includes('--dangerously-skip-permissions'));
     assert.ok(accessHtml.includes('network=unrestricted'));
     security.state.projects[0].network = true;
