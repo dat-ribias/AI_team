@@ -102,16 +102,51 @@ test('decision selection moves to the job project and session; orphans open thei
   assert.equal(h.get('orphan-dialog').open, true); assert.equal(h.calls.at(-1).path, 'orphans');
 });
 
-test('reconcile posts before refreshing, coalesces calls and still refreshes on error', async () => {
+test('reconcile refreshes immediately, coalesces background calls and recovers after errors', async () => {
   const h = harness(); let release;
+  h.context.attempt = async fn => { try { await fn(); } catch (error) { h.notices.push(error.message); } };
   h.context.respond = () => new Promise(done => { release = done; });
   const first = h.run('reconcileAndRefresh()'), second = h.run('reconcileAndRefresh()');
-  assert.equal(h.calls.length, 1); assert.equal(h.calls[0].path, 'reconcile'); release({}); await Promise.all([first, second]);
-  assert.equal(h.calls.at(-1).path, 'refresh');
+  await Promise.all([first, second]);
+  assert.deepEqual(h.calls.map(call => call.path), ['reconcile', 'refresh', 'refresh']);
+  assert.equal(h.calls[0].data.force, true);
+  const pending = h.run('reconcilePending'); release({}); await pending;
+  assert.equal(h.run('reconcilePending'), null);
   h.context.respond = () => { throw new Error('offline'); };
-  await assert.rejects(h.run('reconcileAndRefresh()'), /offline/); assert.equal(h.calls.at(-1).path, 'refresh');
-  assert.match(source, /await attempt\(reconcileAndRefresh\)/);
-  assert.match(source, /addEventListener\('focus'.*attempt\(reconcileAndRefresh\)/);
+  await h.run('reconcileAndRefresh()'); await h.run('reconcilePending');
+  assert.equal(h.calls.at(-1).path, 'refresh'); assert.deepEqual(h.notices, ['offline']);
+  assert.equal(h.run('reconcilePending'), null);
+  h.context.respond = () => ({}); await h.run('reconcileAndRefresh()');
+  assert.equal(h.calls.filter(call => call.path === 'reconcile').length, 3);
+});
+
+test('page load, focus and visible tabs reconcile without force', async () => {
+  const h = harness(), handlers = {};
+  h.context.document = { hidden: false, addEventListener: (name, fn) => { handlers[name] = fn; } };
+  h.context.window = { addEventListener: (name, fn) => { handlers[name] = fn; } };
+  h.context.openStream = () => {};
+  h.run('let stream = null;');
+  h.run(source.slice(source.indexOf("document.addEventListener('visibilitychange'"), source.indexOf('\nopenStream();', source.indexOf("document.addEventListener('visibilitychange'"))));
+  const startup = source.match(/^await attempt\(.*reconcileAndRefresh.*\);$/m)[0];
+  await h.run(`(async () => { ${startup} })()`); await h.run('reconcilePending');
+  handlers.focus(); await h.run('reconcilePending');
+  handlers.visibilitychange(); await h.run('reconcilePending');
+  const calls = h.calls.filter(call => call.path === 'reconcile');
+  assert.equal(calls.length, 3); assert.ok(calls.every(call => call.data.force === false));
+  h.context.document.hidden = true; handlers.focus(); handlers.visibilitychange();
+  assert.equal(h.calls.filter(call => call.path === 'reconcile').length, 3);
+});
+
+test('reconcile endpoint honors explicit false and defaults manual requests to force', async () => {
+  const server = fs.readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+  const route = server.match(/^    if \(req.method === 'POST' && url.pathname === '\/api\/reconcile'\).*$/m)[0];
+  for (const input of [{ force: false }, { force: true }, {}]) {
+    let options;
+    const context = vm.createContext({ req: { method: 'POST' }, url: { pathname: '/api/reconcile' }, res: {}, body: async () => input,
+      team: { reconcile: async value => { options = value; return {}; } }, send() {} });
+    await vm.runInContext(`(async () => { ${route} })()`, context);
+    assert.equal(options.force, input.force !== false);
+  }
 });
 
 test('409 deletion details offer archive retry; cancellation and dirty worktrees never retry', async () => {
