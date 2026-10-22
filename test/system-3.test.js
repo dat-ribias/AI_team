@@ -16,6 +16,9 @@ import { msg } from '../src/i18n.js';
 import { validatePreview, previewEnv, startServer, waitReady, freePort, stopTree, findChrome, screenshot } from '../src/preview.js';
 
 import { fixture, settle, approvalAgent, branchReady, branchCommit, branchTip, processAlive, previewFixture, parallelTeam, overlaps } from './system-helpers.js';
+import './member-protection.test.js';
+import './member-protection-ui.test.js';
+import './providers.test.js';
 
 test('plan approval: assignment updates the gated hash, survives stale saves and uses the pinned member', async t => {
   const f = await fixture(), calls = [], team = new Team(f.config, f.data, { runAgent: async (...args) => { calls.push([args[1].stage, args[0].id]); return approvalAgent(...args); } }); t.after(() => team.close());

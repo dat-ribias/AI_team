@@ -74,7 +74,7 @@ for (const lang of ['vi', 'en', 'ja']) {
     const agents = [member('codex', 'codex', { codexWindowsSandbox: 'none' }), member('agy', 'antigravity', { agyAutoApprove: true })];
     const security = securityHarness(agents, t), before = JSON.stringify(security.state);
     const html = security.render();
-    const replaced = ['ui.sec.intro', 'ui.sec.how.read', 'ui.sec.how.outside', 'ui.sec.how.network', 'ui.sec.how.push', 'ui.sec.networkOff', 'ui.sec.rolesIntro', 'ui.sec.locked'];
+    const replaced = ['ui.sec.intro', 'ui.sec.how.read', 'ui.sec.how.outside', 'ui.sec.how.network', 'ui.sec.how.push', 'ui.sec.networkOff', 'ui.sec.rolesIntro', 'ui.sec.locked', 'ui.sec.data4', 'ui.sec.advice3'];
     for (const key of replaced) {
       const corrected = key + 'Expected';
       assert.ok(used.includes(corrected), corrected);
