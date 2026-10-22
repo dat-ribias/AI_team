@@ -31,7 +31,8 @@ test('jobLane puts every status in exactly one column with the reason and the ow
     [{ status: 'ready', mergeQueue: { position: 2 } }, 'needs', undefined],
     [{ status: 'running', round: 0, running: [{ agent: 'a', stage: 'implement' }] }, 'active', undefined],
     [{ status: 'waiting', peerWait: { to: 'a' } }, 'active', undefined],
-    [{ status: 'running', round: 2 }, 'returned', undefined],
+    [{ status: 'running', round: 2 }, 'active', undefined], // đang chạy vòng sửa: vẫn là Đang làm (khớp thanh bên), lý do ghi vòng sửa
+    [{ status: 'paused', round: 1 }, 'returned', undefined],
     [{ status: 'queued', round: 1 }, 'returned', undefined],
     [{ status: 'queued' }, 'waiting', undefined],
     [{ status: 'paused' }, 'waiting', undefined],
@@ -39,6 +40,7 @@ test('jobLane puts every status in exactly one column with the reason and the ow
     [{ status: 'merged' }, 'done', undefined], [{ status: 'done', kind: 'research' }, 'done', undefined], [{ status: 'cancelled' }, 'done', undefined],
   ];
   for (const [j, l, action] of cases) { const r = lane(job(j)); assert.equal(r.lane, l, JSON.stringify(j)); assert.equal(r.action ?? undefined, action, JSON.stringify(j)); assert(r.reason); }
+  assert.match(lane(job({ status: 'running', round: 2 })).reason, /ui\.board\.reason\.round/);
 });
 
 test('board renders the five columns with counts, collapses Done and supports the needs-me filter', () => {
