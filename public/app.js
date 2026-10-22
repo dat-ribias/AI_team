@@ -158,10 +158,11 @@ function drawDecisions() {
   }));
   if (fresh.length) notice(t('ui.decisions.new', { n: fresh.length }));
 }
-async function reconcileAndRefresh() {
-  if (reconcilePending) return reconcilePending;
-  reconcilePending = (async () => { try { await api('reconcile', {}); } finally { await refresh(); } })();
-  try { await reconcilePending; } finally { reconcilePending = null; }
+async function reconcileAndRefresh(force = true) {
+  if (!reconcilePending) reconcilePending = attempt(async () => {
+    try { await api('reconcile', { force }); } finally { reconcilePending = null; }
+  });
+  await refresh();
 }
 async function deleteJob(id) {
   try { await api(`jobs/${id}/control`, { action: 'delete' }); return true; }
@@ -2321,7 +2322,7 @@ $('prompt-close').onclick = () => $('prompt-dialog').close();
 $('prompt-dialog').addEventListener('close', () => { promptRequest++; });
 
 await loadLanguage(store.get('lang') || 'vi');
-await attempt(reconcileAndRefresh);
+await attempt(() => reconcileAndRefresh(false));
 const query = new URLSearchParams(location.search);
 if (query.has('members')) { view(true); recheckMembers(); }
 if (query.has('add') && state && !state.demo) { providerHint(); $('member-dialog').showModal(); }
@@ -2334,9 +2335,9 @@ function openStream() {
   stream = new EventSource('/api/stream'); stream.onmessage = () => attempt(refresh); stream.onerror = () => { $('connection').textContent = t('ui.nav.reconnecting'); };
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stream?.close(); stream = null; } else { openStream(); attempt(reconcileAndRefresh); }
+  if (document.hidden) { stream?.close(); stream = null; } else { openStream(); attempt(() => reconcileAndRefresh(false)); }
 });
-window.addEventListener('focus', () => { if (!document.hidden) attempt(reconcileAndRefresh); });
+window.addEventListener('focus', () => { if (!document.hidden) attempt(() => reconcileAndRefresh(false)); });
 openStream();
 setInterval(() => { if (!document.hidden) attempt(refresh); }, 10000);
 setInterval(updateActivities, 30000);
