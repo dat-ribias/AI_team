@@ -166,7 +166,7 @@ test('owner summary writes use revisions atomically and remain isolated by proje
   const contextJob = { id: 'context', project: 'test', goal: 'Read context', sessionId: first.id, worktree: f.path };
   team.db.prepare('INSERT INTO jobs(id,body) VALUES(?,?)').run(contextJob.id, JSON.stringify(contextJob));
   const context = await team.memoryContext(contextJob, false, null, f.path);
-  assert.equal(context.session, 'Context notes'); assert.equal(context.sessionRevision, 3);
+  assert.equal(context.session, 'Context notes'); assert.equal(context.summaryRevision, 3);
   await f.restart(); await f.restart();
   assert.equal(f.team.memory('test', first.id).summaryRevision, 3);
   assert.equal(f.team.memory('linked', linked.id).summary, 'Linked notes');
@@ -178,16 +178,16 @@ test('final summary snapshots prevent stale overwrite while preserving facts, re
     worktree: f.path, base: 'HEAD', revision: 'HEAD', tasks: [] });
 
   team.editMemory({ project: 'test', session: session.id, summary: 'Before final', summaryRevision: 0 });
-  await team.remember(base('clear'), { session: '' }, { project: 'test', session: session.id, revision: 1 });
+  await team.remember(base('clear'), { session: '' }, { project: 'test', session: session.id, summaryRevision: 1 });
   assert.equal(team.memory('test', session.id).summary, ''); assert.equal(team.memory('test', session.id).summaryRevision, 2);
-  await team.remember(base('fresh'), { session: 'Fresh final' }, { project: 'test', session: session.id, revision: 2 });
+  await team.remember(base('fresh'), { session: 'Fresh final' }, { project: 'test', session: session.id, summaryRevision: 2 });
   assert.equal(team.memory('test', session.id).summary, 'Fresh final'); assert.equal(team.memory('test', session.id).summaryRevision, 3);
 
   const ownerFact = team.memoryStore.add({ project: 'test', text: 'Fact to retract' });
   team.editMemory({ project: 'test', session: session.id, summary: 'Owner edit', summaryRevision: 3 });
   const stale = base('stale');
   await team.remember(stale, { add: ['Stale final fact'], remove: [`M${ownerFact}`], session: 'Authorization: Bearer private-value' },
-    { project: 'test', session: session.id, revision: 3 });
+    { project: 'test', session: session.id, summaryRevision: 3 });
   let memory = team.memory('test', session.id, true);
   assert.equal(memory.summary, 'Owner edit'); assert.equal(memory.summaryRevision, 4);
   assert(memory.facts.some(row => row.text === 'Stale final fact' && row.status === 'active'));
@@ -208,4 +208,14 @@ test('final summary snapshots prevent stale overwrite while preserving facts, re
   const legacyEvent = team.events(legacy.id).find(event => event.type === 'SESSION_SUMMARY_CONFLICT');
   assert.equal(legacyEvent.details.source, `job:${legacy.id}/final`);
   assert.equal(legacyEvent.details.proposedSummary, 'Legacy proposal');
+
+  const legacySnapshot = base('legacy-snapshot');
+  legacySnapshot.reports = [{ stage: 'final' }];
+  await team.remember(legacySnapshot, { session: 'Legacy snapshot proposal' }, { project: 'test', session: session.id, revision: 4 });
+  assert.equal(team.memory('test', session.id).summary, 'Owner edit');
+  assert.equal(team.memory('test', session.id).summaryRevision, 4);
+  const legacySnapshotEvent = team.events(legacySnapshot.id).find(event => event.type === 'SESSION_SUMMARY_CONFLICT');
+  assert.equal(legacySnapshotEvent.details.expectedRevision, null);
+  assert.equal(legacySnapshotEvent.details.proposedSummary, 'Legacy snapshot proposal');
+  assert.equal(legacySnapshot.reports[0].warnings[0].code, 'SESSION_SUMMARY_CONFLICT');
 });

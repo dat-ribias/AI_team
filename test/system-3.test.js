@@ -78,7 +78,7 @@ test('session summary: two finals issued from one snapshot cannot overwrite each
   const second = await team.create({ project: 'test', goal: 'Second concurrent final', mode: 'full', sessionId: session.id });
   await barrier;
   assert.equal(finals.length, 2);
-  for (const final of finals) assert.match(final.prompt, /"sessionRevision":\s*0/);
+  for (const final of finals) assert.match(final.prompt, /"summaryRevision":\s*0/);
 
   const winner = finals[0], loser = finals[1];
   winner.release();
@@ -97,7 +97,7 @@ test('session summary: two finals issued from one snapshot cannot overwrite each
   for (const final of finals) {
     const ready = team.get(final.id), report = ready.reports.findLast(row => row.stage === 'final');
     assert.equal(ready.status, 'ready'); assert.equal(ready.revision, final.revision);
-    assert.deepEqual(report.sessionSummarySnapshot, { project: 'test', session: session.id, revision: 0 });
+    assert.deepEqual(report.sessionSummarySnapshot, { project: 'test', session: session.id, summaryRevision: 0 });
   }
   const conflicts = team.events(loser.id).filter(event => event.type === 'SESSION_SUMMARY_CONFLICT');
   assert.equal(conflicts.length, 1);
@@ -121,7 +121,7 @@ test('session summary: an owner edit during final wins without dropping final kn
   const oldFact = team.memoryStore.add({ project: 'test', text: 'Retracted by stale final' });
   const job = await team.create({ project: 'test', goal: 'Owner edits during final', mode: 'full', sessionId: session.id });
   const prompt = await finalEntered;
-  assert.match(prompt, /"sessionRevision":\s*0/);
+  assert.match(prompt, /"summaryRevision":\s*0/);
   const owner = team.editMemory({ project: 'test', session: session.id, summary: 'Owner summary', summaryRevision: 0 });
   assert.equal(owner.summaryRevision, 1);
   release(); const ready = await settle(team, job.id, 'ready', 60000);
@@ -135,13 +135,13 @@ test('session summary: an owner edit during final wins without dropping final kn
   assert.equal(event.details.source, `job:${job.id}/final`);
   assert.equal(event.details.proposedSummary, 'Authorization: [REDACTED]');
   const report = ready.reports.findLast(row => row.stage === 'final'), serialized = JSON.stringify(report);
-  assert.deepEqual(report.sessionSummarySnapshot, { project: 'test', session: session.id, revision: 0 });
+  assert.deepEqual(report.sessionSummarySnapshot, { project: 'test', session: session.id, summaryRevision: 0 });
   assert(serialized.includes(`job:${job.id}/final`)); assert(serialized.includes('Authorization: [REDACTED]'));
   assert(!serialized.includes('private-value'));
 
   await team.close(); team = new Team(f.config, f.data); team.closed = true;
   const persisted = team.get(job.id).reports.findLast(row => row.stage === 'final');
-  assert.deepEqual(persisted.sessionSummarySnapshot, { project: 'test', session: session.id, revision: 0 });
+  assert.deepEqual(persisted.sessionSummarySnapshot, { project: 'test', session: session.id, summaryRevision: 0 });
   assert.equal(team.memory('test', session.id).summary, 'Owner summary');
 });
 
